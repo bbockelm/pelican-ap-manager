@@ -28,7 +28,11 @@ func TestSummarization(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(testDir)
+	defer func() {
+		if err := os.RemoveAll(testDir); err != nil {
+			t.Logf("failed to clean up temp dir: %v", err)
+		}
+	}()
 
 	spoolDir := filepath.Join(testDir, "spool")
 	if err := os.MkdirAll(spoolDir, 0755); err != nil {
@@ -77,18 +81,18 @@ func TestSummarization(t *testing.T) {
 		condorClient,
 		st,
 		statePath,
-		30*time.Second,   // poll interval (unused in oneshot)
-		1*time.Minute,    // advertise interval (unused in oneshot)
-		24*time.Hour,     // epoch lookback
-		statsWindow,      // stats window
-		tracker,          // tracker
-		nil,              // job mirror (not needed for this test)
-		"",               // job mirror path
-		nil,              // director client (not needed)
-		logger,           // logger
-		adsOutputPath,    // dry-run ads output
-		"test-schedd",    // schedd name
-		true,             // oneshot mode
+		30*time.Second, // poll interval (unused in oneshot)
+		1*time.Minute,  // advertise interval (unused in oneshot)
+		24*time.Hour,   // epoch lookback
+		statsWindow,    // stats window
+		tracker,        // tracker
+		nil,            // job mirror (not needed for this test)
+		"",             // job mirror path
+		nil,            // director client (not needed)
+		logger,         // logger
+		adsOutputPath,  // dry-run ads output
+		"test-schedd",  // schedd name
+		true,           // oneshot mode
 	)
 
 	// Run single iteration
