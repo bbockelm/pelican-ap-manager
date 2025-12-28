@@ -35,3 +35,26 @@ Prefer setting macros rather than ad-hoc environment variables:
 - The daemon writes state to the configured path; ensure the parent directory is writable by `condor_master`.
 - When built with the `condor` tag, `condor_master` should launch `pelican_man` so it can advertise to the collector.
 - Future phases will add machine-learning-derived rate-limiter hints to the advertised ClassAds.
+
+## Development
+
+### Updating test data
+Test data is collected from ap40.uw.osg-htc.org and sanitized to protect user privacy. The sanitized data is excluded from git (see `.gitignore`) and must be regenerated:
+
+```bash
+# Collect fresh sanitized data from ap40.uw.osg-htc.org
+make fetch-ap40-sanitized
+
+# Regenerate golden reference files for tests
+make regenerate-golden
+
+# Or do both in one step
+make update-testdata
+```
+
+The redaction process:
+- Only tracks actual usernames from `Owner`, `AcctGroupUser`, and `OsUser` fields
+- Preserves project names (e.g., `Georgetown_Joshi`) in `AcctGroup` and `ProjectName` fields
+- Replaces usernames in `AccountingGroup` (e.g., `group_opportunistic.Project.user1`)
+- Redacts paths while preserving already-redacted usernames (e.g., `/home/user1/...`)
+- Maintains a stable `redaction_dict.json` for consistent anonymization across runs

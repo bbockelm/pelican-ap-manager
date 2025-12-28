@@ -16,6 +16,7 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	condorconfig "github.com/bbockelm/golang-htcondor/config"
+	"github.com/bbockelm/pelican-ap-manager/tools/internal/redact"
 )
 
 // collect job epochs from a schedd and write a sample set for debugging/tests.
@@ -28,6 +29,9 @@ func main() {
 	output := flag.String("output", "internal/condor/testdata/sample_job_epochs_bulk.json", "output path for samples")
 	siteAttr := flag.String("site_attr", defs.siteAttr, "site attribute name (PELICAN_MANAGER_SITE_ATTRIBUTE)")
 	filter := flag.String("filter", "", "comma-separated substrings to require in job ads (case-insensitive)")
+	sanitize := flag.Bool("sanitize", false, "sanitize sensitive fields for sharing")
+	redactDict := flag.String("redact_dict", "", "path to read/write redaction dictionary for stable anonymization")
+	rawOutput := flag.String("raw_output", "", "optional path to write unsanitized samples when -sanitize is set")
 	flag.Parse()
 
 	logger := log.New(os.Stdout, "collect_job_epochs ", log.LstdFlags|log.Lmsgprefix)
@@ -83,6 +87,35 @@ func main() {
 	}
 	if count > 0 && count%1000 != 0 {
 		logger.Printf("job history progress: %d ads", count)
+	}
+
+	if *sanitize {
+		redactor := redact.NewRedactor()
+		if *redactDict != "" {
+			if err := redactor.Load(*redactDict); err != nil {
+				logger.Fatalf("load redaction dictionary: %v", err)
+			}
+		}
+
+		sanitized := redactor.SanitizeRecords(samples)
+		if *rawOutput != "" {
+			if err := writeSamples(*rawOutput, samples); err != nil {
+				logger.Fatalf("write raw job epoch samples: %v", err)
+			}
+			logger.Printf("wrote %d raw job epoch samples to %s", len(samples), *rawOutput)
+		}
+
+		if err := writeSamples(*output, sanitized); err != nil {
+			logger.Fatalf("write sanitized job epoch samples: %v", err)
+		}
+		if *redactDict != "" {
+			if err := redactor.Save(*redactDict); err != nil {
+				logger.Fatalf("write redaction dictionary: %v", err)
+			}
+			logger.Printf("updated redaction dictionary at %s", *redactDict)
+		}
+		logger.Printf("wrote %d sanitized job epoch samples to %s", len(sanitized), *output)
+		return
 	}
 
 	if err := writeSamples(*output, samples); err != nil {

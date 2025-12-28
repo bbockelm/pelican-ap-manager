@@ -3,7 +3,7 @@ module github.com/bbockelm/pelican-ap-manager
 go 1.24.0
 
 require (
-	github.com/PelicanPlatform/classad v0.0.4
+	github.com/PelicanPlatform/classad v0.0.6
 	github.com/bbockelm/golang-htcondor v0.0.5
 	github.com/jellydator/ttlcache/v3 v3.3.0
 )

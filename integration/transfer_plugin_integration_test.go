@@ -25,6 +25,7 @@ func TestFakeTransferPluginIntegration(t *testing.T) {
 
 	keepTemp := os.Getenv("KEEP_INTEGRATION_TEMP") == "1"
 	rootDir := t.TempDir()
+	projectRoot := moduleRoot(t)
 	if keepTemp {
 		// When debugging test artifacts, keep the temp directory instead of letting Go clean it up.
 		var err error
@@ -56,6 +57,8 @@ func TestFakeTransferPluginIntegration(t *testing.T) {
 	if err := os.Setenv("CONDOR_CONFIG", configPath); err != nil {
 		t.Fatalf("set CONDOR_CONFIG: %v", err)
 	}
+
+	seedEpochHistory(t, projectRoot, filepath.Join(rootDir, "spool"))
 
 	pluginPath, err := buildFakeTransferPlugin(t, rootDir)
 	if err != nil {
@@ -281,9 +284,9 @@ func submitPluginJob(ctx context.Context, t *testing.T, workDir, scheddAddr, nam
 	editCtx, editCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer editCancel()
 	if err := schedd.EditJob(editCtx, int(clusterID), 0, map[string]string{
-		"FakeInputResultFile":  fmt.Sprintf("\"%s\"", inputResult),
-		"FakeInputResultStatus": fmt.Sprintf("%d", inputStatus),
-		"FakeOutputResultFile": fmt.Sprintf("\"%s\"", outputResult),
+		"FakeInputResultFile":    fmt.Sprintf("\"%s\"", inputResult),
+		"FakeInputResultStatus":  fmt.Sprintf("%d", inputStatus),
+		"FakeOutputResultFile":   fmt.Sprintf("\"%s\"", outputResult),
 		"FakeOutputResultStatus": fmt.Sprintf("%d", outputStatus),
 	}, nil); err != nil {
 		t.Fatalf("attach fake plugin attrs to job %s: %v", name, err)

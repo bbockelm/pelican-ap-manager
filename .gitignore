@@ -1,1 +1,6 @@
 pelican_man
+data
+
+# Redacted/sanitized test data - regenerate with make fetch-ap40-sanitized
+internal/condor/testdata/*.raw.json
+internal/condor/testdata/redaction_dict.json

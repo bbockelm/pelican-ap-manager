@@ -16,6 +16,7 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	condorconfig "github.com/bbockelm/golang-htcondor/config"
+	"github.com/bbockelm/pelican-ap-manager/tools/internal/redact"
 )
 
 // collect transfers from a specific collector/schedd and write a small sample set.
@@ -30,6 +31,10 @@ func main() {
 	jobOutput := flag.String("job_output", "internal/condor/testdata/sample_job_epochs.json", "output path for job epoch samples")
 	siteAttr := flag.String("site_attr", defs.siteAttr, "site attribute name (PELICAN_MANAGER_SITE_ATTRIBUTE)")
 	filter := flag.String("filter", "", "comma-separated substrings to require in transfer fields (case-insensitive)")
+	sanitize := flag.Bool("sanitize", false, "sanitize sensitive fields for sharing")
+	redactDict := flag.String("redact_dict", "", "path to read/write redaction dictionary for stable anonymization")
+	rawOutput := flag.String("raw_output", "", "optional path to write unsanitized transfer samples when -sanitize is set")
+	rawJobOutput := flag.String("raw_job_output", "", "optional path to write unsanitized job epoch samples when -sanitize is set")
 	flag.Parse()
 
 	logger := log.New(os.Stdout, "collect_transfers ", log.LstdFlags|log.Lmsgprefix)
@@ -86,15 +91,58 @@ func main() {
 		logger.Printf("transfer history progress: %d ads", count)
 	}
 
+	jobSamples, err := collectJobEpochs(ctx, schedd, filters, *jobLimit, *siteAttr, *jobOutput)
+	if err != nil {
+		logger.Fatalf("query job epochs: %v", err)
+	}
+
+	if *sanitize {
+		redactor := redact.NewRedactor()
+		if *redactDict != "" {
+			if err := redactor.Load(*redactDict); err != nil {
+				logger.Fatalf("load redaction dictionary: %v", err)
+			}
+		}
+
+		sanitizedTransfers := redactor.SanitizeRecords(transferSamples)
+		sanitizedJobs := redactor.SanitizeRecords(jobSamples)
+
+		if *rawOutput != "" {
+			if err := writeSamples(*rawOutput, transferSamples); err != nil {
+				logger.Fatalf("write raw transfer samples: %v", err)
+			}
+			logger.Printf("wrote %d raw transfer samples to %s", len(transferSamples), *rawOutput)
+		}
+		if *rawJobOutput != "" {
+			if err := writeSamples(*rawJobOutput, jobSamples); err != nil {
+				logger.Fatalf("write raw job epoch samples: %v", err)
+			}
+			logger.Printf("wrote %d raw job epoch samples to %s", len(jobSamples), *rawJobOutput)
+		}
+
+		if err := writeSamples(*output, sanitizedTransfers); err != nil {
+			logger.Fatalf("write sanitized transfer samples: %v", err)
+		}
+		if err := writeSamples(*jobOutput, sanitizedJobs); err != nil {
+			logger.Fatalf("write sanitized job epoch samples: %v", err)
+		}
+		if *redactDict != "" {
+			if err := redactor.Save(*redactDict); err != nil {
+				logger.Fatalf("write redaction dictionary: %v", err)
+			}
+			logger.Printf("updated redaction dictionary at %s", *redactDict)
+		}
+
+		logger.Printf("wrote %d sanitized transfer samples to %s", len(sanitizedTransfers), *output)
+		logger.Printf("wrote %d sanitized job epoch samples to %s", len(sanitizedJobs), *jobOutput)
+		return
+	}
+
 	if err := writeSamples(*output, transferSamples); err != nil {
 		logger.Fatalf("write transfer samples: %v", err)
 	}
 	logger.Printf("wrote %d transfer samples to %s", len(transferSamples), *output)
 
-	jobSamples, err := collectJobEpochs(ctx, schedd, filters, *jobLimit, *siteAttr, *jobOutput)
-	if err != nil {
-		logger.Fatalf("query job epochs: %v", err)
-	}
 	if err := writeSamples(*jobOutput, jobSamples); err != nil {
 		logger.Fatalf("write job epoch samples: %v", err)
 	}

@@ -25,6 +25,7 @@ func TestPelicanIntegration(t *testing.T) {
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found; skipping integration test")
 	}
+	projectRoot := moduleRoot(t)
 	rootDir := t.TempDir()
 	socketDir, err := os.MkdirTemp("/tmp", "pelsp_")
 	if err != nil {
@@ -40,6 +41,8 @@ func TestPelicanIntegration(t *testing.T) {
 	}
 	t.Setenv("_CONDOR_CONFIG", configPath)
 	t.Setenv("CONDOR_CONFIG", configPath)
+
+	seedEpochHistory(t, projectRoot, filepath.Join(rootDir, "spool"))
 
 	// Sanity-check that the config surfaces key macros that pelican_man depends on.
 	if cfg, err := condorconfig.New(); err == nil {
@@ -181,7 +184,6 @@ SCHEDD_ADDRESS_FILE = $(LOG)/.schedd_address
 ENABLE_FILE_TRANSFER = TRUE
 SHOULD_TRANSFER_FILES = YES
 WHEN_TO_TRANSFER_OUTPUT = ON_EXIT
-STARTER_JOB_ATTRS = $(STARTER_JOB_ATTRS) FakeInputResultStatus FakeOutputResultStatus FakeInputResultFile FakeOutputResultFile
 JOB_QUEUE_LOG = $(SPOOL)/job_queue.log
 START = TRUE
 SUSPEND = FALSE
@@ -207,6 +209,9 @@ HISTORY = $(SPOOL)/history
 MAX_HISTORY_LOG = 10000000
 MAX_HISTORY_ROTATIONS = 1
 ENABLE_HISTORY_ROTATION = TRUE
+EPOCH_HISTORY = $(SPOOL)/epoch_history
+MAX_EPOCH_HISTORY = 10000000
+MAX_EPOCH_HISTORY_ROTATIONS = 1
 TRANSFER_HISTORY = $(LOG)/transfer_history
 MAX_TRANSFER_HISTORY = 10000000
 MAX_TRANSFER_HISTORY_ROTATIONS = 1
