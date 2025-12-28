@@ -1,4 +1,4 @@
-pelican_man
+^pelican_man
 data
 
 # Redacted/sanitized test data - regenerate with make fetch-ap40-sanitized
