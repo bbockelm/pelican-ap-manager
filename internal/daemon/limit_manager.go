@@ -35,10 +35,10 @@ type limitManager struct {
 }
 
 type limitConfig struct {
-	interval              time.Duration
-	expirationInactivity  time.Duration
-	ewmaAlpha             float64
-	enabled               bool
+	interval             time.Duration
+	expirationInactivity time.Duration
+	ewmaAlpha            float64
+	enabled              bool
 }
 
 type limitState struct {
@@ -64,16 +64,52 @@ func newLimitManager(schedd *htcondor.Schedd, daemonName string, logger *log.Log
 			enabled:              true,
 		},
 	}
-	
-	// Test if schedd supports rate limits by attempting a query
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+
+	// Test if schedd supports rate limits and re-adopt existing limits
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err := schedd.QueryStartupLimits(ctx, "", "")
+
+	// Query for limits with our daemon's tag to re-adopt them
+	limits, err := schedd.QueryStartupLimits(ctx, "", m.daemonName)
 	if err != nil {
 		logger.Printf("schedd does not support startup limits (disabling limit manager): %v", err)
 		m.cfg.enabled = false
+		return m
 	}
-	
+
+	// Re-adopt existing limits
+	for _, limitInfo := range limits {
+		source, destination, ok := parseLimitExpression(limitInfo.Expression)
+		if !ok {
+			logger.Printf("skipping limit %s: could not parse expression %q", limitInfo.UUID, limitInfo.Expression)
+			continue
+		}
+
+		pair := control.PairKey{Source: source, Destination: destination}
+		pairTag := pairKey(pair)
+
+		lastHit := time.Now()
+		if limitInfo.LastIgnored > 0 {
+			lastHit = time.Unix(limitInfo.LastIgnored, 0)
+		}
+
+		m.activeLimits[pairTag] = &limitState{
+			uuid:          limitInfo.UUID,
+			pairKey:       pair,
+			lastHit:       lastHit,
+			lastUpdated:   time.Now(),
+			rateCount:     limitInfo.RateCount,
+			capacityGBMin: 0, // Will be recomputed on next update
+		}
+
+		logger.Printf("re-adopted limit %s for %s->%s: %d jobs/%ds",
+			limitInfo.UUID, source, destination, limitInfo.RateCount, limitInfo.RateWindow)
+	}
+
+	if len(m.activeLimits) > 0 {
+		logger.Printf("re-adopted %d existing limits from schedd", len(m.activeLimits))
+	}
+
 	return m
 }
 
@@ -90,11 +126,11 @@ func (m *limitManager) updateLimits(ctx context.Context, pairs map[control.PairK
 	pairsNeedingLimits := make(map[control.PairKey]control.PairState)
 	for pair, state := range pairs {
 		metrics := pairMetrics(controlCfg, nil, tracker, pair.Source, pair.Destination)
-		
+
 		// Check if error or cost metrics are in RED band
 		errorBand := control.ClassifyBand(metrics.ErrorRate, controlCfg.ErrorGreenThreshold, controlCfg.ErrorYellowThreshold)
 		costBand := control.ClassifyBand(metrics.CostPct/100.0, controlCfg.CostGreenThresholdPercent/100.0, controlCfg.CostYellowThresholdPercent/100.0)
-		
+
 		if errorBand == control.BandRed || costBand == control.BandRed {
 			pairsNeedingLimits[pair] = state
 		}
@@ -102,11 +138,11 @@ func (m *limitManager) updateLimits(ctx context.Context, pairs map[control.PairK
 
 	// Update or create limits for pairs in RED state
 	for pair, state := range pairsNeedingLimits {
-		tag := m.limitTag(pair)
-		existing, exists := m.activeLimits[tag]
-		
+		pairTag := pairKey(pair)
+		existing, exists := m.activeLimits[pairTag]
+
 		rateCount := m.calculateRateCount(state, tracker, pair, controlCfg)
-		
+
 		if exists {
 			// Update existing limit if rate changed significantly
 			if m.shouldUpdateLimit(existing, rateCount, state.CapacityGBPerMin) {
@@ -157,7 +193,7 @@ func (m *limitManager) calculateRateCount(state control.PairState, tracker *stat
 			const avgJobDurationMin = 5.0
 			bytesPerJob := recentRate * (avgJobDurationMin * 60)
 			gbPerJob := bytesPerJob / (1024 * 1024 * 1024)
-			
+
 			if gbPerJob > 0 {
 				// Apply EWMA smoothing with previous estimate
 				if jobCostGB > 0 {
@@ -175,7 +211,7 @@ func (m *limitManager) calculateRateCount(state control.PairState, tracker *stat
 
 	// Calculate jobs per interval
 	jobsPerInterval := capacityGBPerInterval / jobCostGB
-	
+
 	// Apply floor
 	minJobsPerInterval := cfg.MinJobStartPerMinute * intervalMin
 	if jobsPerInterval < minJobsPerInterval {
@@ -190,22 +226,22 @@ func (m *limitManager) shouldUpdateLimit(existing *limitState, newRateCount int,
 	// Update if rate count differs by more than 20% or capacity changed significantly
 	rateDiff := math.Abs(float64(newRateCount-existing.rateCount)) / float64(existing.rateCount)
 	capacityDiff := math.Abs(newCapacityGBMin-existing.capacityGBMin) / existing.capacityGBMin
-	
+
 	return rateDiff > 0.2 || capacityDiff > 0.2
 }
 
 // createLimit creates a new schedd startup limit
 func (m *limitManager) createLimit(ctx context.Context, pair control.PairKey, rateCount int, capacityGBMin float64) error {
-	tag := m.limitTag(pair)
+	tag := m.limitTag()
 	name := fmt.Sprintf("pelican_%s_to_%s", sanitizeLimitLabel(pair.Source), sanitizeLimitLabel(pair.Destination))
-	
+
 	// Build ClassAd expression to match jobs with this source->destination pair
 	// This is a simplified expression; production would use actual job attributes
 	expression := fmt.Sprintf("(PelicanSource == %q && PelicanDestination == %q)", pair.Source, pair.Destination)
-	
+
 	// Set expiration to 2x the inactivity timeout to allow for some delay in cleanup
 	expirationTime := time.Now().Add(m.cfg.expirationInactivity * 2).Unix()
-	
+
 	req := &htcondor.StartupLimitRequest{
 		Tag:        tag,
 		Name:       name,
@@ -214,13 +250,14 @@ func (m *limitManager) createLimit(ctx context.Context, pair control.PairKey, ra
 		RateWindow: int(m.cfg.interval.Seconds()),
 		Expiration: int(expirationTime),
 	}
-	
+
 	uuid, err := m.schedd.CreateStartupLimit(ctx, req)
 	if err != nil {
 		return fmt.Errorf("create startup limit: %w", err)
 	}
-	
-	m.activeLimits[tag] = &limitState{
+
+	pairTag := pairKey(pair)
+	m.activeLimits[pairTag] = &limitState{
 		uuid:          uuid,
 		pairKey:       pair,
 		lastHit:       time.Now(),
@@ -228,10 +265,10 @@ func (m *limitManager) createLimit(ctx context.Context, pair control.PairKey, ra
 		rateCount:     rateCount,
 		capacityGBMin: capacityGBMin,
 	}
-	
+
 	m.logger.Printf("created limit %s for %s->%s: %d jobs/%ds (%.1f GB/min capacity)",
 		uuid, pair.Source, pair.Destination, rateCount, int(m.cfg.interval.Seconds()), capacityGBMin)
-	
+
 	return nil
 }
 
@@ -239,39 +276,39 @@ func (m *limitManager) createLimit(ctx context.Context, pair control.PairKey, ra
 func (m *limitManager) updateLimit(ctx context.Context, existing *limitState, pair control.PairKey, rateCount int, capacityGBMin float64) error {
 	name := fmt.Sprintf("pelican_%s_to_%s", sanitizeLimitLabel(pair.Source), sanitizeLimitLabel(pair.Destination))
 	expression := fmt.Sprintf("(PelicanSource == %q && PelicanDestination == %q)", pair.Source, pair.Destination)
-	
+
 	// Refresh expiration time on every update
 	expirationTime := time.Now().Add(m.cfg.expirationInactivity * 2).Unix()
-	
+
 	req := &htcondor.StartupLimitRequest{
 		UUID:       existing.uuid,
-		Tag:        m.limitTag(pair),
+		Tag:        m.limitTag(),
 		Name:       name,
 		Expression: expression,
 		RateCount:  rateCount,
 		RateWindow: int(m.cfg.interval.Seconds()),
 		Expiration: int(expirationTime),
 	}
-	
+
 	uuid, err := m.schedd.CreateStartupLimit(ctx, req)
 	if err != nil {
 		return fmt.Errorf("update startup limit: %w", err)
 	}
-	
+
 	existing.uuid = uuid
 	existing.rateCount = rateCount
 	existing.capacityGBMin = capacityGBMin
 	existing.lastUpdated = time.Now()
-	
+
 	m.logger.Printf("updated limit %s for %s->%s: %d jobs/%ds (%.1f GB/min capacity)",
 		uuid, pair.Source, pair.Destination, rateCount, int(m.cfg.interval.Seconds()), capacityGBMin)
-	
+
 	return nil
 }
 
 // removeStale removes limits that haven't been hit recently and are no longer in RED state
 func (m *limitManager) removeStale(ctx context.Context, now time.Time, activeRedPairs map[control.PairKey]control.PairState) error {
-	for tag, limit := range m.activeLimits {
+	for pairTag, limit := range m.activeLimits {
 		// Keep limit if still in RED state
 		if _, inRed := activeRedPairs[limit.pairKey]; inRed {
 			continue
@@ -282,18 +319,16 @@ func (m *limitManager) removeStale(ctx context.Context, now time.Time, activeRed
 			// To remove a limit, we query and delete via the tag
 			// The golang-htcondor API handles removal through the schedd
 			// For now, just remove from our tracking (schedd will expire it)
-			delete(m.activeLimits, tag)
-			m.logger.Printf("removed stale limit for %s->%s (inactive for %v)",
-				limit.pairKey.Source, limit.pairKey.Destination, now.Sub(limit.lastHit))
+			delete(m.activeLimits, pairTag)
 		}
 	}
-	
+
 	return nil
 }
 
 // refreshLimitStats queries the schedd to update lastHit times based on actual usage
 func (m *limitManager) refreshLimitStats(ctx context.Context) error {
-	for tag, limit := range m.activeLimits {
+	for pairTag, limit := range m.activeLimits {
 		limits, err := m.schedd.QueryStartupLimits(ctx, limit.uuid, "")
 		if err != nil {
 			return fmt.Errorf("query limit %s: %w", limit.uuid, err)
@@ -308,23 +343,71 @@ func (m *limitManager) refreshLimitStats(ctx context.Context) error {
 					limit.uuid, limit.pairKey.Source, limit.pairKey.Destination,
 					limit.lastHit, limitInfo.JobsSkipped)
 			}
-			m.activeLimits[tag] = limit
+			m.activeLimits[pairTag] = limit
 		}
 	}
-	
+
 	return nil
 }
 
-// limitTag generates a stable tag for a source->destination pair using daemon name
-func (m *limitManager) limitTag(pair control.PairKey) string {
-	// Tag format: <daemon_name>:<pair_hash>
-	// This allows filtering limits by daemon while still uniquely identifying pairs
+// limitTag returns the static tag used for all limits managed by this daemon
+func (m *limitManager) limitTag() string {
+	return m.daemonName
+}
+
+// pairKey generates a stable key for a source->destination pair for activeLimits map
+func pairKey(pair control.PairKey) string {
 	h := sha256.New()
 	h.Write([]byte(pair.Source))
 	h.Write([]byte{0})
 	h.Write([]byte(pair.Destination))
 	sum := h.Sum(nil)
-	return m.daemonName + ":pelican_" + hex.EncodeToString(sum[:8])
+	return hex.EncodeToString(sum[:16])
+}
+
+// parseLimitExpression extracts source and destination from a limit expression
+// Expected format: (PelicanSource == "source" && PelicanDestination == "destination")
+func parseLimitExpression(expr string) (source, destination string, ok bool) {
+	// Simple parser for the expression format we generate
+	// Look for PelicanSource == "..." and PelicanDestination == "..."
+	var inQuotes bool
+	var currentField string
+	var currentValue string
+	var fieldName string
+	
+	for i := 0; i < len(expr); i++ {
+		ch := expr[i]
+		
+		if ch == '"' {
+			if inQuotes {
+				// End of quoted value
+				if fieldName == "PelicanSource" {
+					source = currentValue
+				} else if fieldName == "PelicanDestination" {
+					destination = currentValue
+				}
+				currentValue = ""
+				fieldName = ""
+				inQuotes = false
+			} else {
+				// Start of quoted value
+				inQuotes = true
+				fieldName = currentField
+				currentField = ""
+			}
+		} else if inQuotes {
+			currentValue += string(ch)
+		} else if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') {
+			currentField += string(ch)
+		} else {
+			if currentField != "" && currentField != "PelicanSource" && currentField != "PelicanDestination" {
+				currentField = ""
+			}
+		}
+	}
+	
+	ok = source != "" && destination != ""
+	return
 }
 
 // sanitizeLimitLabel cleans a string for use in limit names
@@ -348,11 +431,11 @@ func (m *limitManager) getLimitInfo(pair control.PairKey) (rateCount int, rateWi
 	if !m.cfg.enabled {
 		return 0, 0, false
 	}
-	
-	tag := m.limitTag(pair)
-	if limit, exists := m.activeLimits[tag]; exists {
+
+	pairTag := pairKey(pair)
+	if limit, exists := m.activeLimits[pairTag]; exists {
 		return limit.rateCount, int(m.cfg.interval.Seconds()), true
 	}
-	
+
 	return 0, int(m.cfg.interval.Seconds()), false
 }
