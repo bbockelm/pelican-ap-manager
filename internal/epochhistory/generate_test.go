@@ -16,8 +16,8 @@ func TestGenerateMatchesGolden(t *testing.T) {
 	}
 	moduleRoot := filepath.Dir(filepath.Dir(cwd))
 
-	jobPath := filepath.Join(moduleRoot, "internal", "condor", "testdata", "job_epochs_from_transfers_5.sanitized.json")
-	transferPath := filepath.Join(moduleRoot, "internal", "condor", "testdata", "transfers_5.sanitized.json")
+	jobPath := filepath.Join(moduleRoot, "internal", "condor", "testdata", "job_epochs_from_transfers.sanitized.json")
+	transferPath := filepath.Join(moduleRoot, "internal", "condor", "testdata", "transfers.sanitized.json")
 	golden := filepath.Join(moduleRoot, "artifacts", "integration_history", "epoch_history")
 
 	tmp := filepath.Join(t.TempDir(), "epoch_history")
