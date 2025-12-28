@@ -144,6 +144,11 @@ func TestPelicanIntegration(t *testing.T) {
 		printHTCondorLogs(rootDir, t)
 		t.Fatalf("mirror status: %v", err)
 	}
+
+	if err := verifyPelicanSummaryAds(ctx, collectorAddr, 60*time.Second, t); err != nil {
+		printHTCondorLogs(rootDir, t)
+		t.Fatalf("verify pelican summary ads: %v", err)
+	}
 }
 
 func writeMiniCondorConfig(configFile, localDir, socketDir, statePath, mirrorPath string, t *testing.T) error {
@@ -619,4 +624,78 @@ func printHTCondorLogs(localDir string, t *testing.T) {
 			}
 		}
 	}
+}
+
+func verifyPelicanSummaryAds(ctx context.Context, collectorAddr string, timeout time.Duration, t *testing.T) error {
+	if collectorAddr == "" {
+		return fmt.Errorf("collector address is empty")
+	}
+
+	col := htcondor.NewCollector(collectorAddr)
+	deadline := time.Now().Add(timeout)
+
+	for time.Now().Before(deadline) {
+		queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		ads, err := col.Query(queryCtx, "MyType == \"PelicanSummary\"", []string{
+			"Name",
+			"MyType",
+			"ScheddName",
+			"User",
+			"Direction",
+			"WindowSuccessCount",
+			"WindowFailureCount",
+			"ControlErrorBand",
+			"ControlCostBand",
+		})
+		cancel()
+
+		if err != nil {
+			t.Logf("collector query error (retrying): %v", err)
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		if len(ads) == 0 {
+			t.Logf("no PelicanSummary ads found yet (retrying)")
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		t.Logf("found %d PelicanSummary ad(s)", len(ads))
+
+		for i, ad := range ads {
+			name, _ := ad.EvaluateAttrString("Name")
+			scheddName, _ := ad.EvaluateAttrString("ScheddName")
+			user, _ := ad.EvaluateAttrString("User")
+			direction, _ := ad.EvaluateAttrString("Direction")
+			windowSuccess, _ := ad.EvaluateAttrInt("WindowSuccessCount")
+			windowFailure, _ := ad.EvaluateAttrInt("WindowFailureCount")
+			errorBand, hasErrorBand := ad.EvaluateAttrString("ControlErrorBand")
+			costBand, hasCostBand := ad.EvaluateAttrString("ControlCostBand")
+
+			t.Logf("  ad[%d]: Name=%s ScheddName=%s User=%s Direction=%s WindowSuccess=%d WindowFailure=%d",
+				i, name, scheddName, user, direction, windowSuccess, windowFailure)
+
+			if !hasErrorBand {
+				return fmt.Errorf("ad %s missing ControlErrorBand attribute", name)
+			}
+			if !hasCostBand {
+				return fmt.Errorf("ad %s missing ControlCostBand attribute", name)
+			}
+
+			validBands := map[string]bool{"green": true, "yellow": true, "red": true}
+			if !validBands[errorBand] {
+				return fmt.Errorf("ad %s has invalid ControlErrorBand=%q (expected green/yellow/red)", name, errorBand)
+			}
+			if !validBands[costBand] {
+				return fmt.Errorf("ad %s has invalid ControlCostBand=%q (expected green/yellow/red)", name, costBand)
+			}
+
+			t.Logf("    ControlErrorBand=%s ControlCostBand=%s", errorBand, costBand)
+		}
+
+		return nil
+	}
+
+	return fmt.Errorf("timeout waiting for PelicanSummary ads with control loop metrics")
 }
