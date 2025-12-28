@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/pelican-ap-manager/internal/condor"
 	"github.com/bbockelm/pelican-ap-manager/internal/control"
 	"github.com/bbockelm/pelican-ap-manager/internal/director"
@@ -48,6 +49,8 @@ type Service struct {
 	startTime         time.Time
 	lastJobEpoch      state.EpochID
 	controlCfg        control.Config
+	limitMgr          *limitManager
+	schedd            *htcondor.Schedd
 }
 
 // NewService wires up dependencies for the daemon.
@@ -348,6 +351,7 @@ func (s *Service) advertiseOnce() {
 	}
 
 	s.updatePairControllers()
+	s.updateScheddLimits()
 
 	ads := s.buildSummaryAds()
 	ads = append(ads, s.buildPairAds()...)
@@ -387,6 +391,57 @@ func (s *Service) updatePairControllers() {
 		next := controller.Step(now, prev, metrics)
 		s.state.SetPairState(pair.Source, pair.Destination, next)
 	}
+}
+
+// updateScheddLimits synchronizes schedd startup limits based on pair states
+func (s *Service) updateScheddLimits() {
+	if s.limitMgr == nil {
+		if err := s.ensureLimitManager(); err != nil {
+			s.logger.Printf("limit manager init error: %v", err)
+			return
+		}
+	}
+
+	if s.limitMgr == nil {
+		return
+	}
+
+	// Gather pair states
+	pairs := s.gatherPairs()
+	pairStates := make(map[control.PairKey]control.PairState)
+	for pair := range pairs {
+		pairStates[pair] = s.state.PairState(pair.Source, pair.Destination)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := s.limitMgr.updateLimits(ctx, pairStates, s.tracker, s.controlCfg); err != nil {
+		s.logger.Printf("limit update error: %v", err)
+	}
+}
+
+// ensureLimitManager lazily initializes the schedd and limit manager
+func (s *Service) ensureLimitManager() error {
+	if s.schedd != nil {
+		return nil
+	}
+
+	// Locate the schedd
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	collector := htcondor.NewCollector("")
+	location, err := collector.LocateDaemon(ctx, "Schedd", s.scheddName)
+	if err != nil {
+		return fmt.Errorf("locate schedd: %w", err)
+	}
+
+	s.schedd = htcondor.NewSchedd(location.Name, location.Address)
+	s.limitMgr = newLimitManager(s.schedd, s.logger)
+	s.logger.Printf("initialized limit manager for schedd %s at %s", location.Name, location.Address)
+
+	return nil
 }
 
 // gatherPairs returns the union of pairs seen in the tracker window and any persisted pair states.

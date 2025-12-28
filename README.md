@@ -34,7 +34,7 @@ Prefer setting macros rather than ad-hoc environment variables:
 ## Runtime notes
 - The daemon writes state to the configured path; ensure the parent directory is writable by `condor_master`.
 - When built with the `condor` tag, `condor_master` should launch `pelican_man` so it can advertise to the collector.
-- Future phases will add machine-learning-derived rate-limiter hints to the advertised ClassAds.
+- The control algorithm automatically manages data transfer capacity and enforces schedd startup limits when needed. See [docs/control-algorithm.md](docs/control-algorithm.md) for details on parameters and behavior.
 
 ## Development
 
