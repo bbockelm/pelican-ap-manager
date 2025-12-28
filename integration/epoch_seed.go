@@ -1,7 +1,6 @@
 package integration
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -21,13 +20,4 @@ func seedEpochHistory(t *testing.T, moduleRoot, spoolDir string) {
 	if err := epochhistory.Generate(target, jobPath, transferPath, time.Now()); err != nil {
 		t.Fatalf("seed epoch_history: %v", err)
 	}
-}
-
-func moduleRoot(t *testing.T) string {
-	t.Helper()
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	return filepath.Dir(cwd)
 }

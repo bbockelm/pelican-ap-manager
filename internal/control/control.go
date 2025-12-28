@@ -183,6 +183,19 @@ const (
 	BandRed
 )
 
+func (b Band) String() string {
+	switch b {
+	case BandGreen:
+		return "green"
+	case BandYellow:
+		return "yellow"
+	case BandRed:
+		return "red"
+	default:
+		return "unknown"
+	}
+}
+
 // ClassifyBand returns green/yellow/red given thresholds (fractions).
 func ClassifyBand(value float64, greenThresh, yellowThresh float64) Band {
 	switch {

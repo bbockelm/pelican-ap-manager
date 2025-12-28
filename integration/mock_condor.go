@@ -52,13 +52,13 @@ func (m *mockCondorClient) FetchTransferEpochs(sinceEpoch state.EpochID, cutoff 
 		cluster, _ := ad["ClusterId"].(float64)
 		proc, _ := ad["ProcId"].(float64)
 		run, _ := ad["RunInstanceID"].(float64)
-		
+
 		epoch := state.EpochID{
 			ClusterID:     int64(cluster),
 			ProcID:        int64(proc),
 			RunInstanceID: int64(run),
 		}
-		
+
 		if epoch.After(newestEpoch) {
 			newestEpoch = epoch
 		}
@@ -68,12 +68,12 @@ func (m *mockCondorClient) FetchTransferEpochs(sinceEpoch state.EpochID, cutoff 
 		site, _ := ad["MachineAttrGLIDEIN_Site0"].(string)
 		success, _ := ad["TransferSuccess"].(bool)
 		transferType, _ := ad["TransferType"].(string)
-		
+
 		direction := "download"
 		if transferType == "OUTPUT_FILES" || transferType == "CHECKPOINT_FILES" {
 			direction = "upload"
 		}
-		
+
 		endTime := time.Now()
 		if endedAt, ok := ad["TransferEndTime"].(float64); ok {
 			endTime = time.Unix(int64(endedAt), 0)
@@ -101,24 +101,24 @@ func (m *mockCondorClient) FetchTransferEpochs(sinceEpoch state.EpochID, cutoff 
 // parseTransferFiles extracts file-level details from transfer plugin result lists
 func parseTransferFiles(ad map[string]interface{}, transferType string) []condor.TransferFile {
 	var files []condor.TransferFile
-	
+
 	// Determine which result list to use
 	resultKey := "InputPluginResultList"
 	if transferType == "OUTPUT_FILES" {
 		resultKey = "OutputPluginResultList"
 	}
-	
+
 	resultList, ok := ad[resultKey].([]interface{})
 	if !ok || len(resultList) == 0 {
 		return files
 	}
-	
+
 	for _, item := range resultList {
 		fileAd, ok := item.(map[string]interface{})
 		if !ok {
 			continue
 		}
-		
+
 		url, _ := fileAd["TransferUrl"].(string)
 		endpoint, _ := fileAd["TransferEndpoint"].(string)
 		bytes, _ := fileAd["TransferFileBytes"].(float64)
@@ -127,7 +127,7 @@ func parseTransferFiles(ad map[string]interface{}, transferType string) []condor
 		endTime, _ := fileAd["TransferEndTime"].(float64)
 		success, _ := fileAd["TransferSuccess"].(bool)
 		duration, _ := fileAd["TransferDurationSeconds"].(float64)
-		
+
 		files = append(files, condor.TransferFile{
 			URL:         url,
 			Endpoint:    endpoint,
@@ -140,7 +140,7 @@ func parseTransferFiles(ad map[string]interface{}, transferType string) []condor
 			LastAttempt: true,
 		})
 	}
-	
+
 	return files
 }
 
@@ -167,27 +167,27 @@ func (m *mockCondorClient) FetchJobEpochs(sinceEpoch state.EpochID, cutoff time.
 		cluster, _ := ad["ClusterId"].(float64)
 		proc, _ := ad["ProcId"].(float64)
 		run, _ := ad["EpochNumber"].(float64)
-		
+
 		epoch := state.EpochID{
 			ClusterID:     int64(cluster),
 			ProcID:        int64(proc),
 			RunInstanceID: int64(run),
 		}
-		
+
 		if epoch.After(newestEpoch) {
 			newestEpoch = epoch
 		}
 
 		owner, _ := ad["Owner"].(string)
 		site, _ := ad["MachineAttrGLIDEIN_Site0"].(string)
-		
+
 		var runtime time.Duration
 		if startDate, ok := ad["JobCurrentStartDate"].(float64); ok {
 			if endedAt, ok := ad["EnteredCurrentStatus"].(float64); ok {
 				runtime = time.Unix(int64(endedAt), 0).Sub(time.Unix(int64(startDate), 0))
 			}
 		}
-		
+
 		endTime := time.Now()
 		if endedAt, ok := ad["EnteredCurrentStatus"].(float64); ok {
 			endTime = time.Unix(int64(endedAt), 0)
