@@ -1,7 +1,6 @@
 package integration
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -14,20 +13,11 @@ import (
 func seedEpochHistory(t *testing.T, moduleRoot, spoolDir string) {
 	t.Helper()
 
-	jobPath := filepath.Join(moduleRoot, "internal", "condor", "testdata", "job_epochs_from_transfers_5.sanitized.json")
-	transferPath := filepath.Join(moduleRoot, "internal", "condor", "testdata", "transfers_5.sanitized.json")
+	jobPath := filepath.Join(moduleRoot, "internal", "condor", "testdata", "job_epochs_from_transfers.sanitized.json")
+	transferPath := filepath.Join(moduleRoot, "internal", "condor", "testdata", "transfers.sanitized.json")
 	target := filepath.Join(spoolDir, "epoch_history")
 
 	if err := epochhistory.Generate(target, jobPath, transferPath, time.Now()); err != nil {
 		t.Fatalf("seed epoch_history: %v", err)
 	}
-}
-
-func moduleRoot(t *testing.T) string {
-	t.Helper()
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	return filepath.Dir(cwd)
 }
