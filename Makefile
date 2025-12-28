@@ -66,3 +66,19 @@ redact-testdata:
 		-input internal/condor/testdata/sample_job_epochs_bulk.raw.json \
 		-output internal/condor/testdata/sample_job_epochs_bulk.json \
 		-dict internal/condor/testdata/redaction_dict.json
+
+.PHONY: run-ap40
+run-ap40:
+	@mkdir -p artifacts/ap40_run
+	@echo "Running manager for ap40.uw.osg-htc.org..."
+	@echo "JSON output will be written to artifacts/ap40_run/"
+	@echo "Press Ctrl+C to stop"
+	GOFLAGS= go run -tags condor ./cmd/pelican_man \
+		-collector cm-1.ospool.osg-htc.org:9618 \
+		-schedd ap40.uw.osg-htc.org \
+		-state artifacts/ap40_run/pelican_state.json \
+		-job-mirror artifacts/ap40_run/job_mirror.json \
+		-advertise-dry-run artifacts/ap40_run/pelican_summary.json \
+		-poll 30s \
+		-advertise 1m \
+		-stats-window 1h
