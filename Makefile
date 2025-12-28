@@ -73,12 +73,12 @@ run-ap40:
 	@echo "Running manager for ap40.uw.osg-htc.org..."
 	@echo "JSON output will be written to artifacts/ap40_run/"
 	@echo "Press Ctrl+C to stop"
+	PELICAN_MANAGER_STATE_PATH=artifacts/ap40_run/pelican_state.json \
+	PELICAN_MANAGER_JOB_MIRROR_PATH=artifacts/ap40_run/job_mirror.json \
+	PELICAN_MANAGER_POLL_INTERVAL=30s \
+	PELICAN_MANAGER_ADVERTISE_INTERVAL=1m \
+	PELICAN_MANAGER_STATS_WINDOW=1h \
 	GOFLAGS= go run -tags condor ./cmd/pelican_man \
 		-collector cm-1.ospool.osg-htc.org:9618 \
 		-schedd ap40.uw.osg-htc.org \
-		-state artifacts/ap40_run/pelican_state.json \
-		-job-mirror artifacts/ap40_run/job_mirror.json \
-		-advertise-dry-run artifacts/ap40_run/pelican_summary.json \
-		-poll 30s \
-		-advertise 1m \
-		-stats-window 1h
+		-advertise-dry-run artifacts/ap40_run/pelican_summary.json
