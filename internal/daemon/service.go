@@ -16,6 +16,7 @@ import (
 	"time"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	condorconfig "github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/pelican-ap-manager/internal/condor"
 	"github.com/bbockelm/pelican-ap-manager/internal/control"
 	"github.com/bbockelm/pelican-ap-manager/internal/director"
@@ -438,8 +439,28 @@ func (s *Service) ensureLimitManager() error {
 	}
 
 	s.schedd = htcondor.NewSchedd(location.Name, location.Address)
-	s.limitMgr = newLimitManager(s.schedd, s.logger)
-	s.logger.Printf("initialized limit manager for schedd %s at %s", location.Name, location.Address)
+	
+	// Get daemon name for limit tags - prefer scheddName from config, fall back to hostname
+	daemonName := s.scheddName
+	if daemonName == "" {
+		// Try to get local name from HTCondor config
+		if cfg, err := condorconfig.New(); err == nil {
+			if localName, ok := cfg.Get("LOCAL_NAME"); ok && localName != "" {
+				daemonName = localName
+			}
+		}
+		// Fall back to OS hostname
+		if daemonName == "" {
+			if hostname, err := os.Hostname(); err == nil {
+				daemonName = hostname
+			} else {
+				daemonName = "pelican_man"
+			}
+		}
+	}
+	
+	s.limitMgr = newLimitManager(s.schedd, daemonName, s.logger)
+	s.logger.Printf("initialized limit manager for schedd %s at %s (daemon name: %s)", location.Name, location.Address, daemonName)
 
 	return nil
 }
@@ -577,6 +598,31 @@ func (s *Service) buildSummaryAds() []map[string]any {
 				"TotalFailureDurationSec": stats.FailureDurationSec,
 				"TotalDurationSec":        stats.SuccessDurationSec + stats.FailureDurationSec,
 				"TotalSuccessRate":        rate,
+			}
+
+			// Add rate limit information if limit manager is available
+			if s.limitMgr != nil {
+				// Compute source/destination from endpoint/site based on direction
+				// For downloads: source=endpoint (cache), destination=site
+				// For uploads: source=site, destination=endpoint
+				var source, destination string
+				switch key.Direction {
+				case state.DirectionDownload:
+					source = key.Endpoint
+					destination = key.Site
+				case state.DirectionUpload:
+					source = key.Site
+					destination = key.Endpoint
+				default:
+					source = key.Endpoint
+					destination = key.Site
+				}
+				
+				pairKey := control.PairKey{Source: source, Destination: destination}
+				rateCount, rateWindow, active := s.limitMgr.getLimitInfo(pairKey)
+				ad["ControlRateLimit"] = rateCount
+				ad["ControlRateWindow"] = rateWindow
+				ad["ControlLimitActive"] = active
 			}
 
 			if prefix != "" {

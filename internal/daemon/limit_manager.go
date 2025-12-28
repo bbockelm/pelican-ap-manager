@@ -31,6 +31,7 @@ type limitManager struct {
 	logger       *log.Logger
 	activeLimits map[string]*limitState
 	cfg          limitConfig
+	daemonName   string
 }
 
 type limitConfig struct {
@@ -50,11 +51,12 @@ type limitState struct {
 }
 
 // newLimitManager creates a limit manager for the schedd
-func newLimitManager(schedd *htcondor.Schedd, logger *log.Logger) *limitManager {
-	return &limitManager{
+func newLimitManager(schedd *htcondor.Schedd, daemonName string, logger *log.Logger) *limitManager {
+	m := &limitManager{
 		schedd:       schedd,
 		logger:       logger,
 		activeLimits: make(map[string]*limitState),
+		daemonName:   daemonName,
 		cfg: limitConfig{
 			interval:             defaultLimitInterval,
 			expirationInactivity: limitExpirationInactivity,
@@ -62,6 +64,17 @@ func newLimitManager(schedd *htcondor.Schedd, logger *log.Logger) *limitManager 
 			enabled:              true,
 		},
 	}
+	
+	// Test if schedd supports rate limits by attempting a query
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := schedd.QueryStartupLimits(ctx, "", "")
+	if err != nil {
+		logger.Printf("schedd does not support startup limits (disabling limit manager): %v", err)
+		m.cfg.enabled = false
+	}
+	
+	return m
 }
 
 // updateLimits synchronizes schedd limits based on pair controller states
@@ -190,12 +203,16 @@ func (m *limitManager) createLimit(ctx context.Context, pair control.PairKey, ra
 	// This is a simplified expression; production would use actual job attributes
 	expression := fmt.Sprintf("(PelicanSource == %q && PelicanDestination == %q)", pair.Source, pair.Destination)
 	
+	// Set expiration to 2x the inactivity timeout to allow for some delay in cleanup
+	expirationTime := time.Now().Add(m.cfg.expirationInactivity * 2).Unix()
+	
 	req := &htcondor.StartupLimitRequest{
 		Tag:        tag,
 		Name:       name,
 		Expression: expression,
 		RateCount:  rateCount,
 		RateWindow: int(m.cfg.interval.Seconds()),
+		Expiration: int(expirationTime),
 	}
 	
 	uuid, err := m.schedd.CreateStartupLimit(ctx, req)
@@ -223,6 +240,9 @@ func (m *limitManager) updateLimit(ctx context.Context, existing *limitState, pa
 	name := fmt.Sprintf("pelican_%s_to_%s", sanitizeLimitLabel(pair.Source), sanitizeLimitLabel(pair.Destination))
 	expression := fmt.Sprintf("(PelicanSource == %q && PelicanDestination == %q)", pair.Source, pair.Destination)
 	
+	// Refresh expiration time on every update
+	expirationTime := time.Now().Add(m.cfg.expirationInactivity * 2).Unix()
+	
 	req := &htcondor.StartupLimitRequest{
 		UUID:       existing.uuid,
 		Tag:        m.limitTag(pair),
@@ -230,6 +250,7 @@ func (m *limitManager) updateLimit(ctx context.Context, existing *limitState, pa
 		Expression: expression,
 		RateCount:  rateCount,
 		RateWindow: int(m.cfg.interval.Seconds()),
+		Expiration: int(expirationTime),
 	}
 	
 	uuid, err := m.schedd.CreateStartupLimit(ctx, req)
@@ -294,14 +315,16 @@ func (m *limitManager) refreshLimitStats(ctx context.Context) error {
 	return nil
 }
 
-// limitTag generates a stable tag for a source->destination pair
+// limitTag generates a stable tag for a source->destination pair using daemon name
 func (m *limitManager) limitTag(pair control.PairKey) string {
+	// Tag format: <daemon_name>:<pair_hash>
+	// This allows filtering limits by daemon while still uniquely identifying pairs
 	h := sha256.New()
 	h.Write([]byte(pair.Source))
 	h.Write([]byte{0})
 	h.Write([]byte(pair.Destination))
 	sum := h.Sum(nil)
-	return "pelican_" + hex.EncodeToString(sum[:8])
+	return m.daemonName + ":pelican_" + hex.EncodeToString(sum[:8])
 }
 
 // sanitizeLimitLabel cleans a string for use in limit names
@@ -318,4 +341,18 @@ func sanitizeLimitLabel(s string) string {
 		}
 	}
 	return result
+}
+
+// getLimitInfo returns the active limit information for a pair, if any
+func (m *limitManager) getLimitInfo(pair control.PairKey) (rateCount int, rateWindow int, active bool) {
+	if !m.cfg.enabled {
+		return 0, 0, false
+	}
+	
+	tag := m.limitTag(pair)
+	if limit, exists := m.activeLimits[tag]; exists {
+		return limit.rateCount, int(m.cfg.interval.Seconds()), true
+	}
+	
+	return 0, int(m.cfg.interval.Seconds()), false
 }
