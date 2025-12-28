@@ -148,11 +148,11 @@ func (c PairController) Step(now time.Time, prev PairState, m PairMetrics) PairS
 		state.CapacityGBPerMin = c.cfg.MinCapacityGBPerMin
 	}
 
-	bandErrors := classifyBand(m.ErrorRate, c.cfg.ErrorGreenThreshold, c.cfg.ErrorYellowThreshold)
-	bandCost := classifyBand(m.CostPct/100.0, c.cfg.CostGreenThresholdPercent/100.0, c.cfg.CostYellowThresholdPercent/100.0)
+	bandErrors := ClassifyBand(m.ErrorRate, c.cfg.ErrorGreenThreshold, c.cfg.ErrorYellowThreshold)
+	bandCost := ClassifyBand(m.CostPct/100.0, c.cfg.CostGreenThresholdPercent/100.0, c.cfg.CostYellowThresholdPercent/100.0)
 
-	red := bandErrors == bandRed || bandCost == bandRed
-	yellow := !red && (bandErrors == bandYellow || bandCost == bandYellow)
+	red := bandErrors == BandRed || bandCost == BandRed
+	yellow := !red && (bandErrors == BandYellow || bandCost == BandYellow)
 
 	switch {
 	case red:
@@ -171,22 +171,35 @@ func (c PairController) Step(now time.Time, prev PairState, m PairMetrics) PairS
 	return state
 }
 
-// classifyBand returns green/yellow/red given thresholds (fractions).
-type band int
+// ClassifyBand returns green/yellow/red given thresholds (fractions).
+type Band int
 
 const (
-	bandGreen band = iota
-	bandYellow
-	bandRed
+	BandGreen Band = iota
+	BandYellow
+	BandRed
 )
 
-func classifyBand(value float64, greenThresh, yellowThresh float64) band {
+func (b Band) String() string {
+	switch b {
+	case BandGreen:
+		return "green"
+	case BandYellow:
+		return "yellow"
+	case BandRed:
+		return "red"
+	default:
+		return "unknown"
+	}
+}
+
+func ClassifyBand(value float64, greenThresh, yellowThresh float64) Band {
 	switch {
 	case value < greenThresh:
-		return bandGreen
+		return BandGreen
 	case value < yellowThresh:
-		return bandYellow
+		return BandYellow
 	default:
-		return bandRed
+		return BandRed
 	}
 }
