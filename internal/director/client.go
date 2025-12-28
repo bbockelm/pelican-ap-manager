@@ -162,7 +162,7 @@ func (c *Client) director(discoveryBase string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("discover director: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("director discovery returned %d", resp.StatusCode)
@@ -195,7 +195,7 @@ func (c *Client) fetchNamespace(directorEndpoint, objectPath string) (string, er
 	if err != nil {
 		return "", fmt.Errorf("namespace request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	log.Printf("director: HEAD status=%d", resp.StatusCode)
 
 	if resp.StatusCode >= 400 {

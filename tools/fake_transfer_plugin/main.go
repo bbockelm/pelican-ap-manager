@@ -240,7 +240,7 @@ func parseTransferRequests(path string) ([]transferRequest, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -323,7 +323,7 @@ func writePluginOut(path string, results []transferResult) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	for _, r := range results {
 		if _, err := fmt.Fprintln(f, formatTransferResult(r)); err != nil {
@@ -427,7 +427,7 @@ func parseJobAd(path string) jobAd {
 	if err != nil {
 		return out
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
@@ -487,6 +487,6 @@ func appendLog(line string) {
 	if err != nil {
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	_, _ = f.WriteString(line)
 }

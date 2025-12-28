@@ -139,7 +139,7 @@ func newDirector(t *testing.T) (*director.Client, *int, *httptest.Server) {
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/.well-known/pelican-configuration":
-			fmt.Fprintf(w, `{"director_endpoint": %q}`, srv.URL)
+			_, _ = fmt.Fprintf(w, `{"director_endpoint": %q}`, srv.URL)
 		case r.Method == http.MethodHead && strings.HasPrefix(r.URL.Path, "/ospool/ap40"):
 			headHits++
 			w.Header().Set("X-Pelican-Namespace", "namespace=/ospool/ap40")

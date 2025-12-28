@@ -618,9 +618,7 @@ func extractFiles(ad *classad.ClassAd, defaultEndpoint string, fallbackEnd time.
 						timeVal, hasTime := pr.DeveloperData[timeKey]
 						bytesVal, hasBytes := pr.DeveloperData[bytesKey]
 						if !hasEp && !hasAge {
-							if i == 0 {
-								// No indexed data at all; leave defaults.
-							}
+							// No indexed data at all; leave defaults.
 							break
 						}
 						attemptEp := endpoint

@@ -1,4 +1,4 @@
-name: CI
+name: Pre-commit
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  pre-commit:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -22,11 +22,5 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Download modules
-        run: go mod download
-
-      - name: Vet
-        run: go vet ./...
-
-      - name: Test
-        run: go test -short ./...
+      - name: Run pre-commit
+        uses: pre-commit/action@v3.0.1
