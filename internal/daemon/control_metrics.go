@@ -17,8 +17,27 @@ func pairMetrics(cfg control.Config, st *state.State, tracker *stats.Tracker, so
 	}
 
 	if st != nil {
-		if samples, pct := st.PairStageInPercent(24*time.Hour, source, destination); samples > 0 {
+		samples, pct := st.PairStageInPercent(24*time.Hour, source, destination)
+		if samples > 0 {
 			m.CostPct = pct
+		}
+	}
+
+	return m
+}
+
+// limitMetrics derives control inputs for a (user,site) pair using recent stats and job runtimes.
+func limitMetrics(cfg control.Config, st *state.State, tracker *stats.Tracker, user, site string) control.PairMetrics {
+	m := control.PairMetrics{JobCostGB: cfg.DefaultJobCostGB}
+
+	if tracker != nil {
+		m.ErrorRate = tracker.UserSiteErrorRate(user, site)
+	}
+
+	if st != nil {
+		stats := st.UserSiteStageInPercent(24*time.Hour, user, site)
+		if stats.Samples > 0 {
+			m.CostPct = stats.Percent
 		}
 	}
 

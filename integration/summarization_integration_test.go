@@ -81,18 +81,19 @@ func TestSummarization(t *testing.T) {
 		condorClient,
 		st,
 		statePath,
-		30*time.Second, // poll interval (unused in oneshot)
-		1*time.Minute,  // advertise interval (unused in oneshot)
-		24*time.Hour,   // epoch lookback
-		statsWindow,    // stats window
-		tracker,        // tracker
-		nil,            // job mirror (not needed for this test)
-		"",             // job mirror path
-		nil,            // director client (not needed)
-		logger,         // logger
-		adsOutputPath,  // dry-run ads output
-		"test-schedd",  // schedd name
-		true,           // oneshot mode
+		30*time.Second,       // poll interval (unused in oneshot)
+		1*time.Minute,        // advertise interval (unused in oneshot)
+		24*time.Hour,         // epoch lookback
+		statsWindow,          // stats window
+		tracker,              // tracker
+		nil,                  // job mirror (not needed for this test)
+		"",                   // job mirror path
+		nil,                  // director client (not needed)
+		logger,               // logger
+		adsOutputPath,        // dry-run ads output
+		"test-schedd",        // schedd name
+		"MATCH_EXP_JOB_Site", // site attribute
+		true,                 // oneshot mode
 	)
 
 	// Run single iteration
@@ -137,6 +138,8 @@ func TestSummarization(t *testing.T) {
 			sandboxAds = append(sandboxAds, ad)
 		case "PelicanPair":
 			pairAds = append(pairAds, ad)
+		case "PelicanLimit":
+			// PelicanLimit ads are expected, just count them
 		default:
 			t.Errorf("unexpected MyType: %s", myType)
 		}
@@ -154,11 +157,11 @@ func TestSummarization(t *testing.T) {
 		requiredFields := []string{
 			"Name", "MyType", "Summary", "SummaryID", "ScheddName",
 			"User", "Endpoint", "Site", "Direction",
-			"WindowSuccessCount", "WindowFailureCount", "WindowTotalCount",
-			"WindowSuccessBytes", "WindowFailureBytes", "WindowTotalBytes",
-			"TotalSuccessCount", "TotalFailureCount", "TotalCount",
-			"TotalSuccessBytes", "TotalFailureBytes", "TotalBytes",
-			"StatsWindowSeconds", "WindowSuccessRate", "TotalSuccessRate",
+			"WindowAttemptSuccessCount", "WindowAttemptFailureCount", "WindowAttemptTotalCount",
+			"WindowAttemptSuccessBytes", "WindowAttemptFailureBytes", "WindowAttemptTotalBytes",
+			"TotalAttemptSuccessCount", "TotalAttemptFailureCount", "TotalAttemptCount",
+			"TotalAttemptSuccessBytes", "TotalAttemptFailureBytes", "TotalAttemptBytes",
+			"StatsWindowSeconds", "WindowAttemptSuccessRate", "TotalAttemptSuccessRate",
 		}
 
 		for _, field := range requiredFields {
@@ -182,22 +185,22 @@ func TestSummarization(t *testing.T) {
 		}
 
 		// Verify counts are non-negative
-		if total, ok := ad["WindowTotalCount"].(float64); ok {
+		if total, ok := ad["WindowAttemptTotalCount"].(float64); ok {
 			if total < 0 {
-				t.Errorf("summary ad %d has negative WindowTotalCount: %v", i, total)
+				t.Errorf("summary ad %d has negative WindowAttemptTotalCount: %v", i, total)
 			}
 		}
 
-		if totalBytes, ok := ad["WindowTotalBytes"].(float64); ok {
+		if totalBytes, ok := ad["WindowAttemptTotalBytes"].(float64); ok {
 			if totalBytes < 0 {
-				t.Errorf("summary ad %d has negative WindowTotalBytes: %v", i, totalBytes)
+				t.Errorf("summary ad %d has negative WindowAttemptTotalBytes: %v", i, totalBytes)
 			}
 		}
 
 		// Verify success rate is between 0 and 1
-		if rate, ok := ad["WindowSuccessRate"].(float64); ok {
+		if rate, ok := ad["WindowAttemptSuccessRate"].(float64); ok {
 			if rate < 0 || rate > 1 {
-				t.Errorf("summary ad %d has invalid WindowSuccessRate: %v (expected 0-1)", i, rate)
+				t.Errorf("summary ad %d has invalid WindowAttemptSuccessRate: %v (expected 0-1)", i, rate)
 			}
 		}
 
@@ -205,10 +208,10 @@ func TestSummarization(t *testing.T) {
 		if i == 0 {
 			t.Logf("sample summary ad: User=%v Endpoint=%v Site=%v Direction=%v",
 				ad["User"], ad["Endpoint"], ad["Site"], ad["Direction"])
-			t.Logf("  WindowSuccessCount=%v WindowFailureCount=%v WindowTotalBytes=%v",
-				ad["WindowSuccessCount"], ad["WindowFailureCount"], ad["WindowTotalBytes"])
-			t.Logf("  TotalSuccessCount=%v TotalFailureCount=%v TotalBytes=%v",
-				ad["TotalSuccessCount"], ad["TotalFailureCount"], ad["TotalBytes"])
+			t.Logf("  WindowAttemptSuccessCount=%v WindowAttemptFailureCount=%v WindowAttemptTotalBytes=%v",
+				ad["WindowAttemptSuccessCount"], ad["WindowAttemptFailureCount"], ad["WindowAttemptTotalBytes"])
+			t.Logf("  TotalAttemptSuccessCount=%v TotalAttemptFailureCount=%v TotalAttemptBytes=%v",
+				ad["TotalAttemptSuccessCount"], ad["TotalAttemptFailureCount"], ad["TotalAttemptBytes"])
 		}
 	}
 
@@ -216,8 +219,8 @@ func TestSummarization(t *testing.T) {
 	for i, ad := range sandboxAds {
 		requiredFields := []string{
 			"Name", "MyType", "ScheddName", "SandboxName",
-			"SandboxSize", "ObjectCount", "WindowSuccessCount",
-			"WindowFailureCount", "WindowTotalCount",
+			"SandboxSize", "ObjectCount", "EpochSuccessCount",
+			"EpochFailureCount", "EpochTotalCount",
 		}
 
 		for _, field := range requiredFields {

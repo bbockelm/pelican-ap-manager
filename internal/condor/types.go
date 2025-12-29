@@ -10,27 +10,29 @@ import (
 
 // TransferRecord represents a single transfer attempt drawn from the HTCondor epoch history.
 type TransferRecord struct {
-	EpochID     state.EpochID
-	User        string
-	Endpoint    string
-	Site        string
-	Direction   string
-	Success     bool
-	EndedAt     time.Time
-	JobRuntime  time.Duration
-	Files       []TransferFile
-	SandboxName string
-	SandboxSize int64
+	EpochID           state.EpochID
+	User              string
+	Endpoint          string
+	Site              string
+	Direction         string
+	Success           bool
+	EndedAt           time.Time
+	JobRuntime        time.Duration
+	Files             []TransferFile
+	SandboxName       string
+	SandboxSize       int64
+	WallClockDuration time.Duration // Actual elapsed time from first file start to last file end
 }
 
 // JobEpochRecord represents a completed job drawn from the HTCondor job epoch history.
 type JobEpochRecord struct {
-	EpochID state.EpochID
-	User    string
-	Site    string
-	Runtime time.Duration
-	EndedAt time.Time
-	Success bool
+	EpochID           state.EpochID
+	User              string
+	Site              string
+	Runtime           time.Duration // Total time including setup/teardown (ActivationDuration)
+	ExecutionDuration time.Duration // Execution time only (ActivationExecutionDuration)
+	EndedAt           time.Time
+	Success           bool
 }
 
 // TransferFile captures file-level details from a transfer ad.

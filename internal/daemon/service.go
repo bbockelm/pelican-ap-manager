@@ -39,6 +39,7 @@ type Service struct {
 	advertiseInterval time.Duration
 	advertiseDryRun   string
 	scheddName        string
+	siteAttribute     string
 	epochLookback     time.Duration
 	tracker           *stats.Tracker
 	jobs              *jobqueue.Mirror
@@ -52,10 +53,11 @@ type Service struct {
 	controlCfg        control.Config
 	limitMgr          *limitManager
 	schedd            *htcondor.Schedd
+	adSequence        map[string]int // tracks UpdateSequenceNumber per ad Name
 }
 
 // NewService wires up dependencies for the daemon.
-func NewService(client condor.CondorClient, st *state.State, statePath string, poll, advertise, epochLookback, statsWindow time.Duration, tracker *stats.Tracker, jobMirror *jobqueue.Mirror, jobMirrorPath string, directorClient *director.Client, logger *log.Logger, advertiseDryRun, scheddName string, oneshot bool) *Service {
+func NewService(client condor.CondorClient, st *state.State, statePath string, poll, advertise, epochLookback, statsWindow time.Duration, tracker *stats.Tracker, jobMirror *jobqueue.Mirror, jobMirrorPath string, directorClient *director.Client, logger *log.Logger, advertiseDryRun, scheddName, siteAttribute string, oneshot bool) *Service {
 	if statsWindow <= 0 {
 		statsWindow = time.Hour
 	}
@@ -76,6 +78,7 @@ func NewService(client condor.CondorClient, st *state.State, statePath string, p
 		advertiseInterval: advertise,
 		advertiseDryRun:   advertiseDryRun,
 		scheddName:        scheddName,
+		siteAttribute:     siteAttribute,
 		epochLookback:     epochLookback,
 		tracker:           tracker,
 		jobs:              jobMirror,
@@ -86,6 +89,7 @@ func NewService(client condor.CondorClient, st *state.State, statePath string, p
 		oneshoot:          oneshot,
 		startTime:         time.Now(),
 		controlCfg:        control.DefaultConfig(),
+		adSequence:        make(map[string]int),
 	}
 }
 
@@ -170,13 +174,14 @@ func (s *Service) pollOnce(ctx context.Context) int {
 		for _, tr := range pt {
 			s.state.Update(key, tr.Success, tr.Bytes, tr.Duration, tr.EndedAt, tr.FederationPrefix)
 			epochRefs = append(epochRefs, state.TransferEpochRef{
-				Epoch:         tr.Epoch,
-				EndedAt:       tr.EndedAt,
-				DurationSec:   tr.Duration.Seconds(),
-				User:          tr.User,
-				JobRuntimeSec: tr.JobRuntime.Seconds(),
-				Source:        tr.Source,
-				Destination:   tr.Destination,
+				Epoch:                tr.Epoch,
+				EndedAt:              tr.EndedAt,
+				DurationSec:          tr.Duration.Seconds(),
+				WallClockDurationSec: tr.WallClockDuration.Seconds(),
+				User:                 tr.User,
+				JobRuntimeSec:        tr.JobRuntime.Seconds(),
+				Source:               tr.Source,
+				Destination:          tr.Destination,
 			})
 		}
 		if len(epochRefs) > 0 {
@@ -193,11 +198,12 @@ func (s *Service) pollOnce(ctx context.Context) int {
 		byUser := make(map[string][]stats.ProcessedTransfer)
 		for _, jr := range jobRecords {
 			s.state.AppendJobEpoch(jobEpochRetention, state.JobEpochSample{
-				Epoch:      jr.EpochID,
-				User:       jr.User,
-				Site:       jr.Site,
-				RuntimeSec: jr.Runtime.Seconds(),
-				EndedAt:    jr.EndedAt,
+				Epoch:                jr.EpochID,
+				User:                 jr.User,
+				Site:                 jr.Site,
+				RuntimeSec:           jr.Runtime.Seconds(),
+				ExecutionDurationSec: jr.ExecutionDuration.Seconds(),
+				EndedAt:              jr.EndedAt,
 			})
 
 			if bucket, _, ok := s.state.LookupBucketForEpoch(jr.EpochID); ok && jr.Runtime > 0 {
@@ -352,10 +358,11 @@ func (s *Service) advertiseOnce() {
 	}
 
 	s.updatePairControllers()
+	s.updateLimitControllers()
 	s.updateScheddLimits()
 
 	ads := s.buildSummaryAds()
-	ads = append(ads, s.buildPairAds()...)
+	ads = append(ads, s.buildLimitAds()...)
 	if len(ads) == 0 {
 		return
 	}
@@ -394,7 +401,36 @@ func (s *Service) updatePairControllers() {
 	}
 }
 
-// updateScheddLimits synchronizes schedd startup limits based on pair states
+// getNextSequence returns the next sequence number for an ad and increments it
+func (s *Service) getNextSequence(adName string) int {
+	seq := s.adSequence[adName]
+	s.adSequence[adName] = seq + 1
+	return seq
+}
+
+// updateLimitControllers steps the per-(user,site) AIMD controller and persists state.
+func (s *Service) updateLimitControllers() {
+	if s.tracker == nil || s.state == nil {
+		return
+	}
+
+	pairs := s.gatherUserSitePairs()
+	if len(pairs) == 0 {
+		return
+	}
+
+	now := time.Now()
+	controller := control.NewPairController(s.controlCfg)
+
+	for pair := range pairs {
+		metrics := limitMetrics(s.controlCfg, s.state, s.tracker, pair.User, pair.Site)
+		prev := s.state.LimitState(pair.User, pair.Site)
+		next := controller.Step(now, prev, metrics)
+		s.state.SetLimitState(pair.User, pair.Site, next)
+	}
+}
+
+// updateScheddLimits synchronizes schedd startup limits based on user+site pair states
 func (s *Service) updateScheddLimits() {
 	if s.limitMgr == nil {
 		if err := s.ensureLimitManager(); err != nil {
@@ -407,19 +443,49 @@ func (s *Service) updateScheddLimits() {
 		return
 	}
 
-	// Gather pair states
-	pairs := s.gatherPairs()
-	pairStates := make(map[control.PairKey]control.PairState)
-	for pair := range pairs {
-		pairStates[pair] = s.state.PairState(pair.Source, pair.Destination)
+	// Gather user+site pairs from summaries
+	userSitePairs := s.gatherUserSitePairs()
+
+	// For each user+site pair, check if it's in RED state based on its control metrics
+	userSiteStates := make(map[UserSitePair]control.PairState)
+
+	for pair := range userSitePairs {
+		// Get the limit state for this user+site pair
+		limitState := s.state.LimitState(pair.User, pair.Site)
+
+		// Compute metrics for this user+site pair
+		metrics := limitMetrics(s.controlCfg, s.state, s.tracker, pair.User, pair.Site)
+		errorBand := control.ClassifyBand(metrics.ErrorRate, s.controlCfg.ErrorGreenThreshold, s.controlCfg.ErrorYellowThreshold)
+		costBand := control.ClassifyBand(metrics.CostPct/100.0, s.controlCfg.CostGreenThresholdPercent/100.0, s.controlCfg.CostYellowThresholdPercent/100.0)
+
+		if errorBand == control.BandRed || costBand == control.BandRed {
+			userSiteStates[pair] = limitState
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := s.limitMgr.updateLimits(ctx, pairStates, s.tracker, s.controlCfg); err != nil {
+	if err := s.limitMgr.updateLimits(ctx, userSiteStates, s.tracker, s.controlCfg); err != nil {
 		s.logger.Printf("limit update error: %v", err)
 	}
+}
+
+// gatherUserSitePairs extracts unique user+site combinations from summaries
+func (s *Service) gatherUserSitePairs() map[UserSitePair]struct{} {
+	pairs := make(map[UserSitePair]struct{})
+
+	_, buckets := s.state.Snapshot()
+	for rawKey := range buckets {
+		key := state.DecodeKey(rawKey)
+		if key.User == "" || key.Site == "" {
+			continue
+		}
+		pair := UserSitePair{User: key.User, Site: key.Site}
+		pairs[pair] = struct{}{}
+	}
+
+	return pairs
 }
 
 // ensureLimitManager lazily initializes the schedd and limit manager
@@ -439,7 +505,7 @@ func (s *Service) ensureLimitManager() error {
 	}
 
 	s.schedd = htcondor.NewSchedd(location.Name, location.Address)
-	
+
 	// Get daemon name for limit tags - prefer scheddName from config, fall back to hostname
 	daemonName := s.scheddName
 	if daemonName == "" {
@@ -458,8 +524,8 @@ func (s *Service) ensureLimitManager() error {
 			}
 		}
 	}
-	
-	s.limitMgr = newLimitManager(s.schedd, daemonName, s.logger)
+
+	s.limitMgr = newLimitManager(s.schedd, daemonName, s.siteAttribute, s.logger)
 	s.logger.Printf("initialized limit manager for schedd %s at %s (daemon name: %s)", location.Name, location.Address, daemonName)
 
 	return nil
@@ -535,18 +601,12 @@ func (s *Service) buildSummaryAds() []map[string]any {
 
 			wk := summaryWindowKey{key: key, prefix: prefix}
 			wm := windowMetrics[wk]
-			windowRate := 0.0
+			windowRate := 1.0 // default to 100% success when no data
 			if wm.success+wm.failure > 0 {
 				windowRate = float64(wm.success) / float64(wm.success+wm.failure)
 			}
 
 			rateStats := windowRates[wk]
-			stageSamples, stagePct := s.state.BucketStageInPercent(jobEpochRetention, rawKey)
-
-			// Compute control loop band classifications
-			errorRate := 1.0 - windowRate
-			errorBand := control.ClassifyBand(errorRate, s.controlCfg.ErrorGreenThreshold, s.controlCfg.ErrorYellowThreshold)
-			costBand := control.ClassifyBand(stagePct/100.0, s.controlCfg.CostGreenThresholdPercent/100.0, s.controlCfg.CostYellowThresholdPercent/100.0)
 
 			name := s.summaryAdName(key, summaryID, prefix)
 			summaryVal := rawKey
@@ -554,75 +614,47 @@ func (s *Service) buildSummaryAds() []map[string]any {
 				summaryVal = fmt.Sprintf("%s|federation=%s", rawKey, prefix)
 			}
 			ad := map[string]any{
-				"Name":               name,
-				"MyType":             "PelicanSummary",
-				"Summary":            summaryVal,
-				"SummaryID":          summaryID,
-				"ScheddName":         s.scheddName,
-				"User":               key.User,
-				"Endpoint":           key.Endpoint,
-				"Site":               key.Site,
-				"Direction":          string(key.Direction),
-				"Updated":            stats.LastUpdated.Unix(),
-				"StatsWindowSeconds": int64(s.statsWindow.Seconds()),
-				"StatsWindowStart":   windowStart.Unix(),
-				"DaemonStart":        daemonStart.Unix(),
-				// Window-scoped counters
-				"WindowSuccessCount":          wm.success,
-				"WindowFailureCount":          wm.failure,
-				"WindowTotalCount":            wm.success + wm.failure,
-				"WindowSuccessBytes":          wm.successBytes,
-				"WindowFailureBytes":          wm.failureBytes,
-				"WindowTotalBytes":            wm.successBytes + wm.failureBytes,
-				"WindowSuccessDurationSec":    wm.successDurationSec,
-				"WindowFailureDurationSec":    wm.failureDurationSec,
-				"WindowTotalDurationSec":      wm.successDurationSec + wm.failureDurationSec,
-				"WindowSuccessRate":           windowRate,
-				"WindowRateAvgBytesPerSec":    rateStats.avg,
-				"WindowRateMedianBytesPerSec": rateStats.median,
-				"WindowRateP10BytesPerSec":    rateStats.p10,
-				"WindowRateP90BytesPerSec":    rateStats.p90,
-				"WindowRateSamples":           rateStats.count,
-				"StageInPercent":              stagePct,
-				"StageInSamples":              stageSamples,
-				"ControlErrorBand":            errorBand.String(),
-				"ControlCostBand":             costBand.String(),
-				// Cumulative totals since daemon start
-				"TotalSuccessCount":       success,
-				"TotalFailureCount":       failure,
-				"TotalCount":              total,
-				"TotalSuccessBytes":       stats.SuccessBytes,
-				"TotalFailureBytes":       stats.FailureBytes,
-				"TotalBytes":              stats.SuccessBytes + stats.FailureBytes,
-				"TotalSuccessDurationSec": stats.SuccessDurationSec,
-				"TotalFailureDurationSec": stats.FailureDurationSec,
-				"TotalDurationSec":        stats.SuccessDurationSec + stats.FailureDurationSec,
-				"TotalSuccessRate":        rate,
-			}
-
-			// Add rate limit information if limit manager is available
-			if s.limitMgr != nil {
-				// Compute source/destination from endpoint/site based on direction
-				// For downloads: source=endpoint (cache), destination=site
-				// For uploads: source=site, destination=endpoint
-				var source, destination string
-				switch key.Direction {
-				case state.DirectionDownload:
-					source = key.Endpoint
-					destination = key.Site
-				case state.DirectionUpload:
-					source = key.Site
-					destination = key.Endpoint
-				default:
-					source = key.Endpoint
-					destination = key.Site
-				}
-				
-				pairKey := control.PairKey{Source: source, Destination: destination}
-				rateCount, rateWindow, active := s.limitMgr.getLimitInfo(pairKey)
-				ad["ControlRateLimit"] = rateCount
-				ad["ControlRateWindow"] = rateWindow
-				ad["ControlLimitActive"] = active
+				"Name":                 name,
+				"MyType":               "PelicanSummary",
+				"UpdateSequenceNumber": s.getNextSequence(name),
+				"DaemonStartTime":      daemonStart.Unix(),
+				"Summary":              summaryVal,
+				"SummaryID":            summaryID,
+				"ScheddName":           s.scheddName,
+				"User":                 key.User,
+				"Endpoint":             key.Endpoint,
+				"Site":                 key.Site,
+				"Direction":            string(key.Direction),
+				"LastHeardFrom":        stats.LastUpdated.Unix(),
+				"StatsWindowSeconds":   int64(s.statsWindow.Seconds()),
+				"StatsWindowStart":     windowStart.Unix(),
+				// Window attempt metrics
+				"WindowAttemptSuccessCount":       wm.success,
+				"WindowAttemptFailureCount":       wm.failure,
+				"WindowAttemptTotalCount":         wm.success + wm.failure,
+				"WindowAttemptSuccessBytes":       wm.successBytes,
+				"WindowAttemptFailureBytes":       wm.failureBytes,
+				"WindowAttemptTotalBytes":         wm.successBytes + wm.failureBytes,
+				"WindowAttemptSuccessDurationSec": wm.successDurationSec,
+				"WindowAttemptFailureDurationSec": wm.failureDurationSec,
+				"WindowAttemptTotalDurationSec":   wm.successDurationSec + wm.failureDurationSec,
+				"WindowAttemptSuccessRate":        windowRate,
+				"WindowRateAvgBytesPerSec":        rateStats.avg,
+				"WindowRateMedianBytesPerSec":     rateStats.median,
+				"WindowRateP10BytesPerSec":        rateStats.p10,
+				"WindowRateP90BytesPerSec":        rateStats.p90,
+				"WindowRateSamples":               rateStats.count,
+				// Cumulative attempt totals since daemon start
+				"TotalAttemptSuccessCount":       success,
+				"TotalAttemptFailureCount":       failure,
+				"TotalAttemptCount":              total,
+				"TotalAttemptSuccessBytes":       stats.SuccessBytes,
+				"TotalAttemptFailureBytes":       stats.FailureBytes,
+				"TotalAttemptBytes":              stats.SuccessBytes + stats.FailureBytes,
+				"TotalAttemptSuccessDurationSec": stats.SuccessDurationSec,
+				"TotalAttemptFailureDurationSec": stats.FailureDurationSec,
+				"TotalAttemptDurationSec":        stats.SuccessDurationSec + stats.FailureDurationSec,
+				"TotalAttemptSuccessRate":        rate,
 			}
 
 			if prefix != "" {
@@ -641,24 +673,27 @@ func (s *Service) buildSummaryAds() []map[string]any {
 		details := s.tracker.SandboxDetails()
 		for _, sb := range details {
 			files := strings.Join(sb.Paths, ",")
+			name := s.sandboxAdName(sb.Name)
 
 			ads = append(ads, map[string]any{
-				"Name":               s.sandboxAdName(sb.Name),
-				"MyType":             "PelicanSandbox",
-				"ScheddName":         s.scheddName,
-				"SandboxName":        sb.Name,
-				"SandboxSize":        sb.SizeBytes,
-				"ObjectCount":        len(sb.Paths),
-				"SandboxFiles":       files,
-				"WindowSuccessCount": sb.Successes,
-				"WindowFailureCount": sb.Failures,
-				"WindowTotalCount":   sb.Successes + sb.Failures,
-				"TotalSuccessCount":  sb.Successes,
-				"TotalFailureCount":  sb.Failures,
-				"TotalCount":         sb.Successes + sb.Failures,
-				"StatsWindowSeconds": int64(s.statsWindow.Seconds()),
-				"StatsWindowStart":   windowStart.Unix(),
-				"DaemonStart":        daemonStart.Unix(),
+				"Name":                  name,
+				"MyType":                "PelicanSandbox",
+				"UpdateSequenceNumber":  s.getNextSequence(name),
+				"DaemonStartTime":       daemonStart.Unix(),
+				"ScheddName":            s.scheddName,
+				"SandboxName":           sb.Name,
+				"SandboxSize":           sb.SizeBytes,
+				"ObjectCount":           len(sb.Paths),
+				"SandboxFiles":          files,
+				"EpochSuccessCount":     sb.Successes,
+				"EpochFailureCount":     sb.Failures,
+				"EpochTotalCount":       sb.Successes + sb.Failures,
+				"TotalFileSuccessCount": sb.Successes,
+				"TotalFileFailureCount": sb.Failures,
+				"TotalFileCount":        sb.Successes + sb.Failures,
+				"StatsWindowSeconds":    int64(s.statsWindow.Seconds()),
+				"StatsWindowStart":      windowStart.Unix(),
+				"DaemonStart":           daemonStart.Unix(),
 			})
 		}
 	}
@@ -666,9 +701,9 @@ func (s *Service) buildSummaryAds() []map[string]any {
 	return ads
 }
 
-// buildPairAds emits capacity ads for each observed (source,destination) pair.
-func (s *Service) buildPairAds() []map[string]any {
-	pairs := s.gatherPairs()
+// buildLimitAds emits limit ads for each observed (user,site) pair.
+func (s *Service) buildLimitAds() []map[string]any {
+	pairs := s.gatherUserSitePairs()
 	if len(pairs) == 0 {
 		return nil
 	}
@@ -676,34 +711,214 @@ func (s *Service) buildPairAds() []map[string]any {
 	ads := make([]map[string]any, 0, len(pairs))
 	windowSeconds := int64(s.statsWindow.Seconds())
 	now := time.Now()
+	windowStart := time.Now().Add(-s.statsWindow)
+	daemonStart := s.startTime
+
+	// Compute window metrics from tracker
+	windowMetrics := make(map[UserSitePair]outcomeMetrics)
+	windowRates := make(map[UserSitePair]rateStats)
+	if s.tracker != nil {
+		windowMetrics = aggregateLimitWindowMetrics(s.tracker.AllTransfers())
+		windowRates = aggregateLimitWindowRates(s.tracker.AllTransfers())
+	}
+
+	// Get cumulative stats from state buckets
+	_, buckets := s.state.Snapshot()
+	userSiteTotals := make(map[UserSitePair]state.SummaryStats)
+	for rawKey, stats := range buckets {
+		key := state.DecodeKey(rawKey)
+		if key.User == "" || key.Site == "" {
+			continue
+		}
+		pair := UserSitePair{User: key.User, Site: key.Site}
+		agg := userSiteTotals[pair]
+		agg.Successes += stats.Successes
+		agg.Failures += stats.Failures
+		agg.SuccessBytes += stats.SuccessBytes
+		agg.FailureBytes += stats.FailureBytes
+		agg.SuccessDurationSec += stats.SuccessDurationSec
+		agg.FailureDurationSec += stats.FailureDurationSec
+		if stats.LastUpdated.After(agg.LastUpdated) {
+			agg.LastUpdated = stats.LastUpdated
+		}
+		userSiteTotals[pair] = agg
+	}
 
 	for pair := range pairs {
-		metrics := pairMetrics(s.controlCfg, s.state, s.tracker, pair.Source, pair.Destination)
-		stageSamples, stagePct := 0, 0.0
+		metrics := limitMetrics(s.controlCfg, s.state, s.tracker, pair.User, pair.Site)
+
+		// Get window metrics first
+		wm := windowMetrics[pair]
+		windowRate := 1.0 // default to 100% success when no data
+		if wm.epochsWithSuccess+wm.epochsWithFailure > 0 {
+			windowRate = float64(wm.epochsWithSuccess) / float64(wm.epochsWithSuccess+wm.epochsWithFailure)
+		}
+		rateStats := windowRates[pair]
+
+		// Calculate stage-in percent from window metrics
+		// Use average stage-in time from transfer window (10 min) as percentage of
+		// average execution duration from job window (24 hour)
+		stageInStats := state.StageInStats{}
+
+		// Get historical epoch counts and execution time metrics from 24-hour window
+		historicalStats := state.StageInStats{}
 		if s.state != nil {
-			stageSamples, stagePct = s.state.PairStageInPercent(jobEpochRetention, pair.Source, pair.Destination)
+			historicalStats = s.state.UserSiteStageInPercent(jobEpochRetention, pair.User, pair.Site)
 		}
 
-		state := s.state.PairState(pair.Source, pair.Destination)
-		updated := state.LastUpdated
+		// Calculate cost metric: transfer window wall-clock time vs job window execution time
+		if wm.epochsWithWallClockSuccess > 0 && historicalStats.ExecutionOnlyTimeCount > 0 {
+			// Average stage-in time from transfer window (10 minutes)
+			avgWallClockDuration := wm.successWallClockSec / float64(wm.epochsWithWallClockSuccess)
+			// Average execution-only time from job window (24 hours)
+			avgExecutionDuration := historicalStats.TotalExecutionOnlyTimeSec / float64(historicalStats.ExecutionOnlyTimeCount)
+			if avgExecutionDuration > 0 {
+				// Stage-in % = (avg transfer wall-clock / avg execution time) × 100
+				stageInStats.Percent = (avgWallClockDuration / avgExecutionDuration) * 100.0
+				stageInStats.Samples = wm.epochsWithWallClockSuccess
+			}
+		}
+
+		limitState := s.state.LimitState(pair.User, pair.Site)
+		updated := limitState.LastUpdated
 		if updated.IsZero() {
 			updated = now
 		}
 
-		ads = append(ads, map[string]any{
-			"Name":               s.pairAdName(pair.Source, pair.Destination),
-			"MyType":             "PelicanPair",
-			"ScheddName":         s.scheddName,
-			"Source":             pair.Source,
-			"Destination":        pair.Destination,
-			"Updated":            updated.Unix(),
-			"CapacityGBPerMin":   state.CapacityGBPerMin,
-			"ErrorRate":          metrics.ErrorRate,
-			"StageInPercent":     stagePct,
-			"StageInSamples":     stageSamples,
-			"JobCostGB":          metrics.JobCostGB,
-			"StatsWindowSeconds": windowSeconds,
-		})
+		// Get total metrics
+		totals := userSiteTotals[pair]
+		totalSuccess := totals.Successes
+		totalFailure := totals.Failures
+		totalCount := totalSuccess + totalFailure
+		totalRate := 0.0
+		if totalCount > 0 {
+			totalRate = float64(totalSuccess) / float64(totalCount)
+		}
+
+		// Compute total epoch metrics from state
+		totalEpochs := s.state.CountEpochs(pair.User, pair.Site)
+
+		// Compute control loop band classifications
+		errorRate := 1.0 - windowRate
+		errorBand := control.ClassifyBand(errorRate, s.controlCfg.ErrorGreenThreshold, s.controlCfg.ErrorYellowThreshold)
+		costBand := control.ClassifyBand(stageInStats.Percent/100.0, s.controlCfg.CostGreenThresholdPercent/100.0, s.controlCfg.CostYellowThresholdPercent/100.0)
+
+		// Get per-user averages for job size and runtime
+		avgJobRuntimeSec := 0.0
+		avgJobSizeBytes := 0.0
+		if s.tracker != nil {
+			avgJobRuntimeSec = s.tracker.AverageExecutionTime(pair.User)
+			avgJobSizeBytes = s.tracker.AverageInputSize(pair.User)
+		}
+
+		// Compute files per job estimate from window metrics
+		avgFilesPerJob := 0.0
+		if wm.epochsWithSuccess > 0 && wm.successFiles > 0 {
+			avgFilesPerJob = float64(wm.successFiles) / float64(wm.epochsWithSuccess)
+		}
+
+		// Compute average wall-clock duration per epoch
+		avgWallClockSuccess := 0.0
+		avgWallClockFailure := 0.0
+		if wm.epochsWithWallClockSuccess > 0 {
+			avgWallClockSuccess = wm.successWallClockSec / float64(wm.epochsWithWallClockSuccess)
+		}
+		if wm.epochsWithWallClockFailure > 0 {
+			avgWallClockFailure = wm.failureWallClockSec / float64(wm.epochsWithWallClockFailure)
+		}
+
+		ad := map[string]any{
+			"Name":                  s.limitAdName(pair.User, pair.Site),
+			"MyType":                "PelicanLimit",
+			"UpdateSequenceNumber":  s.getNextSequence(s.limitAdName(pair.User, pair.Site)),
+			"DaemonStartTime":       daemonStart.Unix(),
+			"ScheddName":            s.scheddName,
+			"User":                  pair.User,
+			"Site":                  pair.Site,
+			"LastHeardFrom":         updated.Unix(),
+			"StatsWindowSeconds":    windowSeconds,
+			"StatsWindowStart":      windowStart.Unix(),
+			"JobEpochWindowSeconds": int64(jobEpochRetention.Seconds()),
+			// Window-scoped counters
+			"WindowEpochSuccessCount":           wm.epochsWithSuccess,
+			"WindowEpochFailureCount":           wm.epochsWithFailure,
+			"WindowEpochTotalCount":             wm.epochsWithSuccess + wm.epochsWithFailure,
+			"WindowEpochSuccessBytes":           wm.successBytes,
+			"WindowEpochFailureBytes":           wm.failureBytes,
+			"WindowEpochTotalBytes":             wm.successBytes + wm.failureBytes,
+			"WindowFileSuccessDurationSec":      wm.successDurationAllAttempts,
+			"WindowFileFailureDurationSec":      wm.failureDurationAllAttempts,
+			"WindowFileTotalDurationSec":        wm.successDurationAllAttempts + wm.failureDurationAllAttempts,
+			"WindowEpochSuccessWallClockSec":    wm.successWallClockSec,
+			"WindowEpochFailureWallClockSec":    wm.failureWallClockSec,
+			"WindowEpochTotalWallClockSec":      wm.successWallClockSec + wm.failureWallClockSec,
+			"WindowEpochAvgWallClockSuccessSec": avgWallClockSuccess,
+			"WindowEpochAvgWallClockFailureSec": avgWallClockFailure,
+			"WindowSuccessRate":                 windowRate,
+			"WindowRateAvgBytesPerSec":          rateStats.avg,
+			"WindowRateMedianBytesPerSec":       rateStats.median,
+			"WindowRateP10BytesPerSec":          rateStats.p10,
+			"WindowRateP90BytesPerSec":          rateStats.p90,
+			"WindowEpochSuccessFiles":           wm.successFiles,
+			"WindowEpochFailureFiles":           wm.failureFiles,
+			"WindowEpochTotalFiles":             wm.successFiles + wm.failureFiles,
+			// Cumulative totals since daemon start
+			"TotalFileSuccessCount":         totalSuccess,
+			"TotalFileFailureCount":         totalFailure,
+			"TotalFileCount":                totalCount,
+			"TotalFileSuccessBytes":         totals.SuccessBytes,
+			"TotalFileFailureBytes":         totals.FailureBytes,
+			"TotalFileBytes":                totals.SuccessBytes + totals.FailureBytes,
+			"TotalFileSuccessDurationSec":   totals.SuccessDurationSec,
+			"TotalFileFailureDurationSec":   totals.FailureDurationSec,
+			"TotalFileDurationSec":          totals.SuccessDurationSec + totals.FailureDurationSec,
+			"TotalFileSuccessRate":          totalRate,
+			"TotalEpochSuccessCount":        totalEpochs.SuccessCount,
+			"TotalEpochFailureCount":        totalEpochs.FailureCount,
+			"TotalEpochCount":               totalEpochs.TotalCount,
+			"TotalEpochSuccessWallClockSec": totalEpochs.SuccessWallClockSec,
+			"TotalEpochFailureWallClockSec": totalEpochs.FailureWallClockSec,
+			"TotalEpochWallClockSec":        totalEpochs.SuccessWallClockSec + totalEpochs.FailureWallClockSec,
+			// Per-user averages (repeated across all sites for this user)
+			"AvgJobRuntimeSec": avgJobRuntimeSec,
+			"AvgJobSizeBytes":  avgJobSizeBytes,
+			"AvgFilesPerJob":   avgFilesPerJob,
+			// Control loop metrics
+			"CapacityGBPerMin": limitState.CapacityGBPerMin,
+			"ErrorRate":        errorRate,
+			"StageInPercent":   stageInStats.Percent,
+			// Historical epoch counts (24-hour window for context)
+			"JobWindowJobEpochs":                 historicalStats.JobEpochs,
+			"JobWindowTransferEpochs":            historicalStats.TransferEpochs,
+			"JobWindowEpochsWithBoth":            historicalStats.EpochsWithBoth,
+			"JobWindowExecutionTimeCount":        historicalStats.ExecutionTimeCount,
+			"JobWindowTotalExecutionTimeSec":     historicalStats.TotalExecutionTimeSec,
+			"JobWindowExecutionOnlyTimeCount":    historicalStats.ExecutionOnlyTimeCount,
+			"JobWindowTotalExecutionOnlyTimeSec": historicalStats.TotalExecutionOnlyTimeSec,
+			"JobCostGB":                          metrics.JobCostGB,
+			"ControlErrorBand":                   errorBand.String(),
+			"ControlCostBand":                    costBand.String(),
+		}
+
+		// Add rate limit information if limit manager is available
+		if s.limitMgr != nil {
+			rateCount, rateWindow, active := s.limitMgr.getLimitInfo(pair)
+			ad["ControlRateLimit"] = rateCount
+			ad["ControlRateWindow"] = rateWindow
+			ad["ControlLimitActive"] = active
+
+			// Add limit statistics if available
+			hitCount, jobsSkipped, lastHit, exists := s.limitMgr.getLimitStats(pair)
+			if exists {
+				ad["ControlLimitHitCount"] = hitCount
+				ad["ControlLimitJobsSkipped"] = jobsSkipped
+				if !lastHit.IsZero() {
+					ad["ControlLimitLastHit"] = lastHit.Unix()
+				}
+			}
+		}
+
+		ads = append(ads, ad)
 	}
 
 	return ads
@@ -711,12 +926,22 @@ func (s *Service) buildPairAds() []map[string]any {
 
 // outcomeMetrics captures aggregate results for a summary key over the stats window.
 type outcomeMetrics struct {
-	success            int
-	failure            int
-	successBytes       int64
-	failureBytes       int64
-	successDurationSec float64
-	failureDurationSec float64
+	success                    int
+	failure                    int
+	successBytes               int64
+	failureBytes               int64
+	successDurationSec         float64
+	failureDurationSec         float64
+	successWallClockSec        float64 // wall-clock transfer time (accounts for parallelism)
+	failureWallClockSec        float64
+	successDurationAllAttempts float64 // sum of durations across all attempts (for PelicanLimit)
+	failureDurationAllAttempts float64
+	successFiles               int // count of successful file transfers
+	failureFiles               int // count of failed file transfers
+	epochsWithWallClockSuccess int // count of epochs with wall-clock data (for averaging)
+	epochsWithWallClockFailure int
+	epochsWithSuccess          int // count of unique epochs with successful transfers
+	epochsWithFailure          int // count of unique epochs with failed transfers
 }
 
 type rateStats struct {
@@ -738,10 +963,16 @@ func addOutcome(metrics map[summaryWindowKey]outcomeMetrics, key summaryWindowKe
 		m.success++
 		m.successBytes += tr.Bytes
 		m.successDurationSec += tr.Duration.Seconds()
+		if tr.Bytes > 0 { // Only count actual file transfers, not job-only entries
+			m.successFiles++
+		}
 	} else {
 		m.failure++
 		m.failureBytes += tr.Bytes
 		m.failureDurationSec += tr.Duration.Seconds()
+		if tr.Bytes > 0 {
+			m.failureFiles++
+		}
 	}
 	metrics[key] = m
 }
@@ -780,6 +1011,172 @@ func aggregateWindowRates(transfers []stats.ProcessedTransfer) map[summaryWindow
 	}
 
 	out := make(map[summaryWindowKey]rateStats, len(byKey))
+	for k, vals := range byKey {
+		if len(vals) == 0 {
+			continue
+		}
+		sort.Float64s(vals)
+		sum := 0.0
+		for _, v := range vals {
+			sum += v
+		}
+		out[k] = rateStats{
+			avg:    sum / float64(len(vals)),
+			median: quantile(vals, 0.5),
+			p10:    quantile(vals, 0.10),
+			p90:    quantile(vals, 0.90),
+			count:  len(vals),
+		}
+	}
+	return out
+}
+
+// aggregateLimitWindowMetrics groups transfers by user+site pair for window reporting.
+func aggregateLimitWindowMetrics(transfers []stats.ProcessedTransfer) map[UserSitePair]outcomeMetrics {
+	metrics := make(map[UserSitePair]outcomeMetrics)
+	// Track wall-clock time span per (epoch, user+site) combination
+	epochWallClock := make(map[string]struct {
+		earliestStart time.Time
+		latestEnd     time.Time
+		success       bool
+		pair          UserSitePair
+	})
+	// Track files per (epoch, user+site) to avoid counting retries as separate files
+	epochFiles := make(map[string]struct {
+		successFiles int
+		failureFiles int
+		pair         UserSitePair
+	})
+
+	for _, tr := range transfers {
+		if tr.User == "" || tr.Site == "" {
+			continue
+		}
+		pair := UserSitePair{User: tr.User, Site: tr.Site}
+		m := metrics[pair]
+
+		// Track per-attempt metrics (counts all attempts including retries)
+		if tr.Success {
+			m.success++
+			// For PelicanLimit: sum duration across all successful attempts
+			m.successDurationAllAttempts += tr.Duration.Seconds()
+		} else {
+			m.failure++
+			// For PelicanLimit: sum duration across all failed attempts
+			m.failureDurationAllAttempts += tr.Duration.Seconds()
+		}
+
+		// Track per-file metrics (only count final attempt for each file)
+		// This is used for PelicanSummary
+		if tr.LastAttempt {
+			if tr.Success {
+				m.successBytes += tr.Bytes
+				m.successDurationSec += tr.Duration.Seconds()
+			} else {
+				m.failureBytes += tr.Bytes
+				m.failureDurationSec += tr.Duration.Seconds()
+			}
+		}
+
+		// Track epoch time span (earliest start to latest end) per (epoch, user+site)
+		epochKey := fmt.Sprintf("%s-%s-%d-%d-%d", pair.User, pair.Site, tr.Epoch.ClusterID, tr.Epoch.ProcID, tr.Epoch.RunInstanceID)
+		if !tr.EndedAt.IsZero() {
+			if existing, ok := epochWallClock[epochKey]; !ok {
+				// First transfer for this epoch
+				startTime := tr.EndedAt.Add(-tr.Duration)
+				epochWallClock[epochKey] = struct {
+					earliestStart time.Time
+					latestEnd     time.Time
+					success       bool
+					pair          UserSitePair
+				}{earliestStart: startTime, latestEnd: tr.EndedAt, success: tr.Success, pair: pair}
+			} else {
+				// Update with new start/end times
+				startTime := tr.EndedAt.Add(-tr.Duration)
+				if startTime.Before(existing.earliestStart) {
+					existing.earliestStart = startTime
+				}
+				if tr.EndedAt.After(existing.latestEnd) {
+					existing.latestEnd = tr.EndedAt
+				}
+				// Epoch is successful if any transfer succeeded (or keep existing success status)
+				if tr.Success || existing.success {
+					existing.success = true
+				}
+				epochWallClock[epochKey] = existing
+			}
+		}
+
+		// Track unique files per epoch (only count each file once per epoch, not per attempt)
+		if tr.LastAttempt {
+			epochKey := fmt.Sprintf("%s-%s-%d-%d-%d", pair.User, pair.Site, tr.Epoch.ClusterID, tr.Epoch.ProcID, tr.Epoch.RunInstanceID)
+			ef := epochFiles[epochKey]
+			ef.pair = pair
+			if tr.Success {
+				ef.successFiles++
+			} else {
+				ef.failureFiles++
+			}
+			epochFiles[epochKey] = ef
+		}
+
+		metrics[pair] = m
+	}
+
+	// Add wall-clock time spans per epoch to the metrics
+	for _, wc := range epochWallClock {
+		m := metrics[wc.pair]
+		if !wc.earliestStart.IsZero() && !wc.latestEnd.IsZero() {
+			spanDuration := wc.latestEnd.Sub(wc.earliestStart).Seconds()
+			if wc.success {
+				m.successWallClockSec += spanDuration
+				m.epochsWithWallClockSuccess++
+			} else {
+				m.failureWallClockSec += spanDuration
+				m.epochsWithWallClockFailure++
+			}
+		}
+		metrics[wc.pair] = m
+	}
+
+	// Add per-epoch file counts to the metrics
+	for _, ef := range epochFiles {
+		m := metrics[ef.pair]
+		m.successFiles += ef.successFiles
+		m.failureFiles += ef.failureFiles
+		// Count epochs with at least one successful file
+		if ef.successFiles > 0 {
+			m.epochsWithSuccess++
+		}
+		// Count epochs with at least one failed file
+		if ef.failureFiles > 0 {
+			m.epochsWithFailure++
+		}
+		metrics[ef.pair] = m
+	}
+
+	return metrics
+}
+
+// aggregateLimitWindowRates computes rate statistics for user+site pairs.
+func aggregateLimitWindowRates(transfers []stats.ProcessedTransfer) map[UserSitePair]rateStats {
+	byKey := make(map[UserSitePair][]float64)
+	for _, tr := range transfers {
+		if tr.User == "" || tr.Site == "" {
+			continue
+		}
+		if !tr.Success {
+			continue
+		}
+		if tr.Duration <= 0 || tr.Bytes <= 0 {
+			continue
+		}
+		rate := float64(tr.Bytes) / tr.Duration.Seconds()
+		pair := UserSitePair{User: tr.User, Site: tr.Site}
+		byKey[pair] = append(byKey[pair], rate)
+	}
+
+	out := make(map[UserSitePair]rateStats, len(byKey))
 	for k, vals := range byKey {
 		if len(vals) == 0 {
 			continue
@@ -942,6 +1339,15 @@ func (s *Service) pairAdName(source, destination string) string {
 	return fmt.Sprintf("%s_pair_%s_%s", schedd, sanitizeLabel(source), sanitizeLabel(destination))
 }
 
+// limitAdName returns a stable ad name for a (user,site) limit.
+func (s *Service) limitAdName(user, site string) string {
+	schedd := sanitizeLabel(s.scheddName)
+	if schedd == "" {
+		schedd = "unknown"
+	}
+	return fmt.Sprintf("%s_limit_%s_%s", schedd, sanitizeLabel(user), sanitizeLabel(site))
+}
+
 // sanitizeLabel ensures ClassAd names avoid problematic characters and remain reasonably short.
 func sanitizeLabel(part string) string {
 	part = strings.TrimSpace(part)
@@ -1071,24 +1477,25 @@ func (s *Service) buildProcessedTransfers(rec condor.TransferRecord) []stats.Pro
 		normObj := normalizeSandboxObject(f.URL)
 
 		out = append(out, stats.ProcessedTransfer{
-			Epoch:            rec.EpochID,
-			User:             rec.User,
-			Endpoint:         rec.Endpoint,
-			Site:             rec.Site,
-			Source:           source,
-			Destination:      destination,
-			Direction:        state.Direction(rec.Direction),
-			FederationPrefix: fedPrefix,
-			SandboxObject:    normObj,
-			Bytes:            f.Bytes,
-			Duration:         duration,
-			JobRuntime:       rec.JobRuntime,
-			Success:          f.Success && rec.Success,
-			LastAttempt:      f.Success || rec.Success,
-			EndedAt:          f.End,
-			Cached:           f.Cached,
-			SandboxName:      rec.SandboxName,
-			SandboxSize:      rec.SandboxSize,
+			Epoch:             rec.EpochID,
+			User:              rec.User,
+			Endpoint:          rec.Endpoint,
+			Site:              rec.Site,
+			Source:            source,
+			Destination:       destination,
+			Direction:         state.Direction(rec.Direction),
+			FederationPrefix:  fedPrefix,
+			SandboxObject:     normObj,
+			Bytes:             f.Bytes,
+			Duration:          duration,
+			WallClockDuration: rec.WallClockDuration,
+			JobRuntime:        rec.JobRuntime,
+			Success:           f.Success && rec.Success,
+			LastAttempt:       f.Success || rec.Success,
+			EndedAt:           f.End,
+			Cached:            f.Cached,
+			SandboxName:       rec.SandboxName,
+			SandboxSize:       rec.SandboxSize,
 		})
 	}
 	return out

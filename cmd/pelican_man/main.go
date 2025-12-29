@@ -83,7 +83,7 @@ func main() {
 		logger.Printf("job mirror initialization failed: %v; falling back to schedd polling", err)
 	}
 
-	svc := daemon.NewService(condorClient, st, cfg.StatePath, cfg.PollInterval, cfg.AdvertiseInterval, cfg.EpochLookback, cfg.StatsWindow, tracker, jobMirror, cfg.JobMirrorPath, directorClient, logger, *advertiseDryRun, cfg.ScheddName, *oneshoot)
+	svc := daemon.NewService(condorClient, st, cfg.StatePath, cfg.PollInterval, cfg.AdvertiseInterval, cfg.EpochLookback, cfg.StatsWindow, tracker, jobMirror, cfg.JobMirrorPath, directorClient, logger, *advertiseDryRun, cfg.ScheddName, cfg.SiteAttribute, *oneshoot)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

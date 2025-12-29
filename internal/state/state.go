@@ -122,6 +122,15 @@ type FederationStats struct {
 	FailureDurationSec float64 `json:"failure_duration_sec"`
 }
 
+// EpochCounts aggregates epoch-level metrics for a user+site pair.
+type EpochCounts struct {
+	SuccessCount        int
+	FailureCount        int
+	TotalCount          int
+	SuccessWallClockSec float64
+	FailureWallClockSec float64
+}
+
 // State persists progress through the transfer epoch history.
 type State struct {
 	LastEpoch       EpochID                           `json:"last_epoch"`
@@ -133,6 +142,7 @@ type State struct {
 	EpochUsers      map[string]string                 `json:"epoch_users,omitempty"`
 	BucketRuntimes  map[string][]BucketRuntimeSample  `json:"bucket_runtimes,omitempty"`
 	PairStates      map[string]control.PairState      `json:"pair_states,omitempty"`
+	LimitStates     map[string]control.PairState      `json:"limit_states,omitempty"`
 	mu              sync.Mutex                        `json:"-"`
 }
 
@@ -160,22 +170,24 @@ type TransferHistoryEntry struct {
 
 // TransferEpochRef keeps track of which transfer epochs contributed to a bucket.
 type TransferEpochRef struct {
-	Epoch         EpochID   `json:"epoch"`
-	EndedAt       time.Time `json:"ended_at"`
-	DurationSec   float64   `json:"duration_sec"`
-	User          string    `json:"user,omitempty"`
-	JobRuntimeSec float64   `json:"job_runtime_sec,omitempty"`
-	Source        string    `json:"source,omitempty"`
-	Destination   string    `json:"destination,omitempty"`
+	Epoch                EpochID   `json:"epoch"`
+	EndedAt              time.Time `json:"ended_at"`
+	DurationSec          float64   `json:"duration_sec"`
+	WallClockDurationSec float64   `json:"wall_clock_duration_sec,omitempty"`
+	User                 string    `json:"user,omitempty"`
+	JobRuntimeSec        float64   `json:"job_runtime_sec,omitempty"`
+	Source               string    `json:"source,omitempty"`
+	Destination          string    `json:"destination,omitempty"`
 }
 
 // JobEpochSample persists a completed job epoch for later lookup.
 type JobEpochSample struct {
-	Epoch      EpochID   `json:"epoch"`
-	User       string    `json:"user"`
-	Site       string    `json:"site,omitempty"`
-	RuntimeSec float64   `json:"runtime_sec"`
-	EndedAt    time.Time `json:"ended_at"`
+	Epoch                EpochID   `json:"epoch"`
+	User                 string    `json:"user"`
+	Site                 string    `json:"site,omitempty"`
+	RuntimeSec           float64   `json:"runtime_sec"`                      // Total duration (ActivationDuration)
+	ExecutionDurationSec float64   `json:"execution_duration_sec,omitempty"` // Execution only (ActivationExecutionDuration)
+	EndedAt              time.Time `json:"ended_at"`
 }
 
 // BucketRuntimeSample stores a runtime measurement mapped to a transfer bucket.
@@ -196,6 +208,7 @@ func New() *State {
 		EpochUsers:      make(map[string]string),
 		BucketRuntimes:  make(map[string][]BucketRuntimeSample),
 		PairStates:      make(map[string]control.PairState),
+		LimitStates:     make(map[string]control.PairState),
 	}
 }
 
@@ -279,6 +292,54 @@ func (s *State) Snapshot() (EpochID, map[string]SummaryStats) {
 		copyBuckets[k] = v
 	}
 	return s.LastEpoch, copyBuckets
+}
+
+// CountEpochs returns epoch-level aggregates for a user+site pair.
+func (s *State) CountEpochs(user, site string) EpochCounts {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	counts := EpochCounts{}
+	seenEpochs := make(map[EpochID]bool)
+	epochSuccess := make(map[EpochID]bool)
+	epochWallClock := make(map[EpochID]float64)
+
+	// Iterate through all buckets for this user+site
+	for key, refs := range s.EpochBuckets {
+		decoded := DecodeKey(key)
+		if decoded.User != user || decoded.Site != site {
+			continue
+		}
+
+		// Track unique epochs and their success status
+		for _, ref := range refs {
+			if !seenEpochs[ref.Epoch] {
+				seenEpochs[ref.Epoch] = true
+				counts.TotalCount++
+			}
+
+			// Track wall-clock time (use maximum for each epoch)
+			if ref.WallClockDurationSec > epochWallClock[ref.Epoch] {
+				epochWallClock[ref.Epoch] = ref.WallClockDurationSec
+			}
+		}
+	}
+
+	// Determine success/failure for each epoch by checking JobEpochs
+	for epoch := range seenEpochs {
+		// Check if this epoch exists in JobEpochs (completed successfully)
+		epochKey := epoch.String()
+		if jobEpoch, exists := s.JobEpochs[epochKey]; exists && jobEpoch.RuntimeSec > 0 {
+			epochSuccess[epoch] = true
+			counts.SuccessCount++
+			counts.SuccessWallClockSec += epochWallClock[epoch]
+		} else {
+			counts.FailureCount++
+			counts.FailureWallClockSec += epochWallClock[epoch]
+		}
+	}
+
+	return counts
 }
 
 // Load attempts to read state from a JSON file, returning a new State.
@@ -645,6 +706,135 @@ func (s *State) PairStageInPercent(window time.Duration, source, destination str
 	return samples, percent / float64(samples)
 }
 
+// StageInStats contains statistics about stage-in percentage calculation for a user+site pair.
+type StageInStats struct {
+	Samples                   int     // Number of epochs with both transfer and job data (used for calculation)
+	Percent                   float64 // Average stage-in percentage
+	JobEpochs                 int     // Total job epochs for this user+site in the window
+	TransferEpochs            int     // Transfer epochs for this user+site in the window
+	EpochsWithBoth            int     // Epochs that have both transfer and job data (same as Samples)
+	ExecutionTimeCount        int     // Number of job epochs with non-zero execution time (ActivationDuration)
+	TotalExecutionTimeSec     float64 // Sum of total runtime (ActivationDuration) across all job epochs
+	ExecutionOnlyTimeCount    int     // Number of job epochs with non-zero execution-only time (ActivationExecutionDuration)
+	TotalExecutionOnlyTimeSec float64 // Sum of execution-only time (ActivationExecutionDuration) across all job epochs
+}
+
+// UserSiteStageInPercent estimates stage-in percent for a (user,site) pair over the retention window.
+// Returns statistics including counts of job epochs, transfer epochs, and epochs with both.
+func (s *State) UserSiteStageInPercent(window time.Duration, user, site string) StageInStats {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cutoff := time.Now().Add(-window)
+
+	// Track which epochs have transfer data
+	transferEpochSet := make(map[string]bool)
+
+	agg := make(map[string]struct {
+		dur          float64
+		wallClockDur float64
+		runtime      float64
+		ended        time.Time
+	})
+
+	// Iterate over all bucket keys and filter by user and site
+	// For each epoch, we want the maximum wall-clock duration across all buckets (representing the longest parallel transfer)
+	// Sum durations across all buckets for backwards compatibility
+	for bucketKey, refs := range s.EpochBuckets {
+		summaryKey := DecodeKey(bucketKey)
+		if summaryKey.User != user || summaryKey.Site != site {
+			continue
+		}
+
+		for _, r := range refs {
+			if !r.EndedAt.After(cutoff) {
+				continue
+			}
+			key := epochKey(r.Epoch)
+			transferEpochSet[key] = true
+			entry := agg[key]
+			entry.dur += r.DurationSec
+			// Use the maximum wall-clock duration (for parallel transfers to different endpoints)
+			if r.WallClockDurationSec > entry.wallClockDur {
+				entry.wallClockDur = r.WallClockDurationSec
+			}
+			if r.EndedAt.After(entry.ended) {
+				entry.ended = r.EndedAt
+			}
+			if entry.runtime <= 0 && r.JobRuntimeSec > 0 {
+				entry.runtime = r.JobRuntimeSec
+			}
+			agg[key] = entry
+		}
+	}
+
+	// Count total job epochs for this user+site and compute execution time metrics
+	totalJobEpochs := 0
+	executionTimeCount := 0
+	totalExecutionTimeSec := 0.0
+	executionOnlyTimeCount := 0
+	totalExecutionOnlyTimeSec := 0.0
+	for _, je := range s.JobEpochs {
+		if je.User == user && je.Site == site && je.EndedAt.After(cutoff) {
+			totalJobEpochs++
+			if je.RuntimeSec > 0 {
+				executionTimeCount++
+				totalExecutionTimeSec += je.RuntimeSec
+			}
+			if je.ExecutionDurationSec > 0 {
+				executionOnlyTimeCount++
+				totalExecutionOnlyTimeSec += je.ExecutionDurationSec
+			}
+		}
+	}
+
+	// Try to find job runtime data for transfer epochs
+	for key, entry := range agg {
+		if entry.runtime > 0 {
+			agg[key] = entry
+			continue
+		}
+		if je, ok := s.JobEpochs[key]; ok && je.RuntimeSec > 0 && je.EndedAt.After(cutoff) {
+			entry.runtime = je.RuntimeSec
+			agg[key] = entry
+		}
+	}
+
+	samples := 0
+	percent := 0.0
+	for key, entry := range agg {
+		if entry.runtime <= 0 {
+			delete(agg, key)
+			continue
+		}
+		samples++
+		// Prefer wall-clock duration (accounts for parallel transfers), fall back to summed duration
+		transferDur := entry.wallClockDur
+		if transferDur == 0 {
+			transferDur = entry.dur
+		}
+		// Stage-in percentage = transfer time / total job time × 100
+		percent += (transferDur / entry.runtime) * 100.0
+	}
+
+	avgPercent := 0.0
+	if samples > 0 {
+		avgPercent = percent / float64(samples)
+	}
+
+	return StageInStats{
+		Samples:                   samples,
+		Percent:                   avgPercent,
+		JobEpochs:                 totalJobEpochs,
+		TransferEpochs:            len(transferEpochSet),
+		EpochsWithBoth:            samples,
+		ExecutionTimeCount:        executionTimeCount,
+		TotalExecutionTimeSec:     totalExecutionTimeSec,
+		ExecutionOnlyTimeCount:    executionOnlyTimeCount,
+		TotalExecutionOnlyTimeSec: totalExecutionOnlyTimeSec,
+	}
+}
+
 // PairState returns the stored controller state for a (source,destination) pair, if any.
 func (s *State) PairState(source, destination string) control.PairState {
 	s.mu.Lock()
@@ -712,4 +902,51 @@ func decodePairKey(raw string) (string, string) {
 	src := strings.TrimPrefix(parts[0], "src=")
 	dst := strings.TrimPrefix(parts[1], "dst=")
 	return src, dst
+}
+
+// limitKey creates a key for a (user,site) limit.
+func limitKey(user, site string) string {
+	return fmt.Sprintf("user=%s|site=%s", user, site)
+}
+
+// decodeLimitKey decodes a limit key into user and site.
+func decodeLimitKey(raw string) (string, string) {
+	parts := strings.Split(raw, "|")
+	if len(parts) != 2 {
+		return "", ""
+	}
+	user := strings.TrimPrefix(parts[0], "user=")
+	site := strings.TrimPrefix(parts[1], "site=")
+	return user, site
+}
+
+// LimitState returns the stored controller state for a (user,site) limit pair.
+func (s *State) LimitState(user, site string) control.PairState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.LimitStates[limitKey(user, site)]
+}
+
+// SetLimitState persists controller state for a (user,site) limit pair.
+func (s *State) SetLimitState(user, site string, st control.PairState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.LimitStates == nil {
+		s.LimitStates = make(map[string]control.PairState)
+	}
+	s.LimitStates[limitKey(user, site)] = st
+}
+
+// SnapshotLimitStates returns a copy of all stored limit states.
+func (s *State) SnapshotLimitStates() map[string]control.PairState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make(map[string]control.PairState, len(s.LimitStates))
+	for k, v := range s.LimitStates {
+		out[k] = v
+	}
+	return out
 }

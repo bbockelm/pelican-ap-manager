@@ -1,6 +1,7 @@
 package stats
 
 import (
+	"fmt"
 	"net/url"
 	"sort"
 	"strings"
@@ -12,24 +13,25 @@ import (
 
 // ProcessedTransfer represents a single file transfer after enrichment.
 type ProcessedTransfer struct {
-	Epoch            state.EpochID
-	User             string
-	Endpoint         string
-	Site             string
-	Source           string
-	Destination      string
-	Direction        state.Direction
-	FederationPrefix string
-	SandboxObject    string
-	Bytes            int64
-	Duration         time.Duration
-	JobRuntime       time.Duration
-	Success          bool
-	LastAttempt      bool
-	EndedAt          time.Time
-	Cached           bool
-	SandboxName      string
-	SandboxSize      int64
+	Epoch             state.EpochID
+	User              string
+	Endpoint          string
+	Site              string
+	Source            string
+	Destination       string
+	Direction         state.Direction
+	FederationPrefix  string
+	SandboxObject     string
+	Bytes             int64
+	Duration          time.Duration
+	WallClockDuration time.Duration
+	JobRuntime        time.Duration
+	Success           bool
+	LastAttempt       bool
+	EndedAt           time.Time
+	Cached            bool
+	SandboxName       string
+	SandboxSize       int64
 }
 
 // Tracker maintains rolling, in-memory statistics for transfers over a window.
@@ -353,6 +355,60 @@ func (t *Tracker) AverageRuntime(user string) float64 {
 	return total.Seconds() / float64(count)
 }
 
+// AverageExecutionTime returns average job execution time (runtime minus transfer wall-clock) for a user.
+// This represents the actual compute time, excluding I/O overhead.
+func (t *Tracker) AverageExecutionTime(user string) float64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	var totalExecution time.Duration
+	var count int64
+	cutoff := time.Now().Add(-t.window)
+
+	// Group by epoch to compute execution time per job
+	epochData := make(map[string]struct {
+		runtime   time.Duration
+		wallClock time.Duration
+	})
+
+	for _, tr := range t.perUser[user] {
+		if !tr.Success {
+			continue
+		}
+		if tr.EndedAt.Before(cutoff) {
+			continue
+		}
+		if tr.JobRuntime <= 0 {
+			continue
+		}
+
+		epochKey := fmt.Sprintf("%d-%d-%d", tr.Epoch.ClusterID, tr.Epoch.ProcID, tr.Epoch.RunInstanceID)
+		data := epochData[epochKey]
+		if data.runtime == 0 {
+			data.runtime = tr.JobRuntime
+		}
+		// Track the maximum wall-clock duration for this epoch (parallel transfers)
+		if tr.WallClockDuration > data.wallClock {
+			data.wallClock = tr.WallClockDuration
+		}
+		epochData[epochKey] = data
+	}
+
+	// Compute execution time for each epoch
+	for _, data := range epochData {
+		executionTime := data.runtime - data.wallClock
+		if executionTime > 0 {
+			totalExecution += executionTime
+			count++
+		}
+	}
+
+	if count == 0 {
+		return 0
+	}
+	return totalExecution.Seconds() / float64(count)
+}
+
 // ErrorRate returns failure ratio for a source->dest pair over window.
 func (t *Tracker) ErrorRate(source, dest string) float64 {
 	t.mu.Lock()
@@ -399,6 +455,31 @@ func (t *Tracker) DestinationErrorRate(dest string) float64 {
 			if !tr.Success {
 				fail++
 			}
+		}
+	}
+	if total == 0 {
+		return 0
+	}
+	return float64(fail) / float64(total)
+}
+
+// UserSiteErrorRate returns failure ratio for a (user,site) pair over window.
+func (t *Tracker) UserSiteErrorRate(user, site string) float64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	var fail, total int64
+	cutoff := time.Now().Add(-t.window)
+	for _, tr := range t.perUser[user] {
+		if tr.Site != site {
+			continue
+		}
+		if tr.EndedAt.Before(cutoff) {
+			continue
+		}
+		total++
+		if !tr.Success {
+			fail++
 		}
 	}
 	if total == 0 {

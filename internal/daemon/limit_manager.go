@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"strings"
 	"time"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
@@ -25,13 +26,20 @@ const (
 	ewmaAlpha = 0.2
 )
 
+// UserSitePair identifies a (user,site) combination for rate limiting
+type UserSitePair struct {
+	User string
+	Site string
+}
+
 // limitManager tracks active schedd startup limits and their usage
 type limitManager struct {
-	schedd       *htcondor.Schedd
-	logger       *log.Logger
-	activeLimits map[string]*limitState
-	cfg          limitConfig
-	daemonName   string
+	schedd        *htcondor.Schedd
+	logger        *log.Logger
+	activeLimits  map[string]*limitState
+	cfg           limitConfig
+	daemonName    string
+	siteAttribute string
 }
 
 type limitConfig struct {
@@ -43,20 +51,23 @@ type limitConfig struct {
 
 type limitState struct {
 	uuid          string
-	pairKey       control.PairKey
+	userSitePair  UserSitePair
 	lastHit       time.Time
 	lastUpdated   time.Time
 	rateCount     int
 	capacityGBMin float64
+	hitCount      int64
+	jobsSkipped   int64
 }
 
 // newLimitManager creates a limit manager for the schedd
-func newLimitManager(schedd *htcondor.Schedd, daemonName string, logger *log.Logger) *limitManager {
+func newLimitManager(schedd *htcondor.Schedd, daemonName string, siteAttribute string, logger *log.Logger) *limitManager {
 	m := &limitManager{
-		schedd:       schedd,
-		logger:       logger,
-		activeLimits: make(map[string]*limitState),
-		daemonName:   daemonName,
+		schedd:        schedd,
+		logger:        logger,
+		activeLimits:  make(map[string]*limitState),
+		daemonName:    daemonName,
+		siteAttribute: siteAttribute,
 		cfg: limitConfig{
 			interval:             defaultLimitInterval,
 			expirationInactivity: limitExpirationInactivity,
@@ -79,13 +90,13 @@ func newLimitManager(schedd *htcondor.Schedd, daemonName string, logger *log.Log
 
 	// Re-adopt existing limits
 	for _, limitInfo := range limits {
-		source, destination, ok := parseLimitExpression(limitInfo.Expression)
+		user, site, ok := parseLimitExpression(limitInfo.Expression, siteAttribute)
 		if !ok {
 			logger.Printf("skipping limit %s: could not parse expression %q", limitInfo.UUID, limitInfo.Expression)
 			continue
 		}
 
-		pair := control.PairKey{Source: source, Destination: destination}
+		pair := UserSitePair{User: user, Site: site}
 		pairTag := pairKey(pair)
 
 		lastHit := time.Now()
@@ -95,15 +106,17 @@ func newLimitManager(schedd *htcondor.Schedd, daemonName string, logger *log.Log
 
 		m.activeLimits[pairTag] = &limitState{
 			uuid:          limitInfo.UUID,
-			pairKey:       pair,
+			userSitePair:  pair,
 			lastHit:       lastHit,
 			lastUpdated:   time.Now(),
 			rateCount:     limitInfo.RateCount,
 			capacityGBMin: 0, // Will be recomputed on next update
+			hitCount:      0,
+			jobsSkipped:   0,
 		}
 
-		logger.Printf("re-adopted limit %s for %s->%s: %d jobs/%ds",
-			limitInfo.UUID, source, destination, limitInfo.RateCount, limitInfo.RateWindow)
+		logger.Printf("re-adopted limit %s for user=%s site=%s: %d jobs/%ds",
+			limitInfo.UUID, user, site, limitInfo.RateCount, limitInfo.RateWindow)
 	}
 
 	if len(m.activeLimits) > 0 {
@@ -113,27 +126,21 @@ func newLimitManager(schedd *htcondor.Schedd, daemonName string, logger *log.Log
 	return m
 }
 
-// updateLimits synchronizes schedd limits based on pair controller states
+// updateLimits synchronizes schedd limits based on user+site pairs and their states
 // Only creates/updates limits when a pair is in RED state; removes stale limits
-func (m *limitManager) updateLimits(ctx context.Context, pairs map[control.PairKey]control.PairState, tracker *stats.Tracker, controlCfg control.Config) error {
+func (m *limitManager) updateLimits(ctx context.Context, userSitePairs map[UserSitePair]control.PairState, tracker *stats.Tracker, controlCfg control.Config) error {
 	if !m.cfg.enabled {
 		return nil
 	}
 
 	now := time.Now()
 
-	// Determine which pairs need limits (RED state only)
-	pairsNeedingLimits := make(map[control.PairKey]control.PairState)
-	for pair, state := range pairs {
-		metrics := pairMetrics(controlCfg, nil, tracker, pair.Source, pair.Destination)
-
-		// Check if error or cost metrics are in RED band
-		errorBand := control.ClassifyBand(metrics.ErrorRate, controlCfg.ErrorGreenThreshold, controlCfg.ErrorYellowThreshold)
-		costBand := control.ClassifyBand(metrics.CostPct/100.0, controlCfg.CostGreenThresholdPercent/100.0, controlCfg.CostYellowThresholdPercent/100.0)
-
-		if errorBand == control.BandRed || costBand == control.BandRed {
-			pairsNeedingLimits[pair] = state
-		}
+	// Determine which user+site pairs need limits (RED state only)
+	// The pairs are already filtered by the caller based on their control state
+	pairsNeedingLimits := make(map[UserSitePair]control.PairState)
+	for pair, state := range userSitePairs {
+		// Note: Caller should pre-filter to only pass pairs in RED state
+		pairsNeedingLimits[pair] = state
 	}
 
 	// Update or create limits for pairs in RED state
@@ -141,19 +148,21 @@ func (m *limitManager) updateLimits(ctx context.Context, pairs map[control.PairK
 		pairTag := pairKey(pair)
 		existing, exists := m.activeLimits[pairTag]
 
-		rateCount := m.calculateRateCount(state, tracker, pair, controlCfg)
+		// For now, use a default rate count based on capacity
+		// TODO: Improve rate count calculation with actual sandbox/transfer metrics
+		rateCount := m.calculateRateCountFromCapacity(state.CapacityGBPerMin, controlCfg)
 
 		if exists {
 			// Update existing limit if rate changed significantly
 			if m.shouldUpdateLimit(existing, rateCount, state.CapacityGBPerMin) {
 				if err := m.updateLimit(ctx, existing, pair, rateCount, state.CapacityGBPerMin); err != nil {
-					m.logger.Printf("limit update error for %s->%s: %v", pair.Source, pair.Destination, err)
+					m.logger.Printf("limit update error for user=%s site=%s: %v", pair.User, pair.Site, err)
 				}
 			}
 		} else {
 			// Create new limit
 			if err := m.createLimit(ctx, pair, rateCount, state.CapacityGBPerMin); err != nil {
-				m.logger.Printf("limit create error for %s->%s: %v", pair.Source, pair.Destination, err)
+				m.logger.Printf("limit create error for user=%s site=%s: %v", pair.User, pair.Site, err)
 			}
 		}
 	}
@@ -163,7 +172,7 @@ func (m *limitManager) updateLimits(ctx context.Context, pairs map[control.PairK
 		m.logger.Printf("limit cleanup error: %v", err)
 	}
 
-	// Query current limits to update lastHit times
+	// Query current limits to update lastHit times and statistics
 	if err := m.refreshLimitStats(ctx); err != nil {
 		m.logger.Printf("limit refresh error: %v", err)
 	}
@@ -171,9 +180,8 @@ func (m *limitManager) updateLimits(ctx context.Context, pairs map[control.PairK
 	return nil
 }
 
-// calculateRateCount converts capacity (GB/min) to jobs per interval using EWMA for initial estimate
-func (m *limitManager) calculateRateCount(state control.PairState, tracker *stats.Tracker, pair control.PairKey, cfg control.Config) int {
-	capacityGBPerMin := state.CapacityGBPerMin
+// calculateRateCountFromCapacity converts capacity (GB/min) to jobs per interval
+func (m *limitManager) calculateRateCountFromCapacity(capacityGBPerMin float64, cfg control.Config) int {
 	if capacityGBPerMin <= 0 {
 		capacityGBPerMin = cfg.MinCapacityGBPerMin
 	}
@@ -182,31 +190,11 @@ func (m *limitManager) calculateRateCount(state control.PairState, tracker *stat
 	intervalMin := m.cfg.interval.Minutes()
 	capacityGBPerInterval := capacityGBPerMin * intervalMin
 
-	// Estimate job cost (data size per job) using EWMA if available
+	// Use default job cost for now
+	// TODO: Improve with actual sandbox size estimates
 	jobCostGB := cfg.DefaultJobCostGB
-	if tracker != nil {
-		recentRate := tracker.AverageRate(pair.Source, pair.Destination)
-		if recentRate > 0 {
-			// Use EWMA to smooth the job cost estimate
-			// Average job duration * rate = bytes per job
-			// Assume jobs take ~5 minutes on average for initial estimate
-			const avgJobDurationMin = 5.0
-			bytesPerJob := recentRate * (avgJobDurationMin * 60)
-			gbPerJob := bytesPerJob / (1024 * 1024 * 1024)
-
-			if gbPerJob > 0 {
-				// Apply EWMA smoothing with previous estimate
-				if jobCostGB > 0 {
-					jobCostGB = m.cfg.ewmaAlpha*gbPerJob + (1-m.cfg.ewmaAlpha)*jobCostGB
-				} else {
-					jobCostGB = gbPerJob
-				}
-			}
-		}
-	}
-
 	if jobCostGB <= 0 {
-		jobCostGB = cfg.DefaultJobCostGB
+		jobCostGB = 10.0 // Default 10GB per job
 	}
 
 	// Calculate jobs per interval
@@ -231,13 +219,13 @@ func (m *limitManager) shouldUpdateLimit(existing *limitState, newRateCount int,
 }
 
 // createLimit creates a new schedd startup limit
-func (m *limitManager) createLimit(ctx context.Context, pair control.PairKey, rateCount int, capacityGBMin float64) error {
+func (m *limitManager) createLimit(ctx context.Context, pair UserSitePair, rateCount int, capacityGBMin float64) error {
 	tag := m.limitTag()
-	name := fmt.Sprintf("pelican_%s_to_%s", sanitizeLimitLabel(pair.Source), sanitizeLimitLabel(pair.Destination))
+	name := fmt.Sprintf("pelican_%s_at_%s", sanitizeLimitLabel(pair.User), sanitizeLimitLabel(pair.Site))
 
-	// Build ClassAd expression to match jobs with this source->destination pair
-	// This is a simplified expression; production would use actual job attributes
-	expression := fmt.Sprintf("(PelicanSource == %q && PelicanDestination == %q)", pair.Source, pair.Destination)
+	// Build ClassAd expression to match jobs with this user at this site
+	// The expression matches on User and the target machine's site attribute
+	expression := fmt.Sprintf("(User == %q && TARGET.%s == %q)", pair.User, m.siteAttribute, pair.Site)
 
 	// Set expiration to 2x the inactivity timeout to allow for some delay in cleanup
 	expirationTime := time.Now().Add(m.cfg.expirationInactivity * 2).Unix()
@@ -259,23 +247,25 @@ func (m *limitManager) createLimit(ctx context.Context, pair control.PairKey, ra
 	pairTag := pairKey(pair)
 	m.activeLimits[pairTag] = &limitState{
 		uuid:          uuid,
-		pairKey:       pair,
+		userSitePair:  pair,
 		lastHit:       time.Now(),
 		lastUpdated:   time.Now(),
 		rateCount:     rateCount,
 		capacityGBMin: capacityGBMin,
+		hitCount:      0,
+		jobsSkipped:   0,
 	}
 
-	m.logger.Printf("created limit %s for %s->%s: %d jobs/%ds (%.1f GB/min capacity)",
-		uuid, pair.Source, pair.Destination, rateCount, int(m.cfg.interval.Seconds()), capacityGBMin)
+	m.logger.Printf("created limit %s for user=%s site=%s: %d jobs/%ds (%.1f GB/min capacity)",
+		uuid, pair.User, pair.Site, rateCount, int(m.cfg.interval.Seconds()), capacityGBMin)
 
 	return nil
 }
 
 // updateLimit updates an existing schedd startup limit
-func (m *limitManager) updateLimit(ctx context.Context, existing *limitState, pair control.PairKey, rateCount int, capacityGBMin float64) error {
-	name := fmt.Sprintf("pelican_%s_to_%s", sanitizeLimitLabel(pair.Source), sanitizeLimitLabel(pair.Destination))
-	expression := fmt.Sprintf("(PelicanSource == %q && PelicanDestination == %q)", pair.Source, pair.Destination)
+func (m *limitManager) updateLimit(ctx context.Context, existing *limitState, pair UserSitePair, rateCount int, capacityGBMin float64) error {
+	name := fmt.Sprintf("pelican_%s_at_%s", sanitizeLimitLabel(pair.User), sanitizeLimitLabel(pair.Site))
+	expression := fmt.Sprintf("(User == %q && TARGET.%s == %q)", pair.User, m.siteAttribute, pair.Site)
 
 	// Refresh expiration time on every update
 	expirationTime := time.Now().Add(m.cfg.expirationInactivity * 2).Unix()
@@ -300,25 +290,27 @@ func (m *limitManager) updateLimit(ctx context.Context, existing *limitState, pa
 	existing.capacityGBMin = capacityGBMin
 	existing.lastUpdated = time.Now()
 
-	m.logger.Printf("updated limit %s for %s->%s: %d jobs/%ds (%.1f GB/min capacity)",
-		uuid, pair.Source, pair.Destination, rateCount, int(m.cfg.interval.Seconds()), capacityGBMin)
+	m.logger.Printf("updated limit %s for user=%s site=%s: %d jobs/%ds (%.1f GB/min capacity)",
+		uuid, pair.User, pair.Site, rateCount, int(m.cfg.interval.Seconds()), capacityGBMin)
 
 	return nil
 }
 
 // removeStale removes limits that haven't been hit recently and are no longer in RED state
-func (m *limitManager) removeStale(ctx context.Context, now time.Time, activeRedPairs map[control.PairKey]control.PairState) error {
+func (m *limitManager) removeStale(ctx context.Context, now time.Time, activeRedPairs map[UserSitePair]control.PairState) error {
 	for pairTag, limit := range m.activeLimits {
 		// Keep limit if still in RED state
-		if _, inRed := activeRedPairs[limit.pairKey]; inRed {
+		if _, inRed := activeRedPairs[limit.userSitePair]; inRed {
 			continue
 		}
-		
+
 		// Remove if not hit for expiration period
 		if now.Sub(limit.lastHit) > m.cfg.expirationInactivity {
 			// To remove a limit, we query and delete via the tag
 			// The golang-htcondor API handles removal through the schedd
 			// For now, just remove from our tracking (schedd will expire it)
+			m.logger.Printf("removing stale limit %s for user=%s site=%s (last hit %v ago)",
+				limit.uuid, limit.userSitePair.User, limit.userSitePair.Site, now.Sub(limit.lastHit))
 			delete(m.activeLimits, pairTag)
 		}
 	}
@@ -326,22 +318,28 @@ func (m *limitManager) removeStale(ctx context.Context, now time.Time, activeRed
 	return nil
 }
 
-// refreshLimitStats queries the schedd to update lastHit times based on actual usage
+// refreshLimitStats queries the schedd to update lastHit times and statistics based on actual usage
 func (m *limitManager) refreshLimitStats(ctx context.Context) error {
 	for pairTag, limit := range m.activeLimits {
 		limits, err := m.schedd.QueryStartupLimits(ctx, limit.uuid, "")
 		if err != nil {
-			return fmt.Errorf("query limit %s: %w", limit.uuid, err)
+			m.logger.Printf("query limit %s error (skipping): %v", limit.uuid, err)
+			continue
 		}
-		
+
 		if len(limits) > 0 {
 			limitInfo := limits[0]
 			// Update lastHit if the limit was actually hit (jobs were skipped)
-			if limitInfo.LastIgnored > 0 && time.Unix(limitInfo.LastIgnored, 0).After(limit.lastHit) {
-				limit.lastHit = time.Unix(limitInfo.LastIgnored, 0)
-				m.logger.Printf("limit %s for %s->%s was hit at %v (skipped=%d)",
-					limit.uuid, limit.pairKey.Source, limit.pairKey.Destination,
-					limit.lastHit, limitInfo.JobsSkipped)
+			if limitInfo.LastIgnored > 0 {
+				newLastHit := time.Unix(limitInfo.LastIgnored, 0)
+				if newLastHit.After(limit.lastHit) {
+					limit.lastHit = newLastHit
+					limit.hitCount++
+					limit.jobsSkipped = int64(limitInfo.JobsSkipped)
+					m.logger.Printf("limit %s for user=%s site=%s was hit at %v (total skipped=%d)",
+						limit.uuid, limit.userSitePair.User, limit.userSitePair.Site,
+						limit.lastHit, limit.jobsSkipped)
+				}
 			}
 			m.activeLimits[pairTag] = limit
 		}
@@ -355,36 +353,36 @@ func (m *limitManager) limitTag() string {
 	return m.daemonName
 }
 
-// pairKey generates a stable key for a source->destination pair for activeLimits map
-func pairKey(pair control.PairKey) string {
+// pairKey generates a stable hash for a user+site pair to use as map key
+func pairKey(pair UserSitePair) string {
 	h := sha256.New()
-	h.Write([]byte(pair.Source))
+	h.Write([]byte(pair.User))
 	h.Write([]byte{0})
-	h.Write([]byte(pair.Destination))
+	h.Write([]byte(pair.Site))
 	sum := h.Sum(nil)
 	return hex.EncodeToString(sum[:16])
 }
 
-// parseLimitExpression extracts source and destination from a limit expression
-// Expected format: (PelicanSource == "source" && PelicanDestination == "destination")
-func parseLimitExpression(expr string) (source, destination string, ok bool) {
+// parseLimitExpression extracts user and site from a limit expression
+// Expected format: (User == "user" && TARGET.<SiteAttribute> == "site")
+func parseLimitExpression(expr string, siteAttribute string) (user, site string, ok bool) {
 	// Simple parser for the expression format we generate
-	// Look for PelicanSource == "..." and PelicanDestination == "..."
+	// Look for User == "..." and TARGET.<SiteAttribute> == "..."
 	var inQuotes bool
 	var currentField string
 	var currentValue string
 	var fieldName string
-	
+
 	for i := 0; i < len(expr); i++ {
 		ch := expr[i]
-		
+
 		if ch == '"' {
 			if inQuotes {
 				// End of quoted value
-				if fieldName == "PelicanSource" {
-					source = currentValue
-				} else if fieldName == "PelicanDestination" {
-					destination = currentValue
+				if fieldName == "User" {
+					user = currentValue
+				} else if strings.HasSuffix(fieldName, "."+siteAttribute) || strings.HasSuffix(fieldName, siteAttribute) {
+					site = currentValue
 				}
 				currentValue = ""
 				fieldName = ""
@@ -397,16 +395,17 @@ func parseLimitExpression(expr string) (source, destination string, ok bool) {
 			}
 		} else if inQuotes {
 			currentValue += string(ch)
-		} else if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') {
+		} else if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' {
 			currentField += string(ch)
 		} else {
-			if currentField != "" && currentField != "PelicanSource" && currentField != "PelicanDestination" {
+			// Non-alphanumeric character, keep only if it could be part of a field name we care about
+			if currentField != "" && currentField != "User" && !strings.Contains(currentField, siteAttribute) {
 				currentField = ""
 			}
 		}
 	}
-	
-	ok = source != "" && destination != ""
+
+	ok = user != "" && site != ""
 	return
 }
 
@@ -426,8 +425,8 @@ func sanitizeLimitLabel(s string) string {
 	return result
 }
 
-// getLimitInfo returns the active limit information for a pair, if any
-func (m *limitManager) getLimitInfo(pair control.PairKey) (rateCount int, rateWindow int, active bool) {
+// getLimitInfo returns the active limit information for a user+site pair, if any
+func (m *limitManager) getLimitInfo(pair UserSitePair) (rateCount int, rateWindow int, active bool) {
 	if !m.cfg.enabled {
 		return 0, 0, false
 	}
@@ -438,4 +437,18 @@ func (m *limitManager) getLimitInfo(pair control.PairKey) (rateCount int, rateWi
 	}
 
 	return 0, int(m.cfg.interval.Seconds()), false
+}
+
+// getLimitStats returns statistics for a user+site pair limit
+func (m *limitManager) getLimitStats(pair UserSitePair) (hitCount int64, jobsSkipped int64, lastHit time.Time, exists bool) {
+	if !m.cfg.enabled {
+		return 0, 0, time.Time{}, false
+	}
+
+	pairTag := pairKey(pair)
+	if limit, ok := m.activeLimits[pairTag]; ok {
+		return limit.hitCount, limit.jobsSkipped, limit.lastHit, true
+	}
+
+	return 0, 0, time.Time{}, false
 }
