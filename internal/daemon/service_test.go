@@ -2,21 +2,29 @@ package daemon
 
 import (
 	"fmt"
-	"io"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	htcondorlogging "github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/pelican-ap-manager/internal/condor"
 	"github.com/bbockelm/pelican-ap-manager/internal/director"
 	"github.com/bbockelm/pelican-ap-manager/internal/state"
 )
 
+// testLogger creates a logging.Logger that discards output for testing
+func testLogger() *htcondorlogging.Logger {
+	logger, _ := htcondorlogging.New(&htcondorlogging.Config{
+		OutputPath:        "stderr",
+		DestinationLevels: nil,
+	})
+	return logger
+}
+
 func TestBuildProcessedTransfersDownloadCached(t *testing.T) {
-	svc := &Service{director: director.New(time.Minute), logger: log.New(io.Discard, "", 0)}
+	svc := &Service{director: director.New(time.Minute), logger: testLogger()}
 	rec := condor.TransferRecord{
 		User:      "user",
 		Site:      "SiteA",
@@ -53,7 +61,7 @@ func TestBuildProcessedTransfersDownloadCached(t *testing.T) {
 func TestBuildProcessedTransfersDownloadAndUploadResolution(t *testing.T) {
 	client, headHits, server := newDirector(t)
 	defer server.Close()
-	svc := &Service{director: client, logger: log.New(io.Discard, "", 0)}
+	svc := &Service{director: client, logger: testLogger()}
 
 	download := condor.TransferRecord{
 		User:      "user",

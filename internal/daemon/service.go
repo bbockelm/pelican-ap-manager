@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/url"
 	"os"
 	"path"
@@ -17,7 +16,9 @@ import (
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	condorconfig "github.com/bbockelm/golang-htcondor/config"
+	htcondorlogging "github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/pelican-ap-manager/internal/condor"
+	"github.com/bbockelm/pelican-ap-manager/internal/config"
 	"github.com/bbockelm/pelican-ap-manager/internal/control"
 	"github.com/bbockelm/pelican-ap-manager/internal/director"
 	"github.com/bbockelm/pelican-ap-manager/internal/jobqueue"
@@ -37,7 +38,7 @@ type Service struct {
 	statePath         string
 	pollInterval      time.Duration
 	advertiseInterval time.Duration
-	advertiseDryRun   string
+	infoPath          string
 	scheddName        string
 	siteAttribute     string
 	epochLookback     time.Duration
@@ -46,7 +47,7 @@ type Service struct {
 	jobMirrorPath     string
 	director          *director.Client
 	statsWindow       time.Duration
-	logger            *log.Logger
+	logger            *htcondorlogging.Logger
 	oneshoot          bool
 	startTime         time.Time
 	lastJobEpoch      state.EpochID
@@ -58,7 +59,7 @@ type Service struct {
 }
 
 // NewService wires up dependencies for the daemon.
-func NewService(client condor.CondorClient, st *state.State, statePath string, poll, advertise, epochLookback, statsWindow time.Duration, tracker *stats.Tracker, jobMirror *jobqueue.Mirror, jobMirrorPath string, directorClient *director.Client, logger *log.Logger, advertiseDryRun, scheddName, siteAttribute string, oneshot bool) *Service {
+func NewService(client condor.CondorClient, st *state.State, statePath string, poll, advertise, epochLookback, statsWindow time.Duration, tracker *stats.Tracker, jobMirror *jobqueue.Mirror, jobMirrorPath string, directorClient *director.Client, logger *htcondorlogging.Logger, infoPath, scheddName, siteAttribute string, oneshot bool) *Service {
 	if statsWindow <= 0 {
 		statsWindow = time.Hour
 	}
@@ -78,7 +79,7 @@ func NewService(client condor.CondorClient, st *state.State, statePath string, p
 		outlierPath := filepath.Join(filepath.Dir(statePath), "outliers.jsonl")
 		f, err := os.OpenFile(outlierPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
-			logger.Printf("warning: could not open outliers file %s: %v", outlierPath, err)
+			logger.Infof(htcondorlogging.DestinationGeneral, "warning: could not open outliers file %s: %v", outlierPath, err)
 		} else {
 			outlierFile = f
 		}
@@ -90,7 +91,7 @@ func NewService(client condor.CondorClient, st *state.State, statePath string, p
 		statePath:         statePath,
 		pollInterval:      poll,
 		advertiseInterval: advertise,
-		advertiseDryRun:   advertiseDryRun,
+		infoPath:          infoPath,
 		scheddName:        scheddName,
 		siteAttribute:     siteAttribute,
 		epochLookback:     epochLookback,
@@ -108,13 +109,34 @@ func NewService(client condor.CondorClient, st *state.State, statePath string, p
 	}
 }
 
+// Printf logs an info message using the underlying HTCondor logger.
+func (s *Service) Printf(format string, args ...any) {
+	s.logger.Infof(htcondorlogging.DestinationGeneral, format, args...)
+}
+
+// Println logs an info message using the underlying HTCondor logger.
+func (s *Service) Println(args ...any) {
+	s.logger.Info(htcondorlogging.DestinationGeneral, fmt.Sprint(args...))
+}
+
+// ReloadConfig updates configuration parameters that can be changed at runtime.
+func (s *Service) ReloadConfig(cfg *config.Config) {
+	s.pollInterval = cfg.PollInterval
+	s.advertiseInterval = cfg.AdvertiseInterval
+	s.epochLookback = cfg.EpochLookback
+	s.statsWindow = cfg.StatsWindow
+	s.infoPath = cfg.InfoPath
+	s.Printf("configuration reloaded: poll=%s advertise=%s lookback=%s stats_window=%s info_path=%s",
+		s.pollInterval, s.advertiseInterval, s.epochLookback, s.statsWindow, s.infoPath)
+}
+
 // Run starts the main polling and advertisement loops until the context is canceled.
 func (s *Service) Run(ctx context.Context) error {
 	if s.oneshoot {
-		s.logger.Printf("pelican_man oneshot: poll=%s advertise=%s stats_window=%s", s.pollInterval, s.advertiseInterval, s.statsWindow)
+		s.Printf("pelican_man oneshot: poll=%s advertise=%s stats_window=%s", s.pollInterval, s.advertiseInterval, s.statsWindow)
 		return s.runOnce(ctx)
 	}
-	s.logger.Printf("pelican_man starting: poll=%s advertise=%s stats_window=%s", s.pollInterval, s.advertiseInterval, s.statsWindow)
+	s.Printf("pelican_man starting: poll=%s advertise=%s stats_window=%s", s.pollInterval, s.advertiseInterval, s.statsWindow)
 
 	pollTicker := time.NewTicker(s.pollInterval)
 	advTicker := time.NewTicker(s.advertiseInterval)
@@ -124,7 +146,7 @@ func (s *Service) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			s.logger.Println("pelican_man shutting down")
+			s.Println("pelican_man shutting down")
 			return nil
 		case <-pollTicker.C:
 			s.pollOnce(ctx)
@@ -141,7 +163,7 @@ func (s *Service) runOnce(ctx context.Context) error {
 
 	s.saveState()
 
-	if s.advertiseDryRun != "" {
+	if s.infoPath != "" {
 		s.advertiseOnce()
 	}
 	return nil
@@ -151,7 +173,7 @@ func (s *Service) runOnce(ctx context.Context) error {
 func (s *Service) pollOnce(ctx context.Context) int {
 	if s.jobs != nil {
 		if err := s.jobs.Sync(ctx); err != nil {
-			s.logger.Printf("job mirror sync error: %v", err)
+			s.Printf("job mirror sync error: %v", err)
 		} else {
 			s.persistJobMirror()
 		}
@@ -161,13 +183,13 @@ func (s *Service) pollOnce(ctx context.Context) int {
 	cutoff := time.Now().Add(-s.statsWindow)
 	records, newestEpoch, err := s.condor.FetchTransferEpochs(lastEpoch, cutoff)
 	if err != nil {
-		s.logger.Printf("poll error: %v", err)
+		s.Printf("poll error: %v", err)
 		return 0
 	}
 
 	jobRecords, newestJobEpoch, err := s.condor.FetchJobEpochs(s.lastJobEpoch, cutoff)
 	if err != nil {
-		s.logger.Printf("job epoch poll error: %v", err)
+		s.Printf("job epoch poll error: %v", err)
 	}
 
 	for _, rec := range records {
@@ -281,9 +303,9 @@ func (s *Service) saveState() {
 		}
 	}
 
-	s.logger.Printf("saving state to %s", s.statePath)
+	s.Printf("saving state to %s", s.statePath)
 	if err := s.state.Save(s.statePath); err != nil {
-		s.logger.Printf("state save error: %v", err)
+		s.Printf("state save error: %v", err)
 	}
 }
 
@@ -345,30 +367,30 @@ func (s *Service) persistJobMirror() {
 
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
-		s.logger.Printf("job mirror marshal error: %v", err)
+		s.Printf("job mirror marshal error: %v", err)
 		return
 	}
 
 	if err := os.MkdirAll(filepath.Dir(s.jobMirrorPath), 0o755); err != nil {
-		s.logger.Printf("job mirror mkdir error: %v", err)
+		s.Printf("job mirror mkdir error: %v", err)
 		return
 	}
 
 	tmpPath := s.jobMirrorPath + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
-		s.logger.Printf("job mirror write error: %v", err)
+		s.Printf("job mirror write error: %v", err)
 		return
 	}
 
 	if err := os.Rename(tmpPath, s.jobMirrorPath); err != nil {
 		_ = os.Remove(tmpPath)
-		s.logger.Printf("job mirror rename error: %v", err)
+		s.Printf("job mirror rename error: %v", err)
 	}
 }
 
 // advertiseOnce prepares ClassAds from the aggregated summaries and sends them to the collector.
 func (s *Service) advertiseOnce() {
-	if s.oneshoot && s.advertiseDryRun == "" {
+	if s.oneshoot && s.infoPath == "" {
 		return
 	}
 
@@ -382,15 +404,15 @@ func (s *Service) advertiseOnce() {
 		return
 	}
 
-	if s.advertiseDryRun != "" {
-		if err := s.writeDryRunAds(ads); err != nil {
-			s.logger.Printf("advertise dry-run error: %v", err)
+	if s.infoPath != "" {
+		if err := s.writeInfoAds(ads); err != nil {
+			s.Printf("info file write error: %v", err)
 		}
 		return
 	}
 
 	if err := s.condor.AdvertiseClassAds(ads); err != nil {
-		s.logger.Printf("advertise error: %v", err)
+		s.Printf("advertise error: %v", err)
 	}
 }
 
@@ -449,7 +471,7 @@ func (s *Service) updateLimitControllers() {
 func (s *Service) updateScheddLimits() {
 	if s.limitMgr == nil {
 		if err := s.ensureLimitManager(); err != nil {
-			s.logger.Printf("limit manager init error: %v", err)
+			s.Printf("limit manager init error: %v", err)
 			return
 		}
 	}
@@ -460,6 +482,12 @@ func (s *Service) updateScheddLimits() {
 
 	// Gather user+site pairs from summaries
 	userSitePairs := s.gatherUserSitePairs()
+
+	// Gather window metrics for sources tracking
+	windowMetrics := make(map[UserSitePair]outcomeMetrics)
+	if s.tracker != nil {
+		windowMetrics = aggregateLimitWindowMetrics(s, s.tracker.AllTransfers())
+	}
 
 	// For each user+site pair, check if it's in RED state based on its control metrics
 	userSiteStates := make(map[UserSitePair]control.PairState)
@@ -481,8 +509,8 @@ func (s *Service) updateScheddLimits() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := s.limitMgr.updateLimits(ctx, userSiteStates, s.tracker, s.controlCfg); err != nil {
-		s.logger.Printf("limit update error: %v", err)
+	if err := s.limitMgr.updateLimits(ctx, userSiteStates, s.tracker, s.controlCfg, windowMetrics); err != nil {
+		s.Printf("limit update error: %v", err)
 	}
 }
 
@@ -541,7 +569,7 @@ func (s *Service) ensureLimitManager() error {
 	}
 
 	s.limitMgr = newLimitManager(s.schedd, daemonName, s.siteAttribute, s.logger)
-	s.logger.Printf("initialized limit manager for schedd %s at %s (daemon name: %s)", location.Name, location.Address, daemonName)
+	s.Printf("initialized limit manager for schedd %s at %s (daemon name: %s)", location.Name, location.Address, daemonName)
 
 	return nil
 }
@@ -986,9 +1014,10 @@ type outcomeMetrics struct {
 	failureFiles               int // count of failed file transfers
 	epochsWithWallClockSuccess int // count of epochs with wall-clock data (for averaging)
 	epochsWithWallClockFailure int
-	epochsWithSuccess          int // count of unique epochs with successful transfers
-	epochsWithFailure          int // count of unique epochs with failed transfers
-	uniqueInputSandboxes       int // count of unique input sandboxes (download direction)
+	epochsWithSuccess          int      // count of unique epochs with successful transfers
+	epochsWithFailure          int      // count of unique epochs with failed transfers
+	uniqueInputSandboxes       int      // count of unique input sandboxes (download direction)
+	sources                    []string // unique federation prefixes (sources) for this pair
 }
 
 type rateStats struct {
@@ -1081,6 +1110,8 @@ func aggregateWindowRates(transfers []stats.ProcessedTransfer) map[summaryWindow
 // aggregateLimitWindowMetrics groups transfers by user+site pair for window reporting.
 func aggregateLimitWindowMetrics(s *Service, transfers []stats.ProcessedTransfer) map[UserSitePair]outcomeMetrics {
 	metrics := make(map[UserSitePair]outcomeMetrics)
+	// Track unique sources per user+site pair
+	sourceSets := make(map[UserSitePair]map[string]bool)
 	// Track wall-clock time span per (epoch, user+site) combination
 	epochWallClock := make(map[string]struct {
 		earliestStart time.Time
@@ -1175,6 +1206,14 @@ func aggregateLimitWindowMetrics(s *Service, transfers []stats.ProcessedTransfer
 			ef.failureFiles++
 		}
 		epochFiles[epochKey] = ef
+
+		// Track unique sources (federation prefixes)
+		if tr.FederationPrefix != "" && tr.Direction == state.DirectionDownload {
+			if sourceSets[pair] == nil {
+				sourceSets[pair] = make(map[string]bool)
+			}
+			sourceSets[pair][tr.FederationPrefix] = true
+		}
 
 		metrics[pair] = m
 	}
@@ -1344,24 +1383,24 @@ func summarizeVirtual(dir state.Direction, transfers []stats.ProcessedTransfer) 
 	}
 }
 
-// writeDryRunAds serializes the ads to a file instead of advertising them to the collector.
-func (s *Service) writeDryRunAds(ads []map[string]any) error {
+// writeInfoAds serializes the ads to a file for monitoring and debugging.
+func (s *Service) writeInfoAds(ads []map[string]any) error {
 	data, err := json.MarshalIndent(ads, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal ads: %w", err)
 	}
 
-	if dir := filepath.Dir(s.advertiseDryRun); dir != "." && dir != "" {
+	if dir := filepath.Dir(s.infoPath); dir != "." && dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return fmt.Errorf("ensure dry-run directory: %w", err)
+			return fmt.Errorf("ensure info directory: %w", err)
 		}
 	}
 
-	if err := os.WriteFile(s.advertiseDryRun, data, 0o644); err != nil {
+	if err := os.WriteFile(s.infoPath, data, 0o644); err != nil {
 		return fmt.Errorf("write ads: %w", err)
 	}
 
-	s.logger.Printf("advertise dry-run wrote %d ads to %s", len(ads), s.advertiseDryRun)
+	s.Printf("wrote %d ads to %s", len(ads), s.infoPath)
 	return nil
 }
 
@@ -1450,17 +1489,17 @@ func (s *Service) printFindings(processed int) {
 	lastEpoch, buckets := s.state.Snapshot()
 	recent := s.state.SnapshotRecent()
 
-	s.logger.Printf("oneshot summary: processed=%d buckets=%d users_with_recent=%d last_epoch=%s", processed, len(buckets), len(recent), lastEpoch)
+	s.Printf("oneshot summary: processed=%d buckets=%d users_with_recent=%d last_epoch=%s", processed, len(buckets), len(recent), lastEpoch)
 	for rawKey, stats := range buckets {
-		s.logger.Printf("bucket %s success=%d failure=%d updated=%s", rawKey, stats.Successes, stats.Failures, stats.LastUpdated.Format(time.RFC3339))
+		s.Printf("bucket %s success=%d failure=%d updated=%s", rawKey, stats.Successes, stats.Failures, stats.LastUpdated.Format(time.RFC3339))
 	}
 
 	if s.tracker != nil {
 		tops := s.tracker.TopSandboxes(10)
 		if len(tops) > 0 {
-			s.logger.Printf("top sandboxes (count,size):")
+			s.Printf("top sandboxes (count,size):")
 			for _, sb := range tops {
-				s.logger.Printf("  %s count=%d size=%d", sb.Name, sb.Count, sb.SizeBytes)
+				s.Printf("  %s count=%d size=%d", sb.Name, sb.Count, sb.SizeBytes)
 			}
 		}
 	}
@@ -1473,14 +1512,14 @@ func (s *Service) printFindings(processed int) {
 		if limit > 5 {
 			limit = 5
 		}
-		s.logger.Printf("recent transfers user=%s showing=%d/%d", user, limit, len(entries))
+		s.Printf("recent transfers user=%s showing=%d/%d", user, limit, len(entries))
 		for i := 0; i < limit; i++ {
 			e := entries[len(entries)-limit+i]
 			dir := e.Direction
 			if dir == "" {
 				dir = "unknown"
 			}
-			s.logger.Printf("  dir=%s %s -> %s bytes=%d success=%t cached=%t ended=%s sandbox=%s size=%d", dir, e.Source, e.Destination, e.Bytes, e.Success, e.Cached, e.EndedAt.Format(time.RFC3339), e.SandboxName, e.SandboxSize)
+			s.Printf("  dir=%s %s -> %s bytes=%d success=%t cached=%t ended=%s sandbox=%s size=%d", dir, e.Source, e.Destination, e.Bytes, e.Success, e.Cached, e.EndedAt.Format(time.RFC3339), e.SandboxName, e.SandboxSize)
 		}
 	}
 }
@@ -1496,10 +1535,10 @@ func (s *Service) buildProcessedTransfers(rec condor.TransferRecord) []stats.Pro
 		resolveNamespace := func() string {
 			if s.director != nil {
 				if virt, err := s.director.ResolveVirtualSource(f.URL); err == nil && virt != "" {
-					s.logger.Printf("director: resolved namespace for url=%s namespace=%s", f.URL, virt)
+					s.Printf("director: resolved namespace for url=%s namespace=%s", f.URL, virt)
 					return virt
 				} else if err != nil {
-					s.logger.Printf("director: resolve failed url=%s err=%v", f.URL, err)
+					s.Printf("director: resolve failed url=%s err=%v", f.URL, err)
 				}
 			}
 			if prefix := stats.GuessPrefix(f.URL); prefix != "" {
@@ -1601,12 +1640,12 @@ func (s *Service) logOutlier(tr stats.ProcessedTransfer) {
 
 	data, err := json.Marshal(outlier)
 	if err != nil {
-		s.logger.Printf("error marshaling outlier: %v", err)
+		s.Printf("error marshaling outlier: %v", err)
 		return
 	}
 
 	if _, err := s.outlierFile.Write(append(data, '\n')); err != nil {
-		s.logger.Printf("error writing outlier: %v", err)
+		s.Printf("error writing outlier: %v", err)
 	}
 }
 

@@ -44,8 +44,11 @@ All configuration is sourced from HTCondor configuration macros (using the same 
 
 ### Storage and Cache
 
-- **`PELICAN_MANAGER_STATE_PATH`** (default: `./data/pelican_state.json`)  
-  Path where the daemon persists its state. Ensure the parent directory exists and is writable.
+- **`PELICAN_MANAGER_STATE_PATH`** (default: `$(SPOOL)/pelican_state.json`)
+  Path where the daemon persists its state. Defaults to the HTCondor spool directory.
+
+- **`PELICAN_MANAGER_INFO_PATH`** (default: `$(SPOOL)/pelican_info.json`)
+  Path where the daemon writes a JSON file with current ClassAd information for monitoring and debugging
 
 - **`PELICAN_MANAGER_DIRECTOR_CACHE_TTL`** (default: `15m`)  
   Cache duration for Pelican director lookups
@@ -85,6 +88,8 @@ condor_status -any -constraint 'MyType == "PelicanSummary"'
 
 See [docs/pelican-summary-ad-attributes.md](docs/pelican-summary-ad-attributes.md) for details on published attributes.
 
+Additionally, the daemon writes a JSON file (default: `$(SPOOL)/pelican_info.json`) containing the same ClassAd information for local monitoring and debugging.
+
 When schedd limits are active, `PelicanLimit` ClassAds are also advertised:
 
 ```bash
@@ -98,7 +103,8 @@ See [docs/pelican-limit-ad-attributes.md](docs/pelican-limit-ad-attributes.md) f
 - The daemon requires HTCondor development libraries and uses the golang-htcondor bindings to interact with HTCondor
 - State persistence ensures transfer tracking continuity across daemon restarts
 - The daemon is designed to be lightweight and run continuously alongside other HTCondor daemons
-- Log output goes to stdout/stderr and should be captured by `condor_master`'s logging mechanism
+- Logging uses HTCondor's logging infrastructure; output destination and verbosity are controlled via HTCondor config
+- The daemon handles `SIGHUP` for configuration reloads without restart - useful for adjusting intervals and paths
 
 ## Building and Development
 

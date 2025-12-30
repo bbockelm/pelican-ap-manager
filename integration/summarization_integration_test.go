@@ -3,12 +3,12 @@ package integration
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	htcondorlogging "github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/pelican-ap-manager/internal/daemon"
 	"github.com/bbockelm/pelican-ap-manager/internal/state"
 	"github.com/bbockelm/pelican-ap-manager/internal/stats"
@@ -67,16 +67,21 @@ func TestSummarization(t *testing.T) {
 	statsWindow := 24 * time.Hour
 	tracker := stats.NewTracker(statsWindow)
 
+	// Create test logger
+	logger, _ := htcondorlogging.New(&htcondorlogging.Config{
+		OutputPath:        "stdout",
+		DestinationLevels: nil,
+	})
+
 	// Create mock condor client that reads from test JSON files
-	logger := log.New(os.Stdout, "[test-summarization] ", log.LstdFlags)
 	jobEpochsPath := filepath.Join(moduleRoot, "internal", "condor", "testdata", "job_epochs_from_transfers.sanitized.json")
 	transfersPath := filepath.Join(moduleRoot, "internal", "condor", "testdata", "transfers.sanitized.json")
 	condorClient := newMockCondorClient(jobEpochsPath, transfersPath)
 
-	// Output file for dry-run ads
+	// Output file for info ads
 	adsOutputPath := filepath.Join(testDir, "summary_ads.json")
 
-	// Create service in oneshot mode with dry-run advertising
+	// Create service in oneshot mode with info file output
 	service := daemon.NewService(
 		condorClient,
 		st,
@@ -90,7 +95,7 @@ func TestSummarization(t *testing.T) {
 		"",                   // job mirror path
 		nil,                  // director client (not needed)
 		logger,               // logger
-		adsOutputPath,        // dry-run ads output
+		adsOutputPath,        // info ads output
 		"test-schedd",        // schedd name
 		"MATCH_EXP_JOB_Site", // site attribute
 		true,                 // oneshot mode
