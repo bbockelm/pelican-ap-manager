@@ -138,6 +138,8 @@ func (c *htcClient) FetchJobEpochs(sinceEpoch state.EpochID, cutoff time.Time) (
 		"JobStartDate",
 		"JobCurrentStartDate",
 		"EnteredCurrentStatus",
+		"ActivationDuration",
+		"ActivationExecutionDuration",
 		"RemoteWallClockTime",
 		"CommittedSlotTime",
 		"CommittedSuspensionTime",
@@ -302,7 +304,7 @@ func (c *htcClient) convertTransferAd(ad *classad.ClassAd) ([]TransferRecord, st
 		user = userFromGlobalJobID(firstString(ad, "GlobalJobId"))
 	}
 	if endpoint == "" && len(files) > 0 {
-		endpoint = files[0].Endpoint
+		endpoint = files[0].LastEndpoint
 	}
 	sandboxName, sandboxSize := computeSandbox(files)
 
@@ -310,6 +312,27 @@ func (c *htcClient) convertTransferAd(ad *classad.ClassAd) ([]TransferRecord, st
 	jobRuntime := time.Duration(0)
 	if jobStart > 0 && endTS > jobStart {
 		jobRuntime = time.Duration(endTS-jobStart) * time.Second
+	}
+
+	// Compute wall-clock transfer duration: min(all start times) to max(all end times)
+	wallClock := time.Duration(0)
+	if len(files) > 0 {
+		var minStart, maxEnd time.Time
+		sumDuration := 0.0
+		for i, f := range files {
+			if i == 0 || f.Start.Before(minStart) {
+				minStart = f.Start
+			}
+			if i == 0 || f.End.After(maxEnd) {
+				maxEnd = f.End
+			}
+			sumDuration += f.DurationSec
+		}
+		wallClock = maxEnd.Sub(minStart)
+		// If wall-clock is 0 due to second-level granularity, use sum of individual transfer times
+		if wallClock == 0 && sumDuration > 0 {
+			wallClock = time.Duration(sumDuration * float64(time.Second))
+		}
 	}
 
 	var records []TransferRecord
@@ -327,33 +350,35 @@ func (c *htcClient) convertTransferAd(ad *classad.ClassAd) ([]TransferRecord, st
 		}
 
 		records = append(records, TransferRecord{
-			EpochID:     runID,
-			User:        recUser,
-			Endpoint:    f.Endpoint,
-			Site:        site,
-			Direction:   string(fileDir),
-			Success:     f.Success,
-			EndedAt:     endedAt,
-			JobRuntime:  jobRuntime,
-			Files:       []TransferFile{f},
-			SandboxName: sandboxName,
-			SandboxSize: f.TotalBytes,
+			EpochID:           runID,
+			User:              recUser,
+			Endpoint:          f.LastEndpoint,
+			Site:              site,
+			Direction:         string(fileDir),
+			Success:           f.Success,
+			EndedAt:           endedAt,
+			JobRuntime:        jobRuntime,
+			Files:             []TransferFile{f},
+			SandboxName:       sandboxName,
+			SandboxSize:       f.TotalBytes,
+			WallClockDuration: wallClock,
 		})
 	}
 
 	if len(records) == 0 {
 		records = append(records, TransferRecord{
-			EpochID:     runID,
-			User:        user,
-			Endpoint:    endpoint,
-			Site:        site,
-			Direction:   string(direction),
-			Success:     success,
-			EndedAt:     endedAt,
-			JobRuntime:  jobRuntime,
-			Files:       files,
-			SandboxName: sandboxName,
-			SandboxSize: sandboxSize,
+			EpochID:           runID,
+			User:              user,
+			Endpoint:          endpoint,
+			Site:              site,
+			Direction:         string(direction),
+			Success:           success,
+			EndedAt:           endedAt,
+			JobRuntime:        jobRuntime,
+			Files:             files,
+			SandboxName:       sandboxName,
+			SandboxSize:       sandboxSize,
+			WallClockDuration: wallClock,
 		})
 	}
 
@@ -378,7 +403,13 @@ func (c *htcClient) convertJobEpochAd(ad *classad.ClassAd) (*JobEpochRecord, sta
 		endedAt = time.Unix(endTS, 0)
 	}
 
-	runtimeSec := numericAttr(ad, "RemoteWallClockTime", "CommittedSlotTime")
+	// ActivationDuration: total time including setup/teardown/stagein/stageout
+	// ActivationExecutionDuration: execution time only (may be 0 or missing if setup failed)
+	runtimeSec := numericAttr(ad, "ActivationDuration")
+	if runtimeSec <= 0 {
+		// Fallback to RemoteWallClockTime (cumulative across runs) if ActivationDuration missing
+		runtimeSec = numericAttr(ad, "RemoteWallClockTime", "CommittedSlotTime")
+	}
 	if runtimeSec <= 0 {
 		startTS := firstInt64(ad, "JobCurrentStartDate", "JobStartDate")
 		if startTS > 0 && endTS > startTS {
@@ -386,17 +417,20 @@ func (c *htcClient) convertJobEpochAd(ad *classad.ClassAd) (*JobEpochRecord, sta
 		}
 	}
 
+	executionDurationSec := numericAttr(ad, "ActivationExecutionDuration")
+
 	if !success || runtimeSec <= 0 || user == "" {
 		return nil, runID
 	}
 
 	return &JobEpochRecord{
-		EpochID: runID,
-		User:    user,
-		Site:    site,
-		Runtime: time.Duration(runtimeSec * float64(time.Second)),
-		EndedAt: endedAt,
-		Success: success,
+		EpochID:           runID,
+		User:              user,
+		Site:              site,
+		Runtime:           time.Duration(runtimeSec * float64(time.Second)),
+		ExecutionDuration: time.Duration(executionDurationSec * float64(time.Second)),
+		EndedAt:           endedAt,
+		Success:           success,
 	}, runID
 }
 
@@ -573,13 +607,16 @@ func extractFiles(ad *classad.ClassAd, defaultEndpoint string, fallbackEnd time.
 					var attempts []TransferAttempt
 					endpoint := defaultEndpoint
 					cached := false
+					totalAttemptBytes := int64(0)
 					for i := 0; ; i++ {
 						epKey := fmt.Sprintf("Endpoint%d", i)
 						ageKey := fmt.Sprintf("DataAge%d", i)
 						timeKey := fmt.Sprintf("TransferTime%d", i)
+						bytesKey := fmt.Sprintf("TransferFileBytes%d", i)
 						epVal, hasEp := pr.DeveloperData[epKey]
 						ageVal, hasAge := pr.DeveloperData[ageKey]
 						timeVal, hasTime := pr.DeveloperData[timeKey]
+						bytesVal, hasBytes := pr.DeveloperData[bytesKey]
 						if !hasEp && !hasAge {
 							if i == 0 {
 								// No indexed data at all; leave defaults.
@@ -602,24 +639,55 @@ func extractFiles(ad *classad.ClassAd, defaultEndpoint string, fallbackEnd time.
 							}
 						}
 
+						attemptDuration := 0.0
 						if hasTime {
 							switch v := timeVal.(type) {
 							case float64:
+								attemptDuration = v
 								durationSec += v
 							case json.Number:
 								if fv, err := v.Float64(); err == nil {
+									attemptDuration = fv
 									durationSec += fv
 								}
 							}
 						}
 
-						attempts = append(attempts, TransferAttempt{Endpoint: attemptEp, Cached: attemptCached})
+						attemptBytes := int64(0)
+						if hasBytes {
+							switch v := bytesVal.(type) {
+							case float64:
+								attemptBytes = int64(v)
+								totalAttemptBytes += int64(v)
+							case int64:
+								attemptBytes = v
+								totalAttemptBytes += v
+							case json.Number:
+								if iv, err := v.Int64(); err == nil {
+									attemptBytes = iv
+									totalAttemptBytes += iv
+								}
+							}
+						}
+
+						attempts = append(attempts, TransferAttempt{
+							Endpoint:    attemptEp,
+							Cached:      attemptCached,
+							Bytes:       attemptBytes,
+							DurationSec: attemptDuration,
+						})
 						endpoint = attemptEp
 						cached = attemptCached
 					}
 
 					if len(attempts) == 0 {
-						attempts = append(attempts, TransferAttempt{Endpoint: endpoint, Cached: cached})
+						// No indexed attempt data; create single attempt with file-level totals
+						attempts = append(attempts, TransferAttempt{
+							Endpoint:    endpoint,
+							Cached:      cached,
+							Bytes:       pr.TransferFileBytes,
+							DurationSec: durationSec,
+						})
 					}
 
 					// Fallback to wall-clock duration if no precise timing was provided.
@@ -634,19 +702,24 @@ func extractFiles(ad *classad.ClassAd, defaultEndpoint string, fallbackEnd time.
 						}
 					}
 
+					// Use total bytes from all attempts if available, otherwise use reported totals
+					totalBytes := pr.TransferTotalBytes
+					if totalAttemptBytes > 0 && totalAttemptBytes > totalBytes {
+						totalBytes = totalAttemptBytes
+					}
+
 					files = append(files, TransferFile{
-						URL:         pr.TransferUrl,
-						Endpoint:    endpoint,
-						Bytes:       pr.TransferFileBytes,
-						TotalBytes:  pr.TransferTotalBytes,
-						DurationSec: durationSec,
-						Start:       start,
-						End:         end,
-						Cached:      cached,
-						Success:     pr.TransferSuccess,
-						LastAttempt: pr.TransferSuccess,
-						Attempts:    attempts,
-						Direction:   dirStr,
+						URL:          pr.TransferUrl,
+						LastEndpoint: endpoint,
+						Bytes:        pr.TransferFileBytes,
+						TotalBytes:   totalBytes,
+						DurationSec:  durationSec,
+						Start:        start,
+						End:          end,
+						Cached:       cached,
+						Success:      pr.TransferSuccess,
+						Attempts:     attempts,
+						Direction:    dirStr,
 					})
 				}
 			}
@@ -731,10 +804,13 @@ func computeSandbox(files []TransferFile) (string, int64) {
 	paths := make([]string, 0, len(files))
 	var size int64
 	for _, f := range files {
-		if f.TotalBytes > 0 {
-			size += f.TotalBytes
-		} else {
-			size += f.Bytes
+		// Only count bytes from successful transfers - failed transfers don't contribute to sandbox size
+		if f.Success {
+			if f.TotalBytes > 0 {
+				size += f.TotalBytes
+			} else {
+				size += f.Bytes
+			}
 		}
 
 		u, err := url.Parse(f.URL)

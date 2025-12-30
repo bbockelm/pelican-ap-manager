@@ -15,11 +15,13 @@ type Config struct {
 	StatsWindow       time.Duration
 	DirectorCacheTTL  time.Duration
 	StatePath         string
+	InfoPath          string
 	CollectorHost     string
 	ScheddName        string
 	SiteAttribute     string
 	JobMirrorPath     string
 	JobQueueLogPath   string
+	condorCfg         *condorconfig.Config // Store for logging initialization
 }
 
 const (
@@ -28,7 +30,6 @@ const (
 	defaultEpochLookback     = 24 * time.Hour
 	defaultStatsWindow       = 1 * time.Hour
 	defaultDirectorCacheTTL  = 15 * time.Minute
-	defaultStatePath         = "./data/pelican_state.json"
 	defaultCollectorHost     = "localhost:9618"
 	defaultScheddName        = ""
 	defaultSiteAttribute     = "MachineAttrGLIDEIN_ResourceName0"
@@ -43,6 +44,9 @@ const (
 	macroEpochLookbackLegacy     = "PEL_EPOCH_LOOKBACK"
 	macroStatePath               = "PELICAN_MANAGER_STATE_PATH"
 	macroStatePathLegacy         = "PEL_STATE_PATH"
+	macroInfoPath                = "PELICAN_MANAGER_INFO_PATH"
+	macroInfoPathLegacy          = "PEL_INFO_PATH"
+	macroSpool                   = "SPOOL"
 	macroCollectorHost           = "PELICAN_MANAGER_COLLECTOR_HOST"
 	macroCollectorHostLegacy     = "COLLECTOR_HOST"
 	macroScheddName              = "PELICAN_MANAGER_SCHEDD_NAME"
@@ -60,23 +64,31 @@ const (
 // mirroring how condor tools discover settings. Macros can be set in the
 // condor config; defaults are provided for missing values.
 func Load() (*Config, error) {
+	condorCfg, err := condorconfig.New()
+	if err != nil {
+		return nil, fmt.Errorf("condor config: %w", err)
+	}
+
+	// Get SPOOL directory for default paths
+	spoolDir := firstStringMacro(condorCfg, macroSpool)
+	if spoolDir == "" {
+		spoolDir = "./data"
+	}
+
 	cfg := &Config{
 		PollInterval:      defaultPollInterval,
 		AdvertiseInterval: defaultAdvertiseInterval,
 		EpochLookback:     defaultEpochLookback,
 		StatsWindow:       defaultStatsWindow,
 		DirectorCacheTTL:  defaultDirectorCacheTTL,
-		StatePath:         defaultStatePath,
+		StatePath:         fmt.Sprintf("%s/pelican_state.json", spoolDir),
+		InfoPath:          fmt.Sprintf("%s/pelican_info.json", spoolDir),
 		CollectorHost:     defaultCollectorHost,
 		ScheddName:        defaultScheddName,
 		SiteAttribute:     defaultSiteAttribute,
 		JobMirrorPath:     defaultJobMirrorPath,
 		JobQueueLogPath:   defaultJobQueueLogPath,
-	}
-
-	condorCfg, err := condorconfig.New()
-	if err != nil {
-		return nil, fmt.Errorf("condor config: %w", err)
+		condorCfg:         condorCfg,
 	}
 
 	if d, err := parseDurationMacro(condorCfg, macroPollInterval, macroPollIntervalLegacy); err != nil {
@@ -112,6 +124,9 @@ func Load() (*Config, error) {
 	if v := firstStringMacro(condorCfg, macroStatePath, macroStatePathLegacy); v != "" {
 		cfg.StatePath = v
 	}
+	if v := firstStringMacro(condorCfg, macroInfoPath, macroInfoPathLegacy); v != "" {
+		cfg.InfoPath = v
+	}
 	if v := firstStringMacro(condorCfg, macroCollectorHost, macroCollectorHostLegacy); v != "" {
 		cfg.CollectorHost = v
 	}
@@ -132,7 +147,7 @@ func Load() (*Config, error) {
 }
 
 // WithOverrides applies optional overrides for unit tests or CLI flags.
-func (c *Config) WithOverrides(poll, adv, lookback, statsWindow, directorTTL time.Duration, statePath, collector, schedd, site, jobMirrorPath string) *Config {
+func (c *Config) WithOverrides(poll, adv, lookback, statsWindow, directorTTL time.Duration, statePath, infoPath, collector, schedd, site, jobMirrorPath string) *Config {
 	if poll > 0 {
 		c.PollInterval = poll
 	}
@@ -151,6 +166,9 @@ func (c *Config) WithOverrides(poll, adv, lookback, statsWindow, directorTTL tim
 	if statePath != "" {
 		c.StatePath = statePath
 	}
+	if infoPath != "" {
+		c.InfoPath = infoPath
+	}
 	if collector != "" {
 		c.CollectorHost = collector
 	}
@@ -164,6 +182,11 @@ func (c *Config) WithOverrides(poll, adv, lookback, statsWindow, directorTTL tim
 		c.JobMirrorPath = jobMirrorPath
 	}
 	return c
+}
+
+// HTCondorConfig returns the underlying HTCondor configuration object for use by logging and other components.
+func (c *Config) HTCondorConfig() *condorconfig.Config {
+	return c.condorCfg
 }
 
 // EffectiveIntervals exposes derived intervals useful for logging or validation.
@@ -180,6 +203,7 @@ func (c *Config) EnvMap() map[string]string {
 		macroStatsWindow:       c.StatsWindow.String(),
 		macroDirectorCacheTTL:  c.DirectorCacheTTL.String(),
 		macroStatePath:         c.StatePath,
+		macroInfoPath:          c.InfoPath,
 		macroCollectorHost:     c.CollectorHost,
 		macroScheddName:        c.ScheddName,
 		macroSiteAttribute:     c.SiteAttribute,

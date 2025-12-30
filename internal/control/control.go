@@ -171,12 +171,15 @@ func (c PairController) Step(now time.Time, prev PairState, m PairMetrics) PairS
 	return state
 }
 
-// ClassifyBand returns green/yellow/red given thresholds (fractions).
+// Band represents a control band classification
 type Band int
 
 const (
+	// BandGreen indicates healthy operation
 	BandGreen Band = iota
+	// BandYellow indicates caution
 	BandYellow
+	// BandRed indicates problems requiring intervention
 	BandRed
 )
 
@@ -193,6 +196,7 @@ func (b Band) String() string {
 	}
 }
 
+// ClassifyBand returns green/yellow/red given thresholds (fractions).
 func ClassifyBand(value float64, greenThresh, yellowThresh float64) Band {
 	switch {
 	case value < greenThresh:

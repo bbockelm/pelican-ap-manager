@@ -10,8 +10,8 @@ import (
 
 func TestComputeSandboxNormalization(t *testing.T) {
 	files := []TransferFile{
-		{URL: "osdf:///ospool/ap40//data/foo?token=abc", Bytes: 10},
-		{URL: "osdf:///ospool/ap40/data//bar//?x=1", Bytes: 20},
+		{URL: "osdf:///ospool/ap40//data/foo?token=abc", Bytes: 10, Success: true},
+		{URL: "osdf:///ospool/ap40/data//bar//?x=1", Bytes: 20, Success: true},
 	}
 
 	sandbox, size := computeSandbox(files)
@@ -20,8 +20,8 @@ func TestComputeSandboxNormalization(t *testing.T) {
 	}
 
 	filesNorm := []TransferFile{
-		{URL: "osdf:///ospool/ap40/data/foo", Bytes: 10},
-		{URL: "osdf:///ospool/ap40/data/bar", Bytes: 20},
+		{URL: "osdf:///ospool/ap40/data/foo", Bytes: 10, Success: true},
+		{URL: "osdf:///ospool/ap40/data/bar", Bytes: 20, Success: true},
 	}
 	cleaned, _ := computeSandbox(filesNorm)
 	if sandbox != cleaned {
@@ -55,8 +55,8 @@ func TestExtractFilesAttempts(t *testing.T) {
 	}
 
 	f := files[0]
-	if f.Endpoint != "cache-B" {
-		t.Fatalf("expected final endpoint cache-B, got %s", f.Endpoint)
+	if f.LastEndpoint != "cache-B" {
+		t.Fatalf("expected final endpoint cache-B, got %s", f.LastEndpoint)
 	}
 	if !f.Cached {
 		t.Fatalf("expected final cached=true")

@@ -2,33 +2,47 @@ package daemon
 
 import (
 	"fmt"
-	"io"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	htcondorlogging "github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/pelican-ap-manager/internal/condor"
 	"github.com/bbockelm/pelican-ap-manager/internal/director"
 	"github.com/bbockelm/pelican-ap-manager/internal/state"
 )
 
+// testLogger creates a logging.Logger that discards output for testing
+func testLogger() *htcondorlogging.Logger {
+	logger, _ := htcondorlogging.New(&htcondorlogging.Config{
+		OutputPath:        "stderr",
+		DestinationLevels: nil,
+	})
+	return logger
+}
+
 func TestBuildProcessedTransfersDownloadCached(t *testing.T) {
-	svc := &Service{director: director.New(time.Minute), logger: log.New(io.Discard, "", 0)}
+	svc := &Service{director: director.New(time.Minute), logger: testLogger()}
 	rec := condor.TransferRecord{
 		User:      "user",
 		Site:      "SiteA",
 		Direction: string(state.DirectionDownload),
 		Success:   true,
 		Files: []condor.TransferFile{{
-			URL:      "https://example.org/ospool/ap40/data/foo",
-			Endpoint: "cache-endpoint",
-			Cached:   true,
-			Start:    time.Unix(0, 0),
-			End:      time.Unix(1, 0),
-			Success:  true,
+			URL:          "https://example.org/ospool/ap40/data/foo",
+			LastEndpoint: "cache-endpoint",
+			Cached:       true,
+			Start:        time.Unix(0, 0),
+			End:          time.Unix(1, 0),
+			Success:      true,
+			Attempts: []condor.TransferAttempt{{
+				Endpoint:    "cache-endpoint",
+				Cached:      true,
+				Bytes:       0,
+				DurationSec: 1.0,
+			}},
 		}},
 	}
 
@@ -47,7 +61,7 @@ func TestBuildProcessedTransfersDownloadCached(t *testing.T) {
 func TestBuildProcessedTransfersDownloadAndUploadResolution(t *testing.T) {
 	client, headHits, server := newDirector(t)
 	defer server.Close()
-	svc := &Service{director: client, logger: log.New(io.Discard, "", 0)}
+	svc := &Service{director: client, logger: testLogger()}
 
 	download := condor.TransferRecord{
 		User:      "user",
@@ -55,12 +69,18 @@ func TestBuildProcessedTransfersDownloadAndUploadResolution(t *testing.T) {
 		Direction: string(state.DirectionDownload),
 		Success:   true,
 		Files: []condor.TransferFile{{
-			URL:      server.URL + "/ospool/ap40/data/foo",
-			Endpoint: "cache-endpoint",
-			Cached:   false,
-			Start:    time.Unix(0, 0),
-			End:      time.Unix(2, 0),
-			Success:  true,
+			URL:          server.URL + "/ospool/ap40/data/foo",
+			LastEndpoint: "cache-endpoint",
+			Cached:       false,
+			Start:        time.Unix(0, 0),
+			End:          time.Unix(2, 0),
+			Success:      true,
+			Attempts: []condor.TransferAttempt{{
+				Endpoint:    "cache-endpoint",
+				Cached:      false,
+				Bytes:       0,
+				DurationSec: 2.0,
+			}},
 		}},
 	}
 
@@ -85,12 +105,18 @@ func TestBuildProcessedTransfersDownloadAndUploadResolution(t *testing.T) {
 		Direction: string(state.DirectionUpload),
 		Success:   true,
 		Files: []condor.TransferFile{{
-			URL:      server.URL + "/ospool/ap40/data/bar",
-			Endpoint: "edge-endpoint",
-			Cached:   false,
-			Start:    time.Unix(3, 0),
-			End:      time.Unix(4, 0),
-			Success:  true,
+			URL:          server.URL + "/ospool/ap40/data/bar",
+			LastEndpoint: "edge-endpoint",
+			Cached:       false,
+			Start:        time.Unix(3, 0),
+			End:          time.Unix(4, 0),
+			Success:      true,
+			Attempts: []condor.TransferAttempt{{
+				Endpoint:    "edge-endpoint",
+				Cached:      false,
+				Bytes:       0,
+				DurationSec: 1.0,
+			}},
 		}},
 	}
 

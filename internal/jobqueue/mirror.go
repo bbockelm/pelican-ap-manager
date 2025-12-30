@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"sync"
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/golang-htcondor/classadlog"
+	htcondorlogging "github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/pelican-ap-manager/internal/condor"
 )
 
@@ -41,7 +41,7 @@ type Mirror struct {
 	reader           *classadlog.Reader
 	client           condor.CondorClient
 	projection       []string
-	logger           *log.Logger
+	logger           *htcondorlogging.Logger
 	logPath          string
 	logMissingLogged bool
 	logDirLogged     bool
@@ -65,7 +65,7 @@ var defaultProjection = []string{
 }
 
 // NewMirror constructs a mirror using the job queue log when available; otherwise it falls back to schedd polling.
-func NewMirror(jobQueueLogPath string, client condor.CondorClient, logger *log.Logger) (*Mirror, error) {
+func NewMirror(jobQueueLogPath string, client condor.CondorClient, logger *htcondorlogging.Logger) (*Mirror, error) {
 	m := &Mirror{
 		jobs:       make(map[Key]JobInfo),
 		client:     client,
@@ -197,7 +197,7 @@ func (m *Mirror) note(format string, args ...any) {
 	}
 	msg := fmt.Sprintf(format, args...)
 	msg = strings.TrimSpace(msg)
-	m.logger.Printf("job mirror: %s", msg)
+	m.logger.Infof(htcondorlogging.DestinationGeneral, "job mirror: %s", msg)
 }
 
 func (m *Mirror) tryInitLogReader() error {
