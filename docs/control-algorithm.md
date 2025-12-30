@@ -100,10 +100,11 @@ jobsPerInterval = capacityGBPerInterval / jobCostGB
 jobsPerInterval = max(jobsPerInterval, MinJobStartPerMinute * intervalMinutes)
 ```
 
-Where `jobCostGB` is estimated using:
-- Recent transfer rate (bytes/sec) from tracker
-- Assumed average job duration (~5 minutes)
-- EWMA smoothing with previous estimates
+Where `jobCostGB` is determined by:
+- **If available**: Average sandbox size (in GB) for the user+site pair from recent transfers (minimum 5 unique sandboxes required)
+- **Otherwise**: Falls back to `DefaultJobCostGB` configuration parameter (default: 10 GB)
+
+The sandbox-based calculation provides more accurate cost estimates based on actual transfer overhead for each user+site combination.
 
 #### EWMA (Exponentially Weighted Moving Average)
 

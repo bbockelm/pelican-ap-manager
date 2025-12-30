@@ -55,8 +55,8 @@ func TestExtractFilesAttempts(t *testing.T) {
 	}
 
 	f := files[0]
-	if f.Endpoint != "cache-B" {
-		t.Fatalf("expected final endpoint cache-B, got %s", f.Endpoint)
+	if f.LastEndpoint != "cache-B" {
+		t.Fatalf("expected final endpoint cache-B, got %s", f.LastEndpoint)
 	}
 	if !f.Cached {
 		t.Fatalf("expected final cached=true")

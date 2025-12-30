@@ -37,24 +37,25 @@ type JobEpochRecord struct {
 
 // TransferFile captures file-level details from a transfer ad.
 type TransferFile struct {
-	URL         string
-	Endpoint    string
-	Bytes       int64
-	TotalBytes  int64
-	DurationSec float64
-	Start       time.Time
-	End         time.Time
-	Cached      bool
-	Success     bool
-	LastAttempt bool
-	Attempts    []TransferAttempt
-	Direction   string
+	URL          string
+	LastEndpoint string // The endpoint from the final attempt
+	Bytes        int64
+	TotalBytes   int64
+	DurationSec  float64
+	Start        time.Time
+	End          time.Time
+	Cached       bool
+	Success      bool
+	Attempts     []TransferAttempt
+	Direction    string
 }
 
-// TransferAttempt records a single try within a transfer, including endpoint and cache hint.
+// TransferAttempt records a single try within a transfer, including endpoint, cache hint, bytes, and timing.
 type TransferAttempt struct {
-	Endpoint string
-	Cached   bool
+	Endpoint    string
+	Cached      bool
+	Bytes       int64   // Bytes transferred in this attempt (TransferFileBytesN)
+	DurationSec float64 // Time taken for this attempt (TransferTimeN)
 }
 
 // CondorClient abstracts the interactions with HTCondor needed by pelican_man.

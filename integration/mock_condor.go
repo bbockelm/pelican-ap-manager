@@ -129,15 +129,22 @@ func parseTransferFiles(ad map[string]interface{}, transferType string) []condor
 		duration, _ := fileAd["TransferDurationSeconds"].(float64)
 
 		files = append(files, condor.TransferFile{
-			URL:         url,
-			Endpoint:    endpoint,
-			Bytes:       int64(bytes),
-			TotalBytes:  int64(totalBytes),
-			Start:       time.Unix(int64(startTime), 0),
-			End:         time.Unix(int64(endTime), 0),
-			Success:     success,
-			DurationSec: duration,
-			LastAttempt: true,
+			URL:          url,
+			LastEndpoint: endpoint,
+			Bytes:        int64(bytes),
+			TotalBytes:   int64(totalBytes),
+			Start:        time.Unix(int64(startTime), 0),
+			End:          time.Unix(int64(endTime), 0),
+			Success:      success,
+			DurationSec:  duration,
+			Attempts: []condor.TransferAttempt{
+				{
+					Endpoint:    endpoint,
+					Cached:      false,
+					Bytes:       int64(bytes),
+					DurationSec: duration,
+				},
+			},
 		})
 	}
 

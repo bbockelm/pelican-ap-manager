@@ -27,7 +27,6 @@ type ProcessedTransfer struct {
 	WallClockDuration time.Duration
 	JobRuntime        time.Duration
 	Success           bool
-	LastAttempt       bool
 	EndedAt           time.Time
 	Cached            bool
 	SandboxName       string
@@ -486,6 +485,47 @@ func (t *Tracker) UserSiteErrorRate(user, site string) float64 {
 		return 0
 	}
 	return float64(fail) / float64(total)
+}
+
+// UserSiteAverageSandboxSize returns the average sandbox size in GB for a (user,site) pair over the window.
+// Returns (averageSizeGB, sampleCount). Returns (0, 0) if fewer than minSamples transfers are available.
+func (t *Tracker) UserSiteAverageSandboxSize(user, site string, minSamples int) (float64, int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	var totalBytes int64
+	var count int
+	cutoff := time.Now().Add(-t.window)
+
+	// Track unique sandboxes to avoid double-counting
+	seen := make(map[string]bool)
+
+	for _, tr := range t.perUser[user] {
+		if tr.Site != site {
+			continue
+		}
+		if tr.EndedAt.Before(cutoff) {
+			continue
+		}
+		if tr.SandboxSize <= 0 {
+			continue
+		}
+		// Only count each sandbox once
+		if seen[tr.SandboxName] {
+			continue
+		}
+		seen[tr.SandboxName] = true
+		totalBytes += tr.SandboxSize
+		count++
+	}
+
+	if count < minSamples {
+		return 0, count
+	}
+
+	// Convert bytes to GB
+	avgGB := float64(totalBytes) / float64(count) / 1e9
+	return avgGB, count
 }
 
 // GuessPrefix returns a namespace-like prefix from a URL path, used when director data is unavailable.

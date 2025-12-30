@@ -54,6 +54,7 @@ type Service struct {
 	limitMgr          *limitManager
 	schedd            *htcondor.Schedd
 	adSequence        map[string]int // tracks UpdateSequenceNumber per ad Name
+	outlierFile       *os.File       // file for logging transfer outliers
 }
 
 // NewService wires up dependencies for the daemon.
@@ -70,6 +71,19 @@ func NewService(client condor.CondorClient, st *state.State, statePath string, p
 	if epochLookback <= 0 {
 		epochLookback = 24 * time.Hour
 	}
+
+	// Open outliers file for logging suspicious transfers
+	var outlierFile *os.File
+	if statePath != "" {
+		outlierPath := filepath.Join(filepath.Dir(statePath), "outliers.jsonl")
+		f, err := os.OpenFile(outlierPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			logger.Printf("warning: could not open outliers file %s: %v", outlierPath, err)
+		} else {
+			outlierFile = f
+		}
+	}
+
 	return &Service{
 		condor:            client,
 		state:             st,
@@ -90,6 +104,7 @@ func NewService(client condor.CondorClient, st *state.State, statePath string, p
 		startTime:         time.Now(),
 		controlCfg:        control.DefaultConfig(),
 		adSequence:        make(map[string]int),
+		outlierFile:       outlierFile,
 	}
 }
 
@@ -718,7 +733,7 @@ func (s *Service) buildLimitAds() []map[string]any {
 	windowMetrics := make(map[UserSitePair]outcomeMetrics)
 	windowRates := make(map[UserSitePair]rateStats)
 	if s.tracker != nil {
-		windowMetrics = aggregateLimitWindowMetrics(s.tracker.AllTransfers())
+		windowMetrics = aggregateLimitWindowMetrics(s, s.tracker.AllTransfers())
 		windowRates = aggregateLimitWindowRates(s.tracker.AllTransfers())
 	}
 
@@ -756,8 +771,8 @@ func (s *Service) buildLimitAds() []map[string]any {
 		rateStats := windowRates[pair]
 
 		// Calculate stage-in percent from window metrics
-		// Use average stage-in time from transfer window (10 min) as percentage of
-		// average execution duration from job window (24 hour)
+		// StageInPercent = (WindowAvgTransferTimeSec / JobWindowAvgExecutionTimeSec) × 100
+		// This shows transfer overhead as a percentage of job execution time
 		stageInStats := state.StageInStats{}
 
 		// Get historical epoch counts and execution time metrics from 24-hour window
@@ -767,11 +782,11 @@ func (s *Service) buildLimitAds() []map[string]any {
 		}
 
 		// Calculate cost metric: transfer window wall-clock time vs job window execution time
-		if wm.epochsWithWallClockSuccess > 0 && historicalStats.ExecutionOnlyTimeCount > 0 {
-			// Average stage-in time from transfer window (10 minutes)
+		if wm.epochsWithWallClockSuccess > 0 && historicalStats.ExecutionTimeCount > 0 {
+			// Average stage-in time from transfer window (10 minutes) - WindowAvgTransferTimeSec
 			avgWallClockDuration := wm.successWallClockSec / float64(wm.epochsWithWallClockSuccess)
-			// Average execution-only time from job window (24 hours)
-			avgExecutionDuration := historicalStats.TotalExecutionOnlyTimeSec / float64(historicalStats.ExecutionOnlyTimeCount)
+			// Average execution time from job window (24 hours) - JobWindowAvgExecutionTimeSec
+			avgExecutionDuration := historicalStats.TotalExecutionTimeSec / float64(historicalStats.ExecutionTimeCount)
 			if avgExecutionDuration > 0 {
 				// Stage-in % = (avg transfer wall-clock / avg execution time) × 100
 				stageInStats.Percent = (avgWallClockDuration / avgExecutionDuration) * 100.0
@@ -803,18 +818,20 @@ func (s *Service) buildLimitAds() []map[string]any {
 		errorBand := control.ClassifyBand(errorRate, s.controlCfg.ErrorGreenThreshold, s.controlCfg.ErrorYellowThreshold)
 		costBand := control.ClassifyBand(stageInStats.Percent/100.0, s.controlCfg.CostGreenThresholdPercent/100.0, s.controlCfg.CostYellowThresholdPercent/100.0)
 
-		// Get per-user averages for job size and runtime
-		avgJobRuntimeSec := 0.0
-		avgJobSizeBytes := 0.0
-		if s.tracker != nil {
-			avgJobRuntimeSec = s.tracker.AverageExecutionTime(pair.User)
-			avgJobSizeBytes = s.tracker.AverageInputSize(pair.User)
+		// Compute window-based per-epoch averages (10-minute transfer window)
+		windowAvgFilesPerEpoch := 0.0
+		if wm.epochsWithSuccess > 0 && wm.successFiles > 0 {
+			windowAvgFilesPerEpoch = float64(wm.successFiles) / float64(wm.epochsWithSuccess)
 		}
 
-		// Compute files per job estimate from window metrics
-		avgFilesPerJob := 0.0
-		if wm.epochsWithSuccess > 0 && wm.successFiles > 0 {
-			avgFilesPerJob = float64(wm.successFiles) / float64(wm.epochsWithSuccess)
+		windowAvgBytesPerEpoch := 0.0
+		if wm.epochsWithSuccess > 0 {
+			windowAvgBytesPerEpoch = float64(wm.successBytes) / float64(wm.epochsWithSuccess)
+		}
+
+		windowAvgTransferTimeSec := 0.0
+		if wm.epochsWithWallClockSuccess > 0 {
+			windowAvgTransferTimeSec = wm.successWallClockSec / float64(wm.epochsWithWallClockSuccess)
 		}
 
 		// Compute average wall-clock duration per epoch
@@ -825,6 +842,12 @@ func (s *Service) buildLimitAds() []map[string]any {
 		}
 		if wm.epochsWithWallClockFailure > 0 {
 			avgWallClockFailure = wm.failureWallClockSec / float64(wm.epochsWithWallClockFailure)
+		}
+
+		// Compute job window execution time average (24-hour window)
+		jobWindowAvgExecutionTimeSec := 0.0
+		if historicalStats.ExecutionTimeCount > 0 {
+			jobWindowAvgExecutionTimeSec = historicalStats.TotalExecutionTimeSec / float64(historicalStats.ExecutionTimeCount)
 		}
 
 		ad := map[string]any{
@@ -879,26 +902,44 @@ func (s *Service) buildLimitAds() []map[string]any {
 			"TotalEpochSuccessWallClockSec": totalEpochs.SuccessWallClockSec,
 			"TotalEpochFailureWallClockSec": totalEpochs.FailureWallClockSec,
 			"TotalEpochWallClockSec":        totalEpochs.SuccessWallClockSec + totalEpochs.FailureWallClockSec,
-			// Per-user averages (repeated across all sites for this user)
-			"AvgJobRuntimeSec": avgJobRuntimeSec,
-			"AvgJobSizeBytes":  avgJobSizeBytes,
-			"AvgFilesPerJob":   avgFilesPerJob,
+			// Window-based per-epoch averages (10-minute transfer window)
+			"WindowAvgFilesPerEpoch":   windowAvgFilesPerEpoch,
+			"WindowAvgBytesPerEpoch":   windowAvgBytesPerEpoch,
+			"WindowAvgTransferTimeSec": windowAvgTransferTimeSec,
+			// Job window per-epoch averages (24-hour window)
+			"JobWindowAvgExecutionTimeSec": jobWindowAvgExecutionTimeSec,
 			// Control loop metrics
 			"CapacityGBPerMin": limitState.CapacityGBPerMin,
 			"ErrorRate":        errorRate,
 			"StageInPercent":   stageInStats.Percent,
 			// Historical epoch counts (24-hour window for context)
-			"JobWindowJobEpochs":                 historicalStats.JobEpochs,
-			"JobWindowTransferEpochs":            historicalStats.TransferEpochs,
-			"JobWindowEpochsWithBoth":            historicalStats.EpochsWithBoth,
-			"JobWindowExecutionTimeCount":        historicalStats.ExecutionTimeCount,
-			"JobWindowTotalExecutionTimeSec":     historicalStats.TotalExecutionTimeSec,
-			"JobWindowExecutionOnlyTimeCount":    historicalStats.ExecutionOnlyTimeCount,
-			"JobWindowTotalExecutionOnlyTimeSec": historicalStats.TotalExecutionOnlyTimeSec,
-			"JobCostGB":                          metrics.JobCostGB,
-			"ControlErrorBand":                   errorBand.String(),
-			"ControlCostBand":                    costBand.String(),
+			"JobWindowJobEpochs":              historicalStats.JobEpochs,
+			"JobWindowTransferEpochs":         historicalStats.TransferEpochs,
+			"JobWindowEpochsWithBoth":         historicalStats.EpochsWithBoth,
+			"JobWindowActivationCount":        historicalStats.ActivationTimeCount,
+			"JobWindowTotalActivationTimeSec": historicalStats.TotalActivationTimeSec,
+			"JobWindowExecutionCount":         historicalStats.ExecutionTimeCount,
+			"JobWindowTotalExecutionTimeSec":  historicalStats.TotalExecutionTimeSec,
+			"JobCostGB":                       metrics.JobCostGB,
+			"ControlErrorBand":                errorBand.String(),
+			"ControlCostBand":                 costBand.String(),
 		}
+
+		// Calculate target jobs per minute from capacity and job cost
+		targetJobsPerMin := 0.0
+		if metrics.JobCostGB > 0 {
+			targetJobsPerMin = limitState.CapacityGBPerMin / metrics.JobCostGB
+		}
+		ad["TargetJobsPerMin"] = targetJobsPerMin
+
+		// Calculate measured input sandbox transfer rate (sandboxes per minute) from transfer window
+		measuredJobsPerMin := 0.0
+		if wm.uniqueInputSandboxes > 0 && windowSeconds > 0 {
+			// wm is from the transfer window (typically 10 minutes), convert to per-minute rate
+			windowMinutes := float64(windowSeconds) / 60.0
+			measuredJobsPerMin = float64(wm.uniqueInputSandboxes) / windowMinutes
+		}
+		ad["MeasuredJobsPerMin"] = measuredJobsPerMin
 
 		// Add rate limit information if limit manager is available
 		if s.limitMgr != nil {
@@ -906,6 +947,11 @@ func (s *Service) buildLimitAds() []map[string]any {
 			ad["ControlRateLimit"] = rateCount
 			ad["ControlRateWindow"] = rateWindow
 			ad["ControlLimitActive"] = active
+
+			// Add limit UUID if available
+			if uuid, exists := s.limitMgr.getLimitUUID(pair); exists {
+				ad["ControlLimitUUID"] = uuid
+			}
 
 			// Add limit statistics if available
 			hitCount, jobsSkipped, lastHit, exists := s.limitMgr.getLimitStats(pair)
@@ -942,6 +988,7 @@ type outcomeMetrics struct {
 	epochsWithWallClockFailure int
 	epochsWithSuccess          int // count of unique epochs with successful transfers
 	epochsWithFailure          int // count of unique epochs with failed transfers
+	uniqueInputSandboxes       int // count of unique input sandboxes (download direction)
 }
 
 type rateStats struct {
@@ -1032,7 +1079,7 @@ func aggregateWindowRates(transfers []stats.ProcessedTransfer) map[summaryWindow
 }
 
 // aggregateLimitWindowMetrics groups transfers by user+site pair for window reporting.
-func aggregateLimitWindowMetrics(transfers []stats.ProcessedTransfer) map[UserSitePair]outcomeMetrics {
+func aggregateLimitWindowMetrics(s *Service, transfers []stats.ProcessedTransfer) map[UserSitePair]outcomeMetrics {
 	metrics := make(map[UserSitePair]outcomeMetrics)
 	// Track wall-clock time span per (epoch, user+site) combination
 	epochWallClock := make(map[string]struct {
@@ -1047,6 +1094,8 @@ func aggregateLimitWindowMetrics(transfers []stats.ProcessedTransfer) map[UserSi
 		failureFiles int
 		pair         UserSitePair
 	})
+	// Track unique input sandboxes per (user+site) pair
+	inputSandboxes := make(map[UserSitePair]map[string]bool)
 
 	for _, tr := range transfers {
 		if tr.User == "" || tr.Site == "" {
@@ -1066,16 +1115,26 @@ func aggregateLimitWindowMetrics(transfers []stats.ProcessedTransfer) map[UserSi
 			m.failureDurationAllAttempts += tr.Duration.Seconds()
 		}
 
-		// Track per-file metrics (only count final attempt for each file)
-		// This is used for PelicanSummary
-		if tr.LastAttempt {
-			if tr.Success {
-				m.successBytes += tr.Bytes
-				m.successDurationSec += tr.Duration.Seconds()
-			} else {
-				m.failureBytes += tr.Bytes
-				m.failureDurationSec += tr.Duration.Seconds()
+		// Track per-file metrics
+		if tr.Success {
+			m.successBytes += tr.Bytes
+			m.successDurationSec += tr.Duration.Seconds()
+		} else {
+			m.failureBytes += tr.Bytes
+			m.failureDurationSec += tr.Duration.Seconds()
+		}
+
+		// Log outliers: 0 bytes but >3 minutes transfer time (should have timed out)
+		if tr.Bytes == 0 && tr.Duration.Seconds() > 180 {
+			s.logOutlier(tr)
+		}
+
+		// Track unique input sandboxes (download direction)
+		if tr.Direction == state.DirectionDownload && tr.SandboxName != "" {
+			if inputSandboxes[pair] == nil {
+				inputSandboxes[pair] = make(map[string]bool)
 			}
+			inputSandboxes[pair][tr.SandboxName] = true
 		}
 
 		// Track epoch time span (earliest start to latest end) per (epoch, user+site)
@@ -1107,24 +1166,26 @@ func aggregateLimitWindowMetrics(transfers []stats.ProcessedTransfer) map[UserSi
 			}
 		}
 
-		// Track unique files per epoch (only count each file once per epoch, not per attempt)
-		if tr.LastAttempt {
-			epochKey := fmt.Sprintf("%s-%s-%d-%d-%d", pair.User, pair.Site, tr.Epoch.ClusterID, tr.Epoch.ProcID, tr.Epoch.RunInstanceID)
-			ef := epochFiles[epochKey]
-			ef.pair = pair
-			if tr.Success {
-				ef.successFiles++
-			} else {
-				ef.failureFiles++
-			}
-			epochFiles[epochKey] = ef
+		// Track unique files per epoch
+		ef := epochFiles[epochKey]
+		ef.pair = pair
+		if tr.Success {
+			ef.successFiles++
+		} else {
+			ef.failureFiles++
 		}
+		epochFiles[epochKey] = ef
 
 		metrics[pair] = m
 	}
 
 	// Add wall-clock time spans per epoch to the metrics
-	for _, wc := range epochWallClock {
+	// Only include epochs that have completed file transfers (present in epochFiles)
+	for epochKey, wc := range epochWallClock {
+		// Skip epochs without completed file transfers
+		if _, hasFiles := epochFiles[epochKey]; !hasFiles {
+			continue
+		}
 		m := metrics[wc.pair]
 		if !wc.earliestStart.IsZero() && !wc.latestEnd.IsZero() {
 			spanDuration := wc.latestEnd.Sub(wc.earliestStart).Seconds()
@@ -1153,6 +1214,13 @@ func aggregateLimitWindowMetrics(transfers []stats.ProcessedTransfer) map[UserSi
 			m.epochsWithFailure++
 		}
 		metrics[ef.pair] = m
+	}
+
+	// Add unique input sandbox counts to metrics
+	for pair, sandboxSet := range inputSandboxes {
+		m := metrics[pair]
+		m.uniqueInputSandboxes = len(sandboxSet)
+		metrics[pair] = m
 	}
 
 	return metrics
@@ -1437,68 +1505,117 @@ func (s *Service) buildProcessedTransfers(rec condor.TransferRecord) []stats.Pro
 			if prefix := stats.GuessPrefix(f.URL); prefix != "" {
 				return prefix
 			}
-			return f.Endpoint
+			return f.LastEndpoint
 		}
 
 		fedPrefix := federationPrefix(f.URL)
-		source := ""
-		destination := ""
-
-		switch state.Direction(rec.Direction) {
-		case state.DirectionDownload:
-			destination = rec.Site
-			if f.Cached {
-				source = f.Endpoint
-			} else {
-				source = resolveNamespace()
-			}
-		case state.DirectionUpload:
-			source = rec.Site
-			destination = resolveNamespace()
-		default:
-			source = resolveNamespace()
-			destination = rec.Site
-		}
-
-		if source == "" {
-			source = f.Endpoint
-		}
-		if destination == "" {
-			destination = f.Endpoint
-		}
-
-		duration := f.End.Sub(f.Start)
-		if f.DurationSec > 0 {
-			duration = time.Duration(f.DurationSec * float64(time.Second))
-		} else if duration < 0 {
-			duration = 0
-		}
-
 		normObj := normalizeSandboxObject(f.URL)
 
-		out = append(out, stats.ProcessedTransfer{
-			Epoch:             rec.EpochID,
-			User:              rec.User,
-			Endpoint:          rec.Endpoint,
-			Site:              rec.Site,
-			Source:            source,
-			Destination:       destination,
-			Direction:         state.Direction(rec.Direction),
-			FederationPrefix:  fedPrefix,
-			SandboxObject:     normObj,
-			Bytes:             f.Bytes,
-			Duration:          duration,
-			WallClockDuration: rec.WallClockDuration,
-			JobRuntime:        rec.JobRuntime,
-			Success:           f.Success && rec.Success,
-			LastAttempt:       f.Success || rec.Success,
-			EndedAt:           f.End,
-			Cached:            f.Cached,
-			SandboxName:       rec.SandboxName,
-			SandboxSize:       rec.SandboxSize,
-		})
+		// Create one ProcessedTransfer per attempt
+		for attemptIdx, attempt := range f.Attempts {
+			source := ""
+			destination := ""
+
+			switch state.Direction(rec.Direction) {
+			case state.DirectionDownload:
+				destination = rec.Site
+				if attempt.Cached {
+					source = attempt.Endpoint
+				} else {
+					source = resolveNamespace()
+				}
+			case state.DirectionUpload:
+				source = rec.Site
+				destination = resolveNamespace()
+			default:
+				source = resolveNamespace()
+				destination = rec.Site
+			}
+
+			if source == "" {
+				source = attempt.Endpoint
+			}
+			if destination == "" {
+				destination = attempt.Endpoint
+			}
+
+			duration := time.Duration(attempt.DurationSec * float64(time.Second))
+			if duration < 0 {
+				duration = 0
+			}
+
+			// Success is true only for the final attempt if the file succeeded
+			attemptSuccess := (attemptIdx == len(f.Attempts)-1) && f.Success
+
+			out = append(out, stats.ProcessedTransfer{
+				Epoch:             rec.EpochID,
+				User:              rec.User,
+				Endpoint:          attempt.Endpoint,
+				Site:              rec.Site,
+				Source:            source,
+				Destination:       destination,
+				Direction:         state.Direction(rec.Direction),
+				FederationPrefix:  fedPrefix,
+				SandboxObject:     normObj,
+				Bytes:             attempt.Bytes,
+				Duration:          duration,
+				WallClockDuration: rec.WallClockDuration,
+				JobRuntime:        rec.JobRuntime,
+				Success:           attemptSuccess && rec.Success,
+				EndedAt:           f.End,
+				Cached:            attempt.Cached,
+				SandboxName:       rec.SandboxName,
+				SandboxSize:       rec.SandboxSize,
+			})
+		}
 	}
 	return out
+}
+
+// logOutlier logs suspicious transfers to the outliers file.
+func (s *Service) logOutlier(tr stats.ProcessedTransfer) {
+	if s.outlierFile == nil {
+		return
+	}
+
+	outlier := map[string]interface{}{
+		"timestamp":         time.Now().Format(time.RFC3339),
+		"cluster_id":        tr.Epoch.ClusterID,
+		"proc_id":           tr.Epoch.ProcID,
+		"run_instance_id":   tr.Epoch.RunInstanceID,
+		"user":              tr.User,
+		"site":              tr.Site,
+		"endpoint":          tr.Endpoint,
+		"direction":         string(tr.Direction),
+		"bytes":             tr.Bytes,
+		"duration_sec":      tr.Duration.Seconds(),
+		"success":           tr.Success,
+		"sandbox_name":      tr.SandboxName,
+		"sandbox_object":    tr.SandboxObject,
+		"ended_at":          tr.EndedAt.Format(time.RFC3339),
+		"federation_prefix": tr.FederationPrefix,
+		"cached":            tr.Cached,
+		"source":            tr.Source,
+		"destination":       tr.Destination,
+	}
+
+	data, err := json.Marshal(outlier)
+	if err != nil {
+		s.logger.Printf("error marshaling outlier: %v", err)
+		return
+	}
+
+	if _, err := s.outlierFile.Write(append(data, '\n')); err != nil {
+		s.logger.Printf("error writing outlier: %v", err)
+	}
+}
+
+// Close releases resources held by the service.
+func (s *Service) Close() error {
+	if s.outlierFile != nil {
+		return s.outlierFile.Close()
+	}
+	return nil
 }
 
 func (s *Service) toHistoryEntries(transfers []stats.ProcessedTransfer) []state.TransferHistoryEntry {
@@ -1515,7 +1632,6 @@ func (s *Service) toHistoryEntries(transfers []stats.ProcessedTransfer) []state.
 			Bytes:            tr.Bytes,
 			DurationSeconds:  tr.Duration.Seconds(),
 			Success:          tr.Success,
-			LastAttempt:      tr.LastAttempt,
 			EndedAt:          tr.EndedAt,
 			Cached:           tr.Cached,
 			SandboxName:      tr.SandboxName,

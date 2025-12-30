@@ -303,24 +303,41 @@ These track **unique job epochs** since daemon startup. Each epoch (identified b
 
 ---
 
-## Per-User Averages
+## Window-Based Per-Epoch Averages
 
-These statistics are computed per user and repeated across all sites for that user.
+These statistics are computed from the transfer window (10 minutes) on a per-epoch basis.
 
-### AvgJobRuntimeSec
+### WindowAvgFilesPerEpoch
 - **Type**: Float
-- **Description**: Average runtime for completed jobs for this user (across all sites)
-- **Unit of Measurement**: Seconds
+- **Description**: Average number of files transferred per successful epoch in the transfer window
+- **Unit of Measurement**: Files per epoch
+- **Calculation**: Total successful files / successful epoch count (from 10-minute window)
 
-### AvgJobSizeBytes
+### WindowAvgBytesPerEpoch
 - **Type**: Float
-- **Description**: Average total bytes transferred per job for this user (across all sites)
-- **Unit of Measurement**: Bytes
+- **Description**: Average bytes transferred per successful epoch in the transfer window
+- **Unit of Measurement**: Bytes per epoch
+- **Calculation**: Total successful bytes / successful epoch count (from 10-minute window)
 
-### AvgFilesPerJob
+### WindowAvgTransferTimeSec
 - **Type**: Float
-- **Description**: Average number of files transferred per job for this user (across all sites)
-- **Unit of Measurement**: Files per job
+- **Description**: Average wall-clock time per successful transfer epoch in the transfer window
+- **Unit of Measurement**: Seconds per epoch
+- **Calculation**: Total successful wall-clock seconds / successful epoch count (from 10-minute window)
+- **Note**: This is the numerator for StageInPercent calculation
+
+---
+
+## Job Window Per-Epoch Averages
+
+These statistics are computed from the job window (24 hours) on a per-epoch basis.
+
+### JobWindowAvgExecutionTimeSec
+- **Type**: Float
+- **Description**: Average execution time per job epoch with non-zero execution duration in the job window
+- **Unit of Measurement**: Seconds per epoch
+- **Calculation**: JobWindowTotalExecutionTimeSec / JobWindowExecutionCount (from 24-hour window)
+- **Note**: This is the denominator for StageInPercent calculation; based on ActivationExecutionDuration (computation-only time)
 
 ---
 
@@ -340,11 +357,11 @@ These statistics are computed per user and repeated across all sites for that us
 - **Type**: Float (0.0 to 100.0)
 - **Description**: Percentage of job execution time spent on stage-in transfers, used as the cost metric for the control loop
 - **Unit of Measurement**: Percent
-- **Calculation**: (average transfer wall-clock time from 10-minute window) / (average execution-only time from 24-hour job window) × 100
+- **Calculation**: `(WindowAvgTransferTimeSec / JobWindowAvgExecutionTimeSec) × 100`
 - **Data Sources**: 
-  - Numerator: Average successful transfer wall-clock duration from the 10-minute rolling window (`WindowEpochAvgWallClockSuccessSec`)
-  - Denominator: Average execution-only time from 24-hour job window (`JobWindowTotalExecutionOnlyTimeSec / JobWindowExecutionOnlyTimeCount`)
-- **Note**: Uses `ActivationExecutionDuration` (computation time only) as the baseline, not total job runtime
+  - Numerator: `WindowAvgTransferTimeSec` - Average successful transfer wall-clock duration per epoch from the 10-minute rolling window
+  - Denominator: `JobWindowAvgExecutionTimeSec` - Average execution time per job epoch from 24-hour job window
+- **Note**: Uses `ActivationExecutionDuration` (computation time only) as the baseline, not total job runtime. Both numerator and denominator are now exposed as standalone attributes for easier debugging.
 
 ### JobWindowJobEpochs
 - **Type**: Integer
@@ -363,38 +380,40 @@ These statistics are computed per user and repeated across all sites for that us
 - **Description**: Number of epochs with both job runtime and transfer data in the **24-hour historical window**
 - **Note**: This is the subset of epochs that have both job completion records and transfer records, which can be used for accurate stage-in percentage calculations
 
-### JobWindowExecutionTimeCount
+### JobWindowActivationCount
 - **Type**: Integer
 - **Description**: Number of **job completion events with non-zero total runtime** in the **24-hour historical window**
 - **Data Source**: Job epochs from `JobEpochs` map where `RuntimeSec > 0`
 - **Runtime Derivation**: From HTCondor ClassAd attribute `ActivationDuration` (preferred), which represents the full job runtime including setup, stagein, execution, stageout, and teardown. Falls back to `RemoteWallClockTime` or `CommittedSlotTime` if `ActivationDuration` is not available.
 - **Note**: This counts job epochs that have valid total runtime data
 
-### JobWindowTotalExecutionTimeSec
+### JobWindowTotalActivationTimeSec
 - **Type**: Float
 - **Description**: Sum of total runtime across all job completion events in the **24-hour historical window**
 - **Unit of Measurement**: Seconds
 - **Data Source**: Sum of `RuntimeSec` (from `ActivationDuration`) from all `JobEpochs` entries for this user+site pair
 - **Note**: Represents total job runtime including all phases (setup + stagein + execution + stageout + teardown)
 
-### JobWindowExecutionOnlyTimeCount
+### JobWindowExecutionCount
 - **Type**: Integer
-- **Description**: Number of **job completion events with non-zero execution-only time** in the **24-hour historical window**
+- **Description**: Number of **job completion events with non-zero execution time** in the **24-hour historical window**
 - **Data Source**: Job epochs from `JobEpochs` map where `ExecutionDurationSec > 0`
 - **Execution Time Derivation**: From HTCondor ClassAd attribute `ActivationExecutionDuration`, which represents only the actual execution time (excluding setup, stagein, stageout, and teardown)
 - **Note**: This may be zero or missing if job setup failed. Used for calculating the cost metric.
 
-### JobWindowTotalExecutionOnlyTimeSec
+### JobWindowTotalExecutionTimeSec
 - **Type**: Float
-- **Description**: Sum of execution-only time across all job completion events in the **24-hour historical window**
+- **Description**: Sum of execution time across all job completion events in the **24-hour historical window**
 - **Unit of Measurement**: Seconds
 - **Data Source**: Sum of `ExecutionDurationSec` (from `ActivationExecutionDuration`) from all `JobEpochs` entries for this user+site pair
 - **Note**: Represents computation-only time, excluding setup/stagein/stageout/teardown. This is used as the denominator for the `StageInPercent` cost metric.
 
 ### JobCostGB
 - **Type**: Float
-- **Description**: Estimated "cost" in GB for running a job based on data transfer overhead
+- **Description**: Estimated "cost" in GB for running a job based on data transfer overhead. Calculated as the average sandbox size for the user+site pair if at least 5 unique sandboxes are available in the stats window; otherwise defaults to the configured `DefaultJobCostGB` (default: 10 GB).
 - **Unit of Measurement**: Gigabytes
+- **Calculation**: Average of unique sandbox sizes (bytes converted to GB) for user+site pair with minimum 5 samples
+- **Data Source**: `SandboxSize` from recent transfer history in the stats window
 
 ### ControlErrorBand
 - **Type**: String
@@ -418,6 +437,21 @@ These statistics are computed per user and repeated across all sites for that us
 
 These fields are only present if the limit manager is active.
 
+### TargetJobsPerMin
+- **Type**: Float
+- **Description**: Target job startup rate in jobs per minute, calculated from `CapacityGBPerMin / JobCostGB`
+- **Unit of Measurement**: Jobs per minute
+- **Calculation**: `CapacityGBPerMin / JobCostGB`
+- **Note**: This represents the desired job startup rate if a limit were to be installed based on current capacity
+
+### MeasuredJobsPerMin
+- **Type**: Float
+- **Description**: Measured input sandbox transfer rate over the transfer window (typically 10 minutes)
+- **Unit of Measurement**: Sandboxes per minute
+- **Calculation**: `UniqueInputSandboxes / (TransferWindowSeconds / 60)`
+- **Data Source**: Count of unique input sandbox names with download direction in the rolling transfer window
+- **Note**: Represents actual job startup activity based on input data transfers observed in the recent window
+
 ### ControlRateLimit
 - **Type**: Integer
 - **Description**: Current job startup rate limit (jobs per time window)
@@ -431,6 +465,11 @@ These fields are only present if the limit manager is active.
 ### ControlLimitActive
 - **Type**: Boolean
 - **Description**: Whether the rate limit is currently active for this user+site pair
+
+### ControlLimitUUID
+- **Type**: String
+- **Description**: UUID of the active HTCondor startup limit, if one exists
+- **Note**: Only present when a limit has been created for this user+site pair
 
 ---
 

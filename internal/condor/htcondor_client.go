@@ -304,7 +304,7 @@ func (c *htcClient) convertTransferAd(ad *classad.ClassAd) ([]TransferRecord, st
 		user = userFromGlobalJobID(firstString(ad, "GlobalJobId"))
 	}
 	if endpoint == "" && len(files) > 0 {
-		endpoint = files[0].Endpoint
+		endpoint = files[0].LastEndpoint
 	}
 	sandboxName, sandboxSize := computeSandbox(files)
 
@@ -352,7 +352,7 @@ func (c *htcClient) convertTransferAd(ad *classad.ClassAd) ([]TransferRecord, st
 		records = append(records, TransferRecord{
 			EpochID:           runID,
 			User:              recUser,
-			Endpoint:          f.Endpoint,
+			Endpoint:          f.LastEndpoint,
 			Site:              site,
 			Direction:         string(fileDir),
 			Success:           f.Success,
@@ -639,38 +639,55 @@ func extractFiles(ad *classad.ClassAd, defaultEndpoint string, fallbackEnd time.
 							}
 						}
 
+						attemptDuration := 0.0
 						if hasTime {
 							switch v := timeVal.(type) {
 							case float64:
+								attemptDuration = v
 								durationSec += v
 							case json.Number:
 								if fv, err := v.Float64(); err == nil {
+									attemptDuration = fv
 									durationSec += fv
 								}
 							}
 						}
 
-						// Sum bytes across all attempts for retry tracking
+						attemptBytes := int64(0)
 						if hasBytes {
 							switch v := bytesVal.(type) {
 							case float64:
+								attemptBytes = int64(v)
 								totalAttemptBytes += int64(v)
 							case int64:
+								attemptBytes = v
 								totalAttemptBytes += v
 							case json.Number:
 								if iv, err := v.Int64(); err == nil {
+									attemptBytes = iv
 									totalAttemptBytes += iv
 								}
 							}
 						}
 
-						attempts = append(attempts, TransferAttempt{Endpoint: attemptEp, Cached: attemptCached})
+						attempts = append(attempts, TransferAttempt{
+							Endpoint:    attemptEp,
+							Cached:      attemptCached,
+							Bytes:       attemptBytes,
+							DurationSec: attemptDuration,
+						})
 						endpoint = attemptEp
 						cached = attemptCached
 					}
 
 					if len(attempts) == 0 {
-						attempts = append(attempts, TransferAttempt{Endpoint: endpoint, Cached: cached})
+						// No indexed attempt data; create single attempt with file-level totals
+						attempts = append(attempts, TransferAttempt{
+							Endpoint:    endpoint,
+							Cached:      cached,
+							Bytes:       pr.TransferFileBytes,
+							DurationSec: durationSec,
+						})
 					}
 
 					// Fallback to wall-clock duration if no precise timing was provided.
@@ -692,18 +709,17 @@ func extractFiles(ad *classad.ClassAd, defaultEndpoint string, fallbackEnd time.
 					}
 
 					files = append(files, TransferFile{
-						URL:         pr.TransferUrl,
-						Endpoint:    endpoint,
-						Bytes:       pr.TransferFileBytes,
-						TotalBytes:  totalBytes,
-						DurationSec: durationSec,
-						Start:       start,
-						End:         end,
-						Cached:      cached,
-						Success:     pr.TransferSuccess,
-						LastAttempt: pr.TransferSuccess,
-						Attempts:    attempts,
-						Direction:   dirStr,
+						URL:          pr.TransferUrl,
+						LastEndpoint: endpoint,
+						Bytes:        pr.TransferFileBytes,
+						TotalBytes:   totalBytes,
+						DurationSec:  durationSec,
+						Start:        start,
+						End:          end,
+						Cached:       cached,
+						Success:      pr.TransferSuccess,
+						Attempts:     attempts,
+						Direction:    dirStr,
 					})
 				}
 			}

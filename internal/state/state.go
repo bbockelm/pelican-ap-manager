@@ -157,7 +157,6 @@ type TransferHistoryEntry struct {
 	Bytes            int64     `json:"bytes"`
 	DurationSeconds  float64   `json:"duration_seconds"`
 	Success          bool      `json:"success"`
-	LastAttempt      bool      `json:"last_attempt"`
 	EndedAt          time.Time `json:"ended_at"`
 	Cached           bool      `json:"cached"`
 	SandboxName      string    `json:"sandbox_name"`
@@ -708,15 +707,15 @@ func (s *State) PairStageInPercent(window time.Duration, source, destination str
 
 // StageInStats contains statistics about stage-in percentage calculation for a user+site pair.
 type StageInStats struct {
-	Samples                   int     // Number of epochs with both transfer and job data (used for calculation)
-	Percent                   float64 // Average stage-in percentage
-	JobEpochs                 int     // Total job epochs for this user+site in the window
-	TransferEpochs            int     // Transfer epochs for this user+site in the window
-	EpochsWithBoth            int     // Epochs that have both transfer and job data (same as Samples)
-	ExecutionTimeCount        int     // Number of job epochs with non-zero execution time (ActivationDuration)
-	TotalExecutionTimeSec     float64 // Sum of total runtime (ActivationDuration) across all job epochs
-	ExecutionOnlyTimeCount    int     // Number of job epochs with non-zero execution-only time (ActivationExecutionDuration)
-	TotalExecutionOnlyTimeSec float64 // Sum of execution-only time (ActivationExecutionDuration) across all job epochs
+	Samples                int     // Number of epochs with both transfer and job data (used for calculation)
+	Percent                float64 // Average stage-in percentage
+	JobEpochs              int     // Total job epochs for this user+site in the window
+	TransferEpochs         int     // Transfer epochs for this user+site in the window
+	EpochsWithBoth         int     // Epochs that have both transfer and job data (same as Samples)
+	ActivationTimeCount    int     // Number of job epochs with non-zero activation time (ActivationDuration)
+	TotalActivationTimeSec float64 // Sum of total activation time (ActivationDuration) across all job epochs
+	ExecutionTimeCount     int     // Number of job epochs with non-zero execution time (ActivationExecutionDuration)
+	TotalExecutionTimeSec  float64 // Sum of execution time (ActivationExecutionDuration) across all job epochs
 }
 
 // UserSiteStageInPercent estimates stage-in percent for a (user,site) pair over the retention window.
@@ -768,22 +767,22 @@ func (s *State) UserSiteStageInPercent(window time.Duration, user, site string) 
 		}
 	}
 
-	// Count total job epochs for this user+site and compute execution time metrics
+	// Count total job epochs for this user+site and compute activation/execution time metrics
 	totalJobEpochs := 0
+	activationTimeCount := 0
+	totalActivationTimeSec := 0.0
 	executionTimeCount := 0
 	totalExecutionTimeSec := 0.0
-	executionOnlyTimeCount := 0
-	totalExecutionOnlyTimeSec := 0.0
 	for _, je := range s.JobEpochs {
 		if je.User == user && je.Site == site && je.EndedAt.After(cutoff) {
 			totalJobEpochs++
 			if je.RuntimeSec > 0 {
-				executionTimeCount++
-				totalExecutionTimeSec += je.RuntimeSec
+				activationTimeCount++
+				totalActivationTimeSec += je.RuntimeSec
 			}
 			if je.ExecutionDurationSec > 0 {
-				executionOnlyTimeCount++
-				totalExecutionOnlyTimeSec += je.ExecutionDurationSec
+				executionTimeCount++
+				totalExecutionTimeSec += je.ExecutionDurationSec
 			}
 		}
 	}
@@ -823,15 +822,15 @@ func (s *State) UserSiteStageInPercent(window time.Duration, user, site string) 
 	}
 
 	return StageInStats{
-		Samples:                   samples,
-		Percent:                   avgPercent,
-		JobEpochs:                 totalJobEpochs,
-		TransferEpochs:            len(transferEpochSet),
-		EpochsWithBoth:            samples,
-		ExecutionTimeCount:        executionTimeCount,
-		TotalExecutionTimeSec:     totalExecutionTimeSec,
-		ExecutionOnlyTimeCount:    executionOnlyTimeCount,
-		TotalExecutionOnlyTimeSec: totalExecutionOnlyTimeSec,
+		Samples:                samples,
+		Percent:                avgPercent,
+		JobEpochs:              totalJobEpochs,
+		TransferEpochs:         len(transferEpochSet),
+		EpochsWithBoth:         samples,
+		ActivationTimeCount:    activationTimeCount,
+		TotalActivationTimeSec: totalActivationTimeSec,
+		ExecutionTimeCount:     executionTimeCount,
+		TotalExecutionTimeSec:  totalExecutionTimeSec,
 	}
 }
 

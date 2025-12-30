@@ -64,7 +64,6 @@ func main() {
 					Duration:         time.Duration(e.DurationSeconds * float64(time.Second)),
 					JobRuntime:       time.Duration(e.JobRuntimeSec * float64(time.Second)),
 					Success:          e.Success,
-					LastAttempt:      e.LastAttempt,
 					EndedAt:          e.EndedAt,
 					Cached:           e.Cached,
 					SandboxName:      e.SandboxName,

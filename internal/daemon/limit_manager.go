@@ -452,3 +452,17 @@ func (m *limitManager) getLimitStats(pair UserSitePair) (hitCount int64, jobsSki
 
 	return 0, 0, time.Time{}, false
 }
+
+// getLimitUUID returns the UUID of the active limit for a user+site pair
+func (m *limitManager) getLimitUUID(pair UserSitePair) (uuid string, exists bool) {
+	if !m.cfg.enabled {
+		return "", false
+	}
+
+	pairTag := pairKey(pair)
+	if limit, ok := m.activeLimits[pairTag]; ok {
+		return limit.uuid, true
+	}
+
+	return "", false
+}

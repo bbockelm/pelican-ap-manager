@@ -23,12 +23,18 @@ func TestBuildProcessedTransfersDownloadCached(t *testing.T) {
 		Direction: string(state.DirectionDownload),
 		Success:   true,
 		Files: []condor.TransferFile{{
-			URL:      "https://example.org/ospool/ap40/data/foo",
-			Endpoint: "cache-endpoint",
-			Cached:   true,
-			Start:    time.Unix(0, 0),
-			End:      time.Unix(1, 0),
-			Success:  true,
+			URL:          "https://example.org/ospool/ap40/data/foo",
+			LastEndpoint: "cache-endpoint",
+			Cached:       true,
+			Start:        time.Unix(0, 0),
+			End:          time.Unix(1, 0),
+			Success:      true,
+			Attempts: []condor.TransferAttempt{{
+				Endpoint:    "cache-endpoint",
+				Cached:      true,
+				Bytes:       0,
+				DurationSec: 1.0,
+			}},
 		}},
 	}
 
@@ -55,12 +61,18 @@ func TestBuildProcessedTransfersDownloadAndUploadResolution(t *testing.T) {
 		Direction: string(state.DirectionDownload),
 		Success:   true,
 		Files: []condor.TransferFile{{
-			URL:      server.URL + "/ospool/ap40/data/foo",
-			Endpoint: "cache-endpoint",
-			Cached:   false,
-			Start:    time.Unix(0, 0),
-			End:      time.Unix(2, 0),
-			Success:  true,
+			URL:          server.URL + "/ospool/ap40/data/foo",
+			LastEndpoint: "cache-endpoint",
+			Cached:       false,
+			Start:        time.Unix(0, 0),
+			End:          time.Unix(2, 0),
+			Success:      true,
+			Attempts: []condor.TransferAttempt{{
+				Endpoint:    "cache-endpoint",
+				Cached:      false,
+				Bytes:       0,
+				DurationSec: 2.0,
+			}},
 		}},
 	}
 
@@ -85,12 +97,18 @@ func TestBuildProcessedTransfersDownloadAndUploadResolution(t *testing.T) {
 		Direction: string(state.DirectionUpload),
 		Success:   true,
 		Files: []condor.TransferFile{{
-			URL:      server.URL + "/ospool/ap40/data/bar",
-			Endpoint: "edge-endpoint",
-			Cached:   false,
-			Start:    time.Unix(3, 0),
-			End:      time.Unix(4, 0),
-			Success:  true,
+			URL:          server.URL + "/ospool/ap40/data/bar",
+			LastEndpoint: "edge-endpoint",
+			Cached:       false,
+			Start:        time.Unix(3, 0),
+			End:          time.Unix(4, 0),
+			Success:      true,
+			Attempts: []condor.TransferAttempt{{
+				Endpoint:    "edge-endpoint",
+				Cached:      false,
+				Bytes:       0,
+				DurationSec: 1.0,
+			}},
 		}},
 	}
 
