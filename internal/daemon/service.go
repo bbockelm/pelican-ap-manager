@@ -650,6 +650,17 @@ func (s *Service) buildSummaryAds() []map[string]any {
 			}
 
 			rateStats := windowRates[wk]
+			stageSamples, stagePct := s.state.BucketStageInPercent(jobEpochRetention, rawKey)
+
+			// Compute control loop band classifications
+			// Default to green when no window data exists
+			errorBand := control.BandGreen
+			costBand := control.BandGreen
+			if wm.success+wm.failure > 0 {
+				errorRate := 1.0 - windowRate
+				errorBand = control.ClassifyBand(errorRate, s.controlCfg.ErrorGreenThreshold, s.controlCfg.ErrorYellowThreshold)
+				costBand = control.ClassifyBand(stagePct/100.0, s.controlCfg.CostGreenThresholdPercent/100.0, s.controlCfg.CostYellowThresholdPercent/100.0)
+			}
 
 			name := s.summaryAdName(key, summaryID, prefix)
 			summaryVal := rawKey
@@ -687,6 +698,10 @@ func (s *Service) buildSummaryAds() []map[string]any {
 				"WindowRateP10BytesPerSec":        rateStats.p10,
 				"WindowRateP90BytesPerSec":        rateStats.p90,
 				"WindowRateSamples":               rateStats.count,
+				"StageInPercent":                  stagePct,
+				"StageInSamples":                  stageSamples,
+				"ControlErrorBand":                errorBand.String(),
+				"ControlCostBand":                 costBand.String(),
 				// Cumulative attempt totals since daemon start
 				"TotalAttemptSuccessCount":       success,
 				"TotalAttemptFailureCount":       failure,
