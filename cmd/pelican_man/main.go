@@ -28,14 +28,14 @@ func main() {
 	cfg, err := config.Load()
 	if err != nil {
 		// Can't use logger yet, fall back to stderr
-		os.Stderr.WriteString("config error: " + err.Error() + "\n")
+		_, _ = os.Stderr.WriteString("config error: " + err.Error() + "\n")
 		os.Exit(1)
 	}
 
 	// Initialize logging using HTCondor config
 	logger, err := htcondorlogging.FromConfigWithDaemon("PELICAN_MANAGER", cfg.HTCondorConfig())
 	if err != nil {
-		os.Stderr.WriteString("logging setup error: " + err.Error() + "\n")
+		_, _ = os.Stderr.WriteString("logging setup error: " + err.Error() + "\n")
 		os.Exit(1)
 	}
 

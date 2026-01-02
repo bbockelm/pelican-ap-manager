@@ -30,16 +30,16 @@ All configuration is sourced from HTCondor configuration macros (using the same 
 
 ### Core Settings
 
-- **`PELICAN_MANAGER_POLL_INTERVAL`** (default: `30s`)  
+- **`PELICAN_MANAGER_POLL_INTERVAL`** (default: `30s`)
   How frequently to poll for new transfer epoch history
 
-- **`PELICAN_MANAGER_ADVERTISE_INTERVAL`** (default: `1m`)  
+- **`PELICAN_MANAGER_ADVERTISE_INTERVAL`** (default: `1m`)
   How frequently to advertise summary ClassAds to the collector
 
-- **`PELICAN_MANAGER_EPOCH_LOOKBACK`** (default: `24h`)  
+- **`PELICAN_MANAGER_EPOCH_LOOKBACK`** (default: `24h`)
   How far back in time to query transfer history on startup
 
-- **`PELICAN_MANAGER_STATS_WINDOW`** (default: `1h`)  
+- **`PELICAN_MANAGER_STATS_WINDOW`** (default: `1h`)
   Rolling time window for in-memory statistics aggregation
 
 ### Storage and Cache
@@ -50,18 +50,18 @@ All configuration is sourced from HTCondor configuration macros (using the same 
 - **`PELICAN_MANAGER_INFO_PATH`** (default: `$(SPOOL)/pelican_info.json`)
   Path where the daemon writes a JSON file with current ClassAd information for monitoring and debugging
 
-- **`PELICAN_MANAGER_DIRECTOR_CACHE_TTL`** (default: `15m`)  
+- **`PELICAN_MANAGER_DIRECTOR_CACHE_TTL`** (default: `15m`)
   Cache duration for Pelican director lookups
 
 ### HTCondor Integration
 
-- **`PELICAN_MANAGER_COLLECTOR_HOST`** (default: uses `COLLECTOR_HOST` from HTCondor config, falls back to `localhost:9618`)  
+- **`PELICAN_MANAGER_COLLECTOR_HOST`** (default: uses `COLLECTOR_HOST` from HTCondor config, falls back to `localhost:9618`)
   Collector address for advertising summary ClassAds
 
-- **`PELICAN_MANAGER_SCHEDD_NAME`** (optional; defaults to `SCHEDD_NAME` from HTCondor config)  
+- **`PELICAN_MANAGER_SCHEDD_NAME`** (optional; defaults to `SCHEDD_NAME` from HTCondor config)
   Specific schedd to query for job and transfer information. If not set, queries the local schedd.
 
-- **`PELICAN_MANAGER_SITE_ATTRIBUTE`** (default: `Site`)  
+- **`PELICAN_MANAGER_SITE_ATTRIBUTE`** (default: `Site`)
   ClassAd attribute name used for site identification in aggregation
 
 ## Control Algorithm

@@ -358,7 +358,7 @@ These statistics are computed from the job window (24 hours) on a per-epoch basi
 - **Description**: Percentage of job execution time spent on stage-in transfers, used as the cost metric for the control loop
 - **Unit of Measurement**: Percent
 - **Calculation**: `(WindowAvgTransferTimeSec / JobWindowAvgExecutionTimeSec) × 100`
-- **Data Sources**: 
+- **Data Sources**:
   - Numerator: `WindowAvgTransferTimeSec` - Average successful transfer wall-clock duration per epoch from the 10-minute rolling window
   - Denominator: `JobWindowAvgExecutionTimeSec` - Average execution time per job epoch from 24-hour job window
 - **Note**: Uses `ActivationExecutionDuration` (computation time only) as the baseline, not total job runtime. Both numerator and denominator are now exposed as standalone attributes for easier debugging.
