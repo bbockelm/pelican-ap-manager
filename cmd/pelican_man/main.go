@@ -45,21 +45,21 @@ func main() {
 	// Initialize droppriv manager if running as root
 	if os.Geteuid() == 0 {
 		logger.Infof(htcondorlogging.DestinationGeneral, "Running as root, enabling privilege drop mode")
-		
+
 		dropPrivConfig := droppriv.ConfigFromHTCondor(cfg.HTCondorConfig())
 		dropPrivConfig.Enabled = true
-		
+
 		privMgr, err := droppriv.NewManager(dropPrivConfig)
 		if err != nil {
 			logger.Errorf(htcondorlogging.DestinationGeneral, "Failed to initialize privilege manager: %v", err)
 			os.Exit(1)
 		}
-		
+
 		if err := privMgr.Start(); err != nil {
 			logger.Errorf(htcondorlogging.DestinationGeneral, "Failed to start privilege manager: %v", err)
 			os.Exit(1)
 		}
-		
+
 		// Store in atomic pointer so sandbox APIs can use it
 		droppriv.ReloadDefaultManager()
 		logger.Infof(htcondorlogging.DestinationGeneral, "Privilege manager initialized and started")

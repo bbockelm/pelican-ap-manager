@@ -13,16 +13,16 @@ import (
 )
 
 type Server struct {
-	db            *DB
-	handlers      *Handlers
-	httpServer    *http.Server
-	logger        *htcondorlogging.Logger
-	listenAddr    string
-	socketPath    string
-	tlsCert       string
-	tlsKey        string
-	cleanupStop   chan struct{}
-	listener      net.Listener
+	db          *DB
+	handlers    *Handlers
+	httpServer  *http.Server
+	logger      *htcondorlogging.Logger
+	listenAddr  string
+	socketPath  string
+	tlsCert     string
+	tlsKey      string
+	cleanupStop chan struct{}
+	listener    net.Listener
 }
 
 func NewServer(listenAddr, socketPath, tlsCert, tlsKey, dbPath string, logger *htcondorlogging.Logger) (*Server, error) {
