@@ -1,4 +1,4 @@
-version: 2
+version: "2"
 
 linters:
   enable:
@@ -8,10 +8,6 @@ linters:
     - staticcheck
   disable:
     - unused
-
-linters-settings:
-  gocyclo:
-    min-complexity: 15
 
 issues:
   max-issues-per-linter: 0
