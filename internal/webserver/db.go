@@ -2,13 +2,13 @@ package webserver
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"fmt"
 	"time"
 
 	_ "github.com/glebarez/sqlite"
+	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -79,7 +79,6 @@ func initSchema(db *sql.DB) error {
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		job_registration_id INTEGER NOT NULL,
 		hashed_token TEXT NOT NULL,
-		salt TEXT NOT NULL,
 		expires_at TIMESTAMP NOT NULL,
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY (job_registration_id) REFERENCES job_registrations(id) ON DELETE CASCADE
@@ -132,19 +131,18 @@ func (d *DB) createTokenForRegistration(tx *sql.Tx, registrationID int64) (strin
 	}
 	token := tokenPrefix + base64.URLEncoding.EncodeToString(rawToken)
 
-	salt := make([]byte, 16)
-	if _, err := rand.Read(salt); err != nil {
-		return "", time.Time{}, fmt.Errorf("failed to generate salt: %w", err)
+	// bcrypt handles salting internally, so we store an empty salt
+	hashedToken, err := bcrypt.GenerateFromPassword([]byte(token), bcrypt.DefaultCost)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("failed to hash token: %w", err)
 	}
-	saltStr := base64.URLEncoding.EncodeToString(salt)
 
-	hashedToken := hashToken(token, saltStr)
 	expiresAt := time.Now().Add(tokenExpiration)
 
-	_, err := tx.Exec(`
-		INSERT INTO job_tokens (job_registration_id, hashed_token, salt, expires_at, created_at)
-		VALUES (?, ?, ?, ?, ?)
-	`, registrationID, hashedToken, saltStr, expiresAt, time.Now())
+	_, err = tx.Exec(`
+		INSERT INTO job_tokens (job_registration_id, hashed_token, expires_at, created_at)
+		VALUES (?, ?, ?, ?)
+	`, registrationID, string(hashedToken), expiresAt, time.Now())
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("failed to insert token: %w", err)
 	}
@@ -154,7 +152,7 @@ func (d *DB) createTokenForRegistration(tx *sql.Tx, registrationID int64) (strin
 
 func (d *DB) ValidateToken(token string) (string, int, int, string, error) {
 	rows, err := d.db.Query(`
-		SELECT jr.job_id, jr.owner_uid, jr.owner_gid, jr.job_ad_json, jt.salt, jt.hashed_token, jt.expires_at
+		SELECT jr.job_id, jr.owner_uid, jr.owner_gid, jr.job_ad_json, jt.hashed_token, jt.expires_at
 		FROM job_tokens jt
 		JOIN job_registrations jr ON jt.job_registration_id = jr.id
 		WHERE jt.expires_at > ?
@@ -165,14 +163,14 @@ func (d *DB) ValidateToken(token string) (string, int, int, string, error) {
 	defer rows.Close()
 
 	for rows.Next() {
-		var jobID, salt, hashedToken, jobAdJSON string
+		var jobID, hashedToken, jobAdJSON string
 		var uid, gid int
 		var expiresAt time.Time
-		if err := rows.Scan(&jobID, &uid, &gid, &jobAdJSON, &salt, &hashedToken, &expiresAt); err != nil {
+		if err := rows.Scan(&jobID, &uid, &gid, &jobAdJSON, &hashedToken, &expiresAt); err != nil {
 			return "", 0, 0, "", fmt.Errorf("failed to scan token: %w", err)
 		}
 
-		if hashToken(token, salt) == hashedToken {
+		if err := bcrypt.CompareHashAndPassword([]byte(hashedToken), []byte(token)); err == nil {
 			return jobID, uid, gid, jobAdJSON, nil
 		}
 	}
@@ -212,11 +210,4 @@ func (d *DB) CleanupExpiredTokens() error {
 		return fmt.Errorf("failed to cleanup expired tokens: %w", err)
 	}
 	return nil
-}
-
-func hashToken(token, salt string) string {
-	h := sha256.New()
-	h.Write([]byte(token))
-	h.Write([]byte(salt))
-	return base64.URLEncoding.EncodeToString(h.Sum(nil))
 }

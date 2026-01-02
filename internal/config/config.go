@@ -100,8 +100,8 @@ func Load() (*Config, error) {
 		JobQueueLogPath:   defaultJobQueueLogPath,
 		WebListenAddress:  "",
 		WebSocketPath:     "",
-		WebTLSCert:        "",
-		WebTLSKey:         "",
+		WebTLSCert:        fmt.Sprintf("%s/pelican-certs/server.crt", spoolDir),
+		WebTLSKey:         fmt.Sprintf("%s/pelican-certs/server.key", spoolDir),
 		WebDBPath:         fmt.Sprintf("%s/pelican_web.db", spoolDir),
 		condorCfg:         condorCfg,
 	}

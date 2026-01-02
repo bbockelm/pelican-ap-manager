@@ -30,11 +30,19 @@ func NewHandlers(db *DB, logger *logging.Logger, socketPath, listenAddress strin
 }
 
 type RegisterRequest struct {
-	ClusterId int    `json:"ClusterId"`
-	ProcId    int    `json:"ProcId"`
-	Owner     string `json:"Owner"`
-	Iwd       string `json:"Iwd"`
-	Cmd       string `json:"Cmd"`
+	ClusterId            int    `json:"ClusterId"`
+	ProcId               int    `json:"ProcId"`
+	Owner                string `json:"Owner"`
+	OsUser               string `json:"OsUser"`
+	Iwd                  string `json:"Iwd"`
+	Cmd                  string `json:"Cmd"`
+	TransferInput        string `json:"TransferInput,omitempty"`
+	TransferOutput       string `json:"TransferOutput,omitempty"`
+	TransferExecutable   bool   `json:"TransferExecutable,omitempty"`
+	In                   string `json:"In,omitempty"`
+	Out                  string `json:"Out,omitempty"`
+	Err                  string `json:"Err,omitempty"`
+	TransferOutputRemaps string `json:"TransferOutputRemaps,omitempty"`
 }
 
 type RegisterResponse struct {
@@ -42,6 +50,51 @@ type RegisterResponse struct {
 	ExpiresAt  int64    `json:"expires_at"`
 	InputURLs  []string `json:"input_urls"`
 	OutputURLs []string `json:"output_urls"`
+}
+
+// convertRegisterRequestToClassAd converts a RegisterRequest to ClassAd format
+func convertRegisterRequestToClassAd(req *RegisterRequest) string {
+	// Build ClassAd string with proper format
+	var parts []string
+
+	parts = append(parts, fmt.Sprintf("ClusterId = %d", req.ClusterId))
+	parts = append(parts, fmt.Sprintf("ProcId = %d", req.ProcId))
+
+	if req.Owner != "" {
+		parts = append(parts, fmt.Sprintf("Owner = \"%s\"", req.Owner))
+	}
+	if req.OsUser != "" {
+		parts = append(parts, fmt.Sprintf("OsUser = \"%s\"", req.OsUser))
+	}
+	if req.Iwd != "" {
+		parts = append(parts, fmt.Sprintf("Iwd = \"%s\"", req.Iwd))
+	}
+	if req.Cmd != "" {
+		parts = append(parts, fmt.Sprintf("Cmd = \"%s\"", req.Cmd))
+	}
+	if req.TransferInput != "" {
+		parts = append(parts, fmt.Sprintf("TransferInput = \"%s\"", req.TransferInput))
+	}
+	if req.TransferOutput != "" {
+		parts = append(parts, fmt.Sprintf("TransferOutput = \"%s\"", req.TransferOutput))
+	}
+	if req.TransferExecutable {
+		parts = append(parts, "TransferExecutable = true")
+	}
+	if req.In != "" {
+		parts = append(parts, fmt.Sprintf("In = \"%s\"", req.In))
+	}
+	if req.Out != "" {
+		parts = append(parts, fmt.Sprintf("Out = \"%s\"", req.Out))
+	}
+	if req.Err != "" {
+		parts = append(parts, fmt.Sprintf("Err = \"%s\"", req.Err))
+	}
+	if req.TransferOutputRemaps != "" {
+		parts = append(parts, fmt.Sprintf("TransferOutputRemaps = \"%s\"", req.TransferOutputRemaps))
+	}
+
+	return "[ " + strings.Join(parts, "; ") + " ]"
 }
 
 func (h *Handlers) HandleRegister(w http.ResponseWriter, r *http.Request) {
@@ -52,6 +105,14 @@ func (h *Handlers) HandleRegister(w http.ResponseWriter, r *http.Request) {
 
 	// Get UID/GID from Unix socket if available
 	uid, gid := getSocketCredentials(r)
+
+	// Registration is only allowed over Unix domain sockets for security
+	// If socket path is configured and we got -1,-1 credentials, reject the request
+	if h.socketPath != "" && (uid < 0 || gid < 0) {
+		h.logger.Errorf(logging.DestinationGeneral, "Registration attempted over non-socket connection")
+		http.Error(w, "Registration requires Unix domain socket connection", http.StatusForbidden)
+		return
+	}
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -69,7 +130,10 @@ func (h *Handlers) HandleRegister(w http.ResponseWriter, r *http.Request) {
 
 	jobID := fmt.Sprintf("%d.%d", req.ClusterId, req.ProcId)
 
-	token, expiresAt, err := h.db.RegisterJob(jobID, string(body), req.Owner, uid, gid)
+	// Convert JSON to ClassAd format for storage
+	jobAdString := convertRegisterRequestToClassAd(&req)
+
+	token, expiresAt, err := h.db.RegisterJob(jobID, jobAdString, req.Owner, uid, gid)
 	if err != nil {
 		h.logger.Errorf(logging.DestinationGeneral, "Failed to register job: %v", err)
 		http.Error(w, "Failed to register job", http.StatusInternalServerError)
