@@ -21,6 +21,11 @@ type Config struct {
 	SiteAttribute     string
 	JobMirrorPath     string
 	JobQueueLogPath   string
+	WebListenAddress  string
+	WebSocketPath     string
+	WebTLSCert        string
+	WebTLSKey         string
+	WebDBPath         string
 	condorCfg         *condorconfig.Config // Store for logging initialization
 }
 
@@ -58,6 +63,11 @@ const (
 	macroStatsWindow             = "PELICAN_MANAGER_STATS_WINDOW"
 	macroDirectorCacheTTL        = "PELICAN_MANAGER_DIRECTOR_CACHE_TTL"
 	macroJobQueueLog             = "JOB_QUEUE_LOG"
+	macroWebListenAddress        = "PELICAN_MANAGER_WEB_LISTEN_ADDRESS"
+	macroWebSocketPath           = "PELICAN_MANAGER_WEB_SOCKET_PATH"
+	macroWebTLSCert              = "PELICAN_MANAGER_WEB_TLS_CERT"
+	macroWebTLSKey               = "PELICAN_MANAGER_WEB_TLS_KEY"
+	macroWebDBPath               = "PELICAN_MANAGER_WEB_DB_PATH"
 )
 
 // Load returns configuration derived from the active HTCondor configuration,
@@ -88,6 +98,11 @@ func Load() (*Config, error) {
 		SiteAttribute:     defaultSiteAttribute,
 		JobMirrorPath:     defaultJobMirrorPath,
 		JobQueueLogPath:   defaultJobQueueLogPath,
+		WebListenAddress:  "",
+		WebSocketPath:     "",
+		WebTLSCert:        "",
+		WebTLSKey:         "",
+		WebDBPath:         fmt.Sprintf("%s/pelican_web.db", spoolDir),
 		condorCfg:         condorCfg,
 	}
 
@@ -141,6 +156,21 @@ func Load() (*Config, error) {
 	}
 	if v := firstStringMacro(condorCfg, macroJobQueueLog); v != "" {
 		cfg.JobQueueLogPath = v
+	}
+	if v := firstStringMacro(condorCfg, macroWebListenAddress); v != "" {
+		cfg.WebListenAddress = v
+	}
+	if v := firstStringMacro(condorCfg, macroWebSocketPath); v != "" {
+		cfg.WebSocketPath = v
+	}
+	if v := firstStringMacro(condorCfg, macroWebTLSCert); v != "" {
+		cfg.WebTLSCert = v
+	}
+	if v := firstStringMacro(condorCfg, macroWebTLSKey); v != "" {
+		cfg.WebTLSKey = v
+	}
+	if v := firstStringMacro(condorCfg, macroWebDBPath); v != "" {
+		cfg.WebDBPath = v
 	}
 
 	return cfg, nil
