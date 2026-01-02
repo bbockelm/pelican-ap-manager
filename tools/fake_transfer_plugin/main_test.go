@@ -75,7 +75,7 @@ func buildPluginBinary(t *testing.T) string {
 		t.Fatalf("getwd: %v", err)
 	}
 
-	cmd := exec.Command("go", "build", "-o", bin, ".")
+	cmd := exec.Command("go", "build", "-buildvcs=false", "-o", bin, ".")
 	cmd.Dir = wd
 	cmd.Env = os.Environ()
 	if output, err := cmd.CombinedOutput(); err != nil {
