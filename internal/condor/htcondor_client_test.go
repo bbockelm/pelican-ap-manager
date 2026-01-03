@@ -31,7 +31,7 @@ func TestComputeSandboxNormalization(t *testing.T) {
 
 func TestExtractFilesAttempts(t *testing.T) {
 	ad := classad.New()
-	ad.Set("InputPluginResultList", []any{
+	_ = ad.Set("InputPluginResultList", []any{
 		map[string]any{
 			"TransferUrl":        "osdf:///ospool/ap40/data/foo",
 			"TransferFileBytes":  int64(10),
@@ -74,13 +74,13 @@ func TestExtractFilesAttempts(t *testing.T) {
 
 func TestConvertTransferAdDownloadDirection(t *testing.T) {
 	ad := classad.New()
-	ad.Set("TransferType", "download")
-	ad.Set("TransferEndpoint", "osdf-cache")
-	ad.Set("Owner", "alice")
-	ad.Set("TransferEndTime", int64(2))
-	ad.Set("TransferStartTime", int64(1))
-	ad.Set("TransferSuccess", true)
-	ad.Set("InputPluginResultList", []any{
+	_ = ad.Set("TransferType", "download")
+	_ = ad.Set("TransferEndpoint", "osdf-cache")
+	_ = ad.Set("Owner", "alice")
+	_ = ad.Set("TransferEndTime", int64(2))
+	_ = ad.Set("TransferStartTime", int64(1))
+	_ = ad.Set("TransferSuccess", true)
+	_ = ad.Set("InputPluginResultList", []any{
 		map[string]any{
 			"TransferUrl":        "osdf:///ospool/ap40/data/foo",
 			"TransferFileBytes":  int64(10),
@@ -107,14 +107,14 @@ func TestConvertTransferAdDownloadDirection(t *testing.T) {
 
 func TestConvertJobEpochAdSuccess(t *testing.T) {
 	ad := classad.New()
-	ad.Set("ClusterId", int64(1))
-	ad.Set("ProcId", int64(2))
-	ad.Set("RunInstanceID", int64(3))
-	ad.Set("Owner", "bob")
-	ad.Set("JobStatus", int64(4))
-	ad.Set("JobStartDate", int64(10))
-	ad.Set("EnteredCurrentStatus", int64(70))
-	ad.Set("RemoteWallClockTime", int64(50))
+	_ = ad.Set("ClusterId", int64(1))
+	_ = ad.Set("ProcId", int64(2))
+	_ = ad.Set("RunInstanceID", int64(3))
+	_ = ad.Set("Owner", "bob")
+	_ = ad.Set("JobStatus", int64(4))
+	_ = ad.Set("JobStartDate", int64(10))
+	_ = ad.Set("EnteredCurrentStatus", int64(70))
+	_ = ad.Set("RemoteWallClockTime", int64(50))
 
 	c := htcClient{}
 	rec, run := c.convertJobEpochAd(ad)
@@ -131,10 +131,10 @@ func TestConvertJobEpochAdSuccess(t *testing.T) {
 
 func TestConvertJobEpochAdFallbackRuntime(t *testing.T) {
 	ad := classad.New()
-	ad.Set("Owner", "alice")
-	ad.Set("JobStatus", int64(4))
-	ad.Set("JobStartDate", int64(100))
-	ad.Set("EnteredCurrentStatus", int64(160))
+	_ = ad.Set("Owner", "alice")
+	_ = ad.Set("JobStatus", int64(4))
+	_ = ad.Set("JobStartDate", int64(100))
+	_ = ad.Set("EnteredCurrentStatus", int64(160))
 
 	c := htcClient{}
 	rec, _ := c.convertJobEpochAd(ad)

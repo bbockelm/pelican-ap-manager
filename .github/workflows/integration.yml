@@ -1,0 +1,28 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    container:
+      image: golang:1.24
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install gotestsum
+        run: go install gotest.tools/gotestsum@latest
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Run integration tests
+        run: gotestsum --format testname -- -v -tags integration ./integration/...

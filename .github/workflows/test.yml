@@ -1,0 +1,36 @@
+name: Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container:
+      image: golang:1.24
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install gotestsum
+        run: go install gotest.tools/gotestsum@latest
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Run unit tests
+        run: gotestsum --format testname -- -v -race -coverprofile=coverage.txt -covermode=atomic ./...
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.txt
+          flags: unittests
+          fail_ci_if_error: false
+        continue-on-error: true

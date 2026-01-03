@@ -1,5 +1,4 @@
 //go:build integration
-// +build integration
 
 package integration
 
@@ -641,7 +640,7 @@ func verifyPelicanSummaryAds(ctx context.Context, collectorAddr string, timeout 
 
 	for time.Now().Before(deadline) {
 		queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		ads, err := col.Query(queryCtx, "MyType == \"PelicanSummary\"", []string{
+		ads, err := col.QueryAdsWithProjection(queryCtx, "Any", "MyType == \"PelicanSummary\"", []string{
 			"Name",
 			"MyType",
 			"ScheddName",
