@@ -5,9 +5,11 @@ import (
 	"flag"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/bbockelm/golang-htcondor/droppriv"
 	htcondorlogging "github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/pelican-ap-manager/internal/condor"
 	"github.com/bbockelm/pelican-ap-manager/internal/config"
@@ -16,6 +18,7 @@ import (
 	"github.com/bbockelm/pelican-ap-manager/internal/jobqueue"
 	"github.com/bbockelm/pelican-ap-manager/internal/state"
 	"github.com/bbockelm/pelican-ap-manager/internal/stats"
+	"github.com/bbockelm/pelican-ap-manager/internal/webserver"
 )
 
 func main() {
@@ -37,6 +40,29 @@ func main() {
 	if err != nil {
 		_, _ = os.Stderr.WriteString("logging setup error: " + err.Error() + "\n")
 		os.Exit(1)
+	}
+
+	// Initialize droppriv manager if running as root
+	if os.Geteuid() == 0 {
+		logger.Infof(htcondorlogging.DestinationGeneral, "Running as root, enabling privilege drop mode")
+
+		dropPrivConfig := droppriv.ConfigFromHTCondor(cfg.HTCondorConfig())
+		dropPrivConfig.Enabled = true
+
+		privMgr, err := droppriv.NewManager(dropPrivConfig)
+		if err != nil {
+			logger.Errorf(htcondorlogging.DestinationGeneral, "Failed to initialize privilege manager: %v", err)
+			os.Exit(1)
+		}
+
+		if err := privMgr.Start(); err != nil {
+			logger.Errorf(htcondorlogging.DestinationGeneral, "Failed to start privilege manager: %v", err)
+			os.Exit(1)
+		}
+
+		// Store in atomic pointer so sandbox APIs can use it
+		droppriv.ReloadDefaultManager()
+		logger.Infof(htcondorlogging.DestinationGeneral, "Privilege manager initialized and started")
 	}
 
 	cfg = cfg.WithOverrides(0, 0, 0, 0, 0, "", *infoPath, *collector, *schedd, "", "")
@@ -96,6 +122,27 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	var wg sync.WaitGroup
+
+	// Start web server if configured
+	if cfg.WebListenAddress != "" || cfg.WebSocketPath != "" {
+		webSrv, err := webserver.NewServer(cfg.WebListenAddress, cfg.WebSocketPath, cfg.WebTLSCert, cfg.WebTLSKey, cfg.WebDBPath, logger)
+		if err != nil {
+			logger.Errorf(htcondorlogging.DestinationGeneral, "web server initialization failed: %v", err)
+			os.Exit(1)
+		}
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := webSrv.Start(ctx); err != nil && err != context.Canceled {
+				logger.Errorf(htcondorlogging.DestinationGeneral, "web server error: %v", err)
+			}
+		}()
+	} else {
+		logger.Infof(htcondorlogging.DestinationGeneral, "Web server not configured (set PELICAN_MANAGER_WEB_LISTEN_ADDRESS or PELICAN_MANAGER_WEB_SOCKET_PATH)")
+	}
+
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
@@ -120,8 +167,13 @@ func main() {
 		}
 	}()
 
-	if err := svc.Run(ctx); err != nil {
-		logger.Errorf(htcondorlogging.DestinationGeneral, "service terminated with error: %v", err)
-		os.Exit(1)
-	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := svc.Run(ctx); err != nil {
+			logger.Errorf(htcondorlogging.DestinationGeneral, "service terminated with error: %v", err)
+		}
+	}()
+
+	wg.Wait()
 }
