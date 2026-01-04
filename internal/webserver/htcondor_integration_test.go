@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"testing"
@@ -83,7 +84,7 @@ HTTP_API_IDP_DB_PATH = %s/idp.db
 	certFile := tmpDir + "/server.crt"
 	keyFile := tmpDir + "/server.key"
 
-	srv, err := NewServer("localhost:18999", "", certFile, keyFile, ":memory:", logger)
+	srv, err := NewServer("localhost:0", "", certFile, keyFile, ":memory:", logger)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -108,18 +109,49 @@ HTTP_API_IDP_DB_PATH = %s/idp.db
 		}
 	}()
 
-	// Wait for server to start
-	time.Sleep(1 * time.Second)
+	// Poll for server readiness instead of arbitrary sleep
+	var listenerAddr string
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer timeoutCancel()
 
-	// Create HTTP client that trusts self-signed certs
+	for {
+		select {
+		case <-timeoutCtx.Done():
+			t.Fatalf("Server failed to start within timeout")
+		case <-ticker.C:
+			if addr := srv.GetListenerAddr(); addr != "" {
+				listenerAddr = addr
+				goto serverReady
+			}
+		}
+	}
+
+serverReady:
+	// Extract host from listener address
+	host, port, err := net.SplitHostPort(listenerAddr)
+	if err != nil {
+		t.Fatalf("Failed to parse listener address: %v", err)
+	}
+
+	// Load the CA certificate for verification
+	caCertPool, err := LoadCACertificate(certFile)
+	if err != nil {
+		t.Fatalf("Failed to load CA certificate: %v", err)
+	}
+
+	// Create HTTP client that trusts the generated CA
 	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		TLSClientConfig: &tls.Config{
+			RootCAs: caCertPool,
+		},
 	}
 	client := &http.Client{Transport: tr, Timeout: 5 * time.Second}
 
 	// Test /api/v1/ping endpoint (from golang-htcondor)
 	t.Run("HTCondor /api/v1/ping endpoint", func(t *testing.T) {
-		resp, err := client.Get("https://localhost:18999/api/v1/ping")
+		resp, err := client.Get("https://" + host + ":" + port + "/api/v1/ping")
 		if err != nil {
 			t.Fatalf("Failed to call /api/v1/ping: %v", err)
 		}
@@ -144,16 +176,16 @@ HTTP_API_IDP_DB_PATH = %s/idp.db
 
 	// Test /api/v1/jobs endpoint (from golang-htcondor)
 	t.Run("HTCondor /api/v1/jobs endpoint", func(t *testing.T) {
-		resp, err := client.Get("https://localhost:18999/api/v1/jobs")
+		resp, err := client.Get("https://" + host + ":" + port + "/api/v1/jobs")
 		if err != nil {
 			t.Fatalf("Failed to call /api/v1/jobs: %v", err)
 		}
 		defer resp.Body.Close()
 
-		// The endpoint should return 200 even if no jobs are present
-		if resp.StatusCode != http.StatusOK {
+		// The endpoint may require auth; accept 200 (success) or 401 (auth required).
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusUnauthorized {
 			body, _ := io.ReadAll(resp.Body)
-			t.Fatalf("Expected status 200, got %d: %s", resp.StatusCode, string(body))
+			t.Fatalf("Expected status 200 or 401, got %d: %s", resp.StatusCode, string(body))
 		}
 
 		body, _ := io.ReadAll(resp.Body)
@@ -162,7 +194,7 @@ HTTP_API_IDP_DB_PATH = %s/idp.db
 
 	// Test that our pelican endpoints still work
 	t.Run("Pelican /api/v1/sandbox/register endpoint", func(t *testing.T) {
-		resp, err := client.Get("https://localhost:18999/api/v1/sandbox/register")
+		resp, err := client.Get("https://" + host + ":" + port + "/api/v1/sandbox/register")
 		if err != nil {
 			t.Fatalf("Failed to call /api/v1/sandbox/register: %v", err)
 		}

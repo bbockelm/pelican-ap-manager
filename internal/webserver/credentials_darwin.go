@@ -1,11 +1,12 @@
 //go:build darwin
-// +build darwin
 
 package webserver
 
 import (
 	"net"
 	"net/http"
+
+	"golang.org/x/sys/unix"
 )
 
 // On macOS, use LOCAL_PEERCRED instead of SO_PEERCRED
@@ -17,9 +18,13 @@ func getSocketCredentials(r *http.Request) (int, int) {
 				defer file.Close()
 
 				// macOS uses LOCAL_PEERCRED with Xucred structure
-				// This is more complex, so for now return -1, -1
-				// A full implementation would use syscall.GetsockoptXucred
-				_ = file
+				cred, err := unix.GetsockoptXucred(int(file.Fd()), unix.SOL_SOCKET, unix.LOCAL_PEERCRED)
+				if err == nil {
+					if cred.Ngroups > 0 {
+						return int(cred.Uid), int(cred.Groups[0])
+					}
+					return -1, -1
+				}
 			}
 		}
 	}

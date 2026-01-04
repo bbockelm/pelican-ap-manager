@@ -7,7 +7,9 @@ require (
 	github.com/bbockelm/golang-htcondor v0.0.7
 	github.com/glebarez/sqlite v1.11.0
 	github.com/jellydator/ttlcache/v3 v3.3.0
+	github.com/klauspost/compress v1.18.2
 	golang.org/x/crypto v0.43.0
+	golang.org/x/sys v0.37.0
 )
 
 require (
@@ -82,7 +84,6 @@ require (
 	golang.org/x/net v0.45.0 // indirect
 	golang.org/x/oauth2 v0.33.0 // indirect
 	golang.org/x/sync v0.17.0 // indirect
-	golang.org/x/sys v0.37.0 // indirect
 	golang.org/x/text v0.30.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 	golang.org/x/tools v0.37.0 // indirect

@@ -15,6 +15,16 @@ import (
 	htcondorlogging "github.com/bbockelm/golang-htcondor/logging"
 )
 
+// ServerConfig holds configuration options for creating a web server.
+type ServerConfig struct {
+	ListenAddress string
+	SocketPath    string
+	TLSCert       string
+	TLSKey        string
+	DBPath        string
+	Logger        *htcondorlogging.Logger
+}
+
 type Server struct {
 	db              *DB
 	handlers        *Handlers
@@ -30,26 +40,24 @@ type Server struct {
 }
 
 func NewServer(listenAddr, socketPath, tlsCert, tlsKey, dbPath string, logger *htcondorlogging.Logger) (*Server, error) {
-	// If TLS paths are not provided, derive defaults from HTCondor config using $(SPOOL)
-	if tlsCert == "" || tlsKey == "" {
-		condorCfg, err := htcondorconfig.New()
-		if err != nil {
-			return nil, fmt.Errorf("failed to load HTCondor config for TLS defaults: %w", err)
-		}
+	return NewServerWithConfig(&ServerConfig{
+		ListenAddress: listenAddr,
+		SocketPath:    socketPath,
+		TLSCert:       tlsCert,
+		TLSKey:        tlsKey,
+		DBPath:        dbPath,
+		Logger:        logger,
+	})
+}
 
-		spool, _ := condorCfg.Get("SPOOL")
-		if spool == "" {
-			spool = "./data"
-		}
-
-		base := filepath.Join(spool, "pelican-certs")
-		if tlsCert == "" {
-			tlsCert = filepath.Join(base, "server.crt")
-		}
-		if tlsKey == "" {
-			tlsKey = filepath.Join(base, "server.key")
-		}
-	}
+// NewServerWithConfig creates a new server using a config object
+func NewServerWithConfig(config *ServerConfig) (*Server, error) {
+	listenAddr := config.ListenAddress
+	socketPath := config.SocketPath
+	tlsCert := config.TLSCert
+	tlsKey := config.TLSKey
+	dbPath := config.DBPath
+	logger := config.Logger
 	db, err := NewDB(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize database: %w", err)
@@ -107,12 +115,12 @@ func NewServer(listenAddr, socketPath, tlsCert, tlsKey, dbPath string, logger *h
 		}
 	})
 
-	// Mount golang-htcondor handler at /api/ if available
-	// Note: golang-htcondor handler expects paths like /v1/ping, /v1/jobs, etc.
-	// so we strip /api to give it the rest of the path
+	// Mount golang-htcondor handler at /api/ if available. The handler already
+	// registers routes under /api/v1, so we avoid StripPrefix to preserve the
+	// expected path structure (e.g., /api/v1/ping).
 	if htcondorHandler != nil {
 		logger.Infof(htcondorlogging.DestinationGeneral, "Mounting golang-htcondor HTTP API at /api/")
-		mux.Handle("/api/", http.StripPrefix("/api", htcondorHandler))
+		mux.Handle("/api/", htcondorHandler)
 	}
 
 	srv := &Server{
@@ -198,6 +206,13 @@ func (s *Server) Start(ctx context.Context) error {
 		s.listener = tls.NewListener(tcpListener, tlsConfig)
 	} else {
 		return fmt.Errorf("either listenAddr or socketPath must be specified")
+	}
+
+	// Initialize golang-htcondor handler routes and background tasks if present.
+	if s.htcondorHandler != nil {
+		if err := s.htcondorHandler.Start(ctx, s.listener, "https"); err != nil {
+			return fmt.Errorf("failed to start htcondor handler: %w", err)
+		}
 	}
 
 	errChan := make(chan error, 1)
@@ -292,6 +307,20 @@ func (s *Server) cleanupLoop(ctx context.Context) {
 			} else {
 				s.logger.Debugf(htcondorlogging.DestinationGeneral, "Cleaned up expired tokens")
 			}
+
+			if err := s.db.CleanupExpiredJobs(); err != nil {
+				s.logger.Errorf(htcondorlogging.DestinationGeneral, "Failed to cleanup expired jobs: %v", err)
+			} else {
+				s.logger.Debugf(htcondorlogging.DestinationGeneral, "Cleaned up expired jobs")
+			}
 		}
 	}
+}
+
+// GetListenerAddr returns the actual listener address (useful when using :0 for dynamic port assignment)
+func (s *Server) GetListenerAddr() string {
+	if s.listener != nil {
+		return s.listener.Addr().String()
+	}
+	return ""
 }

@@ -51,7 +51,7 @@ func TestFakeTransferPluginIntegration(t *testing.T) {
 	mirrorPath := filepath.Join(rootDir, "job_mirror.json")
 	configPath := filepath.Join(rootDir, "condor_config")
 
-	if err := writeMiniCondorConfig(configPath, rootDir, socketDir, statePath, mirrorPath, t); err != nil {
+	if err := writeMiniCondorConfig(configPath, rootDir, socketDir, statePath, mirrorPath, t, nil); err != nil {
 		t.Fatalf("write condor config: %v", err)
 	}
 	if err := os.Setenv("CONDOR_CONFIG", configPath); err != nil {

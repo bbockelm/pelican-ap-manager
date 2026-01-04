@@ -1,6 +1,6 @@
 # Pelican Manager Web Server
 
-The pelican_man daemon now includes an integrated web server for managing job sandboxes via HTTP over Unix domain sockets or TCP/TLS. The server uses the golang-htcondor sandbox API for creating and extracting job sandboxes.
+The pelican_man daemon provides an integrated web server for managing job sandboxes via HTTP over Unix domain sockets or TCP/TLS. The server uses the golang-htcondor sandbox API for creating and extracting job sandboxes.
 
 ## Features
 
@@ -16,7 +16,7 @@ The web server is configured via HTCondor configuration macros:
 
 ```
 # Option 1: Unix domain socket (recommended for local access with UID/GID authentication)
-PELICAN_MANAGER_WEB_SOCKET_PATH = $(SPOOL)/pelican_manager.sock
+PELICAN_REGISTRATION_SOCKET = $(SPOOL)/pelican_manager.sock
 
 # Option 2: TCP/HTTP listen address (requires bearer token authentication)
 PELICAN_MANAGER_WEB_LISTEN_ADDRESS = :8080
@@ -34,7 +34,7 @@ CONDOR_USER = condor
 # CONDOR_IDS = 123:456  # Override UID:GID
 ```
 
-If neither `PELICAN_MANAGER_WEB_LISTEN_ADDRESS` nor `PELICAN_MANAGER_WEB_SOCKET_PATH` is set, the web server will not start.
+If neither `PELICAN_MANAGER_WEB_LISTEN_ADDRESS` nor `PELICAN_REGISTRATION_SOCKET` is set, the web server will not start.
 
 ## Privilege Dropping
 

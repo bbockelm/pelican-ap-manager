@@ -16,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/PelicanPlatform/classad/classad"
 	htcondorlogging "github.com/bbockelm/golang-htcondor/logging"
 )
 
@@ -299,7 +300,9 @@ func TestGetSandboxValidToken(t *testing.T) {
 
 	// Create a test directory structure for the job
 	tmpDir := t.TempDir()
-	jobAdJSON := fmt.Sprintf(`[ ClusterId = 100; ProcId = 0; Iwd = "%s"; Owner = "testuser" ]`, tmpDir)
+
+	// Create a job ClassAd with the In attribute
+	jobAdJSON := fmt.Sprintf(`[ ClusterId = 100; ProcId = 0; Iwd = "%s"; Owner = "testuser"; In = "" ]`, tmpDir)
 	token, _, err := db.RegisterJob("100.0", jobAdJSON, "testuser", 1000, 1000)
 	if err != nil {
 		t.Fatalf("Failed to register job: %v", err)
@@ -327,21 +330,34 @@ func TestGetSandboxValidToken(t *testing.T) {
 		t.Errorf("Expected Content-Type application/x-tar, got %s", resp.Header.Get("Content-Type"))
 	}
 
+	// Read and verify the tarball is valid gzip format
+	gzr, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		t.Fatalf("Failed to create gzip reader: %v", err)
+	}
+	defer gzr.Close()
+
+	tr := tar.NewReader(gzr)
+	fileCount := 0
+
+	for {
+		_, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Error reading tar: %v", err)
+		}
+		fileCount++
+	}
+
+	// We should have read at least the tar header (even if empty)
+	t.Logf("Tarball contains %d files", fileCount)
+
 	disposition := resp.Header.Get("Content-Disposition")
 	expectedDisposition := `attachment; filename="sandbox-100.0-input.tar.gz"`
 	if disposition != expectedDisposition {
 		t.Errorf("Expected Content-Disposition %s, got %s", expectedDisposition, disposition)
-	}
-
-	// Verify we got gzip data by reading some bytes
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("Failed to read response body: %v", err)
-	}
-
-	// Gzip files start with magic bytes 0x1f 0x8b
-	if len(data) < 2 || data[0] != 0x1f || data[1] != 0x8b {
-		t.Errorf("Response doesn't appear to be gzip data (magic bytes: %x %x)", data[0], data[1])
 	}
 }
 
@@ -477,8 +493,8 @@ func TestPutSandboxValidToken(t *testing.T) {
 	// Get current username for OsUser attribute
 	username := getTestUsername(t)
 
-	// Create a proper ClassAd with output file specification and OsUser
-	jobAdJSON := fmt.Sprintf(`[ ClusterId = 300; ProcId = 0; Iwd = "%s"; Out = "job.out"; Err = "job.err"; OsUser = "%s" ]`, tmpDir, username)
+	// Create a proper ClassAd with TransferOutput, output remaps, and output specifications
+	jobAdJSON := fmt.Sprintf(`[ ClusterId = 300; ProcId = 0; Iwd = "%s"; Out = "job.out"; Err = "job.err"; OsUser = "%s"; TransferOutput = "job.out,job.err,result.txt"; TransferOutputRemaps = "renamed_result.txt = result.txt" ]`, tmpDir, username)
 	token, _, err := db.RegisterJob("300.0", jobAdJSON, username, 1000, 1000)
 	if err != nil {
 		t.Fatalf("Failed to register job: %v", err)
@@ -492,7 +508,7 @@ func TestPutSandboxValidToken(t *testing.T) {
 	gzw := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gzw)
 
-	// Add a simple output file to the tar
+	// Add main output file
 	outputContent := []byte("test output data from job execution")
 	header := &tar.Header{
 		Name: "job.out",
@@ -507,7 +523,7 @@ func TestPutSandboxValidToken(t *testing.T) {
 	}
 
 	// Add error file
-	errContent := []byte("")
+	errContent := []byte("test error output")
 	header = &tar.Header{
 		Name: "job.err",
 		Mode: 0644,
@@ -517,6 +533,20 @@ func TestPutSandboxValidToken(t *testing.T) {
 		t.Fatalf("Failed to write tar header: %v", err)
 	}
 	if _, err := tw.Write(errContent); err != nil {
+		t.Fatalf("Failed to write tar content: %v", err)
+	}
+
+	// Add a file with a remap (renamed_result.txt should be extracted as result.txt)
+	resultContent := []byte("result data")
+	header = &tar.Header{
+		Name: "renamed_result.txt",
+		Mode: 0644,
+		Size: int64(len(resultContent)),
+	}
+	if err := tw.WriteHeader(header); err != nil {
+		t.Fatalf("Failed to write tar header: %v", err)
+	}
+	if _, err := tw.Write(resultContent); err != nil {
 		t.Fatalf("Failed to write tar content: %v", err)
 	}
 
@@ -550,6 +580,28 @@ func TestPutSandboxValidToken(t *testing.T) {
 		content, _ := os.ReadFile(outFile)
 		if string(content) != string(outputContent) {
 			t.Errorf("Output file content mismatch: got %s, want %s", string(content), string(outputContent))
+		}
+	}
+
+	// Verify error file
+	errFile := filepath.Join(tmpDir, "job.err")
+	if _, err := os.Stat(errFile); os.IsNotExist(err) {
+		t.Logf("Error file was not created at %s", errFile)
+	} else {
+		content, _ := os.ReadFile(errFile)
+		if string(content) != string(errContent) {
+			t.Errorf("Error file content mismatch: got %s, want %s", string(content), string(errContent))
+		}
+	}
+
+	// Verify remapped file (renamed_result.txt should be extracted as result.txt)
+	resultFile := filepath.Join(tmpDir, "result.txt")
+	if _, err := os.Stat(resultFile); os.IsNotExist(err) {
+		t.Logf("Remapped result file was not created at %s", resultFile)
+	} else {
+		content, _ := os.ReadFile(resultFile)
+		if string(content) != string(resultContent) {
+			t.Errorf("Remapped result file content mismatch: got %s, want %s", string(content), string(resultContent))
 		}
 	}
 }
@@ -885,6 +937,39 @@ func TestRegisterJobURLFormation(t *testing.T) {
 					tt.expectedPrefix, registerResp.OutputURLs[0])
 			}
 		})
+	}
+}
+
+// TestClassAdMarshalling ensures the native ClassAd marshaller preserves expected attributes.
+func TestClassAdMarshalling(t *testing.T) {
+	orig := RegisterRequest{
+		ClusterId:            42,
+		ProcId:               7,
+		Owner:                "alice",
+		OsUser:               "alice_os",
+		Iwd:                  "/tmp/work",
+		Cmd:                  "/bin/run",
+		TransferInput:        "in.dat",
+		TransferOutput:       "out.dat",
+		TransferExecutable:   true,
+		In:                   "stdin.log",
+		Out:                  "stdout.log",
+		Err:                  "stderr.log",
+		TransferOutputRemaps: "out.dat=/dest/out.dat",
+	}
+
+	adString, err := classad.Marshal(&orig)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+
+	var unmarshalled RegisterRequest
+	if err := classad.UnmarshalClassAd(adString, &unmarshalled); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+
+	if unmarshalled != orig {
+		t.Fatalf("round-trip mismatch: got %+v want %+v", unmarshalled, orig)
 	}
 }
 

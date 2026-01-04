@@ -47,6 +47,26 @@ func NewDB(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
+	// Enable WAL mode for better concurrency
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		return nil, fmt.Errorf("failed to enable WAL mode: %w", err)
+	}
+
+	// Enforce foreign key constraints
+	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
+		return nil, fmt.Errorf("failed to enforce foreign keys: %w", err)
+	}
+
+	// Enable synchronous mode for data integrity
+	if _, err := db.Exec("PRAGMA synchronous=NORMAL"); err != nil {
+		return nil, fmt.Errorf("failed to set synchronous mode: %w", err)
+	}
+
+	// Set busy timeout to allow modest concurrency
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		return nil, fmt.Errorf("failed to set busy timeout: %w", err)
+	}
+
 	if err := initSchema(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
@@ -208,6 +228,17 @@ func (d *DB) CleanupExpiredTokens() error {
 	`, time.Now().Add(-7*24*time.Hour))
 	if err != nil {
 		return fmt.Errorf("failed to cleanup expired tokens: %w", err)
+	}
+	return nil
+}
+
+func (d *DB) CleanupExpiredJobs() error {
+	// Delete job registrations that are older than 30 days
+	_, err := d.db.Exec(`
+		DELETE FROM job_registrations WHERE created_at < datetime('now', '-30 days')
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to cleanup expired jobs: %w", err)
 	}
 	return nil
 }

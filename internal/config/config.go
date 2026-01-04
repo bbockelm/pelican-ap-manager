@@ -64,7 +64,7 @@ const (
 	macroDirectorCacheTTL        = "PELICAN_MANAGER_DIRECTOR_CACHE_TTL"
 	macroJobQueueLog             = "JOB_QUEUE_LOG"
 	macroWebListenAddress        = "PELICAN_MANAGER_WEB_LISTEN_ADDRESS"
-	macroWebSocketPath           = "PELICAN_MANAGER_WEB_SOCKET_PATH"
+	macroWebSocketPath           = "PELICAN_REGISTRATION_SOCKET"
 	macroWebTLSCert              = "PELICAN_MANAGER_WEB_TLS_CERT"
 	macroWebTLSKey               = "PELICAN_MANAGER_WEB_TLS_KEY"
 	macroWebDBPath               = "PELICAN_MANAGER_WEB_DB_PATH"

@@ -36,10 +36,9 @@ func TestPelicanIntegration(t *testing.T) {
 	mirrorPath := filepath.Join(rootDir, "job_mirror.json")
 	configPath := filepath.Join(rootDir, "condor_config")
 
-	if err := writeMiniCondorConfig(configPath, rootDir, socketDir, statePath, mirrorPath, t); err != nil {
+	if err := writeMiniCondorConfig(configPath, rootDir, socketDir, statePath, mirrorPath, t, nil); err != nil {
 		t.Fatalf("write condor config: %v", err)
 	}
-	t.Setenv("_CONDOR_CONFIG", configPath)
 	t.Setenv("CONDOR_CONFIG", configPath)
 
 	seedEpochHistory(t, projectRoot, filepath.Join(rootDir, "spool"))
@@ -154,7 +153,7 @@ func TestPelicanIntegration(t *testing.T) {
 	}
 }
 
-func writeMiniCondorConfig(configFile, localDir, socketDir, statePath, mirrorPath string, t *testing.T) error {
+func writeMiniCondorConfig(configFile, localDir, socketDir, statePath, mirrorPath string, t *testing.T, extraConfig map[string]string) error {
 	sbinLine, libexecLine := detectCondorPaths(t)
 	if err := os.MkdirAll(filepath.Join(localDir, "log"), 0o755); err != nil {
 		return err
@@ -224,6 +223,14 @@ NEGOTIATOR_INTERVAL = 5
 NEGOTIATOR_CYCLE_DELAY = 1
 %s%s
 `, localDir, socketDir, mirrorPath, statePath, sbinLine, libexecLine)
+
+	// Append extra config overrides
+	if len(extraConfig) > 0 {
+		config += "\n"
+		for k, v := range extraConfig {
+			config += fmt.Sprintf("%s = %s\n", k, v)
+		}
+	}
 
 	return os.WriteFile(configFile, []byte(config), 0o644)
 }
@@ -641,7 +648,7 @@ func verifyPelicanSummaryAds(ctx context.Context, collectorAddr string, timeout 
 
 	for time.Now().Before(deadline) {
 		queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		ads, err := col.Query(queryCtx, "MyType == \"PelicanSummary\"", []string{
+		ads, _, err := col.QueryAdsWithOptions(queryCtx, "Any", "MyType == \"PelicanSummary\"", &htcondor.QueryOptions{Projection: []string{
 			"Name",
 			"MyType",
 			"ScheddName",
@@ -651,7 +658,7 @@ func verifyPelicanSummaryAds(ctx context.Context, collectorAddr string, timeout 
 			"WindowFailureCount",
 			"ControlErrorBand",
 			"ControlCostBand",
-		})
+		}})
 		cancel()
 
 		if err != nil {

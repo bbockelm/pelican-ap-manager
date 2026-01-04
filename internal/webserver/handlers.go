@@ -11,6 +11,7 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/sandbox"
+	"github.com/klauspost/compress/zstd"
 )
 
 type Handlers struct {
@@ -52,51 +53,6 @@ type RegisterResponse struct {
 	OutputURLs []string `json:"output_urls"`
 }
 
-// convertRegisterRequestToClassAd converts a RegisterRequest to ClassAd format
-func convertRegisterRequestToClassAd(req *RegisterRequest) string {
-	// Build ClassAd string with proper format
-	var parts []string
-
-	parts = append(parts, fmt.Sprintf("ClusterId = %d", req.ClusterId))
-	parts = append(parts, fmt.Sprintf("ProcId = %d", req.ProcId))
-
-	if req.Owner != "" {
-		parts = append(parts, fmt.Sprintf("Owner = \"%s\"", req.Owner))
-	}
-	if req.OsUser != "" {
-		parts = append(parts, fmt.Sprintf("OsUser = \"%s\"", req.OsUser))
-	}
-	if req.Iwd != "" {
-		parts = append(parts, fmt.Sprintf("Iwd = \"%s\"", req.Iwd))
-	}
-	if req.Cmd != "" {
-		parts = append(parts, fmt.Sprintf("Cmd = \"%s\"", req.Cmd))
-	}
-	if req.TransferInput != "" {
-		parts = append(parts, fmt.Sprintf("TransferInput = \"%s\"", req.TransferInput))
-	}
-	if req.TransferOutput != "" {
-		parts = append(parts, fmt.Sprintf("TransferOutput = \"%s\"", req.TransferOutput))
-	}
-	if req.TransferExecutable {
-		parts = append(parts, "TransferExecutable = true")
-	}
-	if req.In != "" {
-		parts = append(parts, fmt.Sprintf("In = \"%s\"", req.In))
-	}
-	if req.Out != "" {
-		parts = append(parts, fmt.Sprintf("Out = \"%s\"", req.Out))
-	}
-	if req.Err != "" {
-		parts = append(parts, fmt.Sprintf("Err = \"%s\"", req.Err))
-	}
-	if req.TransferOutputRemaps != "" {
-		parts = append(parts, fmt.Sprintf("TransferOutputRemaps = \"%s\"", req.TransferOutputRemaps))
-	}
-
-	return "[ " + strings.Join(parts, "; ") + " ]"
-}
-
 func (h *Handlers) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -130,8 +86,13 @@ func (h *Handlers) HandleRegister(w http.ResponseWriter, r *http.Request) {
 
 	jobID := fmt.Sprintf("%d.%d", req.ClusterId, req.ProcId)
 
-	// Convert JSON to ClassAd format for storage
-	jobAdString := convertRegisterRequestToClassAd(&req)
+	// Convert JSON to ClassAd format for storage using native marshalling
+	jobAdString, err := classad.Marshal(&req)
+	if err != nil {
+		h.logger.Errorf(logging.DestinationGeneral, "Failed to convert request to ClassAd: %v", err)
+		http.Error(w, "Failed to convert request", http.StatusBadRequest)
+		return
+	}
 
 	token, expiresAt, err := h.db.RegisterJob(jobID, jobAdString, req.Owner, uid, gid)
 	if err != nil {
@@ -163,7 +124,7 @@ func (h *Handlers) HandleRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) HandleGetSandbox(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -190,17 +151,49 @@ func (h *Handlers) HandleGetSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/x-tar")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"sandbox-%s-input.tar.gz\"", jobID))
+	// Determine compression format based on Accept-Encoding header
+	acceptEncoding := r.Header.Get("Accept-Encoding")
+	useZstd := strings.Contains(acceptEncoding, "zstd")
 
-	gzw := gzip.NewWriter(w)
-	defer gzw.Close()
+	if useZstd {
+		w.Header().Set("Content-Type", "application/x-tar")
+		w.Header().Set("Content-Encoding", "zstd")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"sandbox-%s-input.tar.zst\"", jobID))
 
-	// Create the input sandbox tarball using the golang-htcondor sandbox API
-	if err := sandbox.CreateInputSandboxTar(r.Context(), jobAd, gzw); err != nil {
-		h.logger.Errorf(logging.DestinationGeneral, "Failed to create input sandbox for job %s: %v", jobID, err)
-		// Can't change status code after writing started, just log the error
-		return
+		if r.Method == http.MethodHead {
+			return
+		}
+
+		zstdw, err := zstd.NewWriter(w)
+		if err != nil {
+			h.logger.Errorf(logging.DestinationGeneral, "Failed to create zstd writer for job %s: %v", jobID, err)
+			http.Error(w, "Failed to create compression writer", http.StatusInternalServerError)
+			return
+		}
+		defer zstdw.Close()
+
+		// Create the input sandbox tarball using the golang-htcondor sandbox API
+		if err := sandbox.CreateInputSandboxTar(r.Context(), jobAd, zstdw); err != nil {
+			h.logger.Errorf(logging.DestinationGeneral, "Failed to create input sandbox for job %s: %v", jobID, err)
+			return
+		}
+	} else {
+		w.Header().Set("Content-Type", "application/x-tar")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"sandbox-%s-input.tar.gz\"", jobID))
+
+		if r.Method == http.MethodHead {
+			return
+		}
+
+		gzw := gzip.NewWriter(w)
+		defer gzw.Close()
+
+		// Create the input sandbox tarball using the golang-htcondor sandbox API
+		if err := sandbox.CreateInputSandboxTar(r.Context(), jobAd, gzw); err != nil {
+			h.logger.Errorf(logging.DestinationGeneral, "Failed to create input sandbox for job %s: %v", jobID, err)
+			return
+		}
 	}
 }
 
@@ -230,16 +223,35 @@ func (h *Handlers) HandlePutSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract the output sandbox using the golang-htcondor sandbox API
-	gzr, err := gzip.NewReader(r.Body)
-	if err != nil {
-		h.logger.Errorf(logging.DestinationGeneral, "Failed to create gzip reader for job %s: %v", jobID, err)
-		http.Error(w, "Failed to read gzip data", http.StatusBadRequest)
-		return
-	}
-	defer gzr.Close()
+	// Detect compression type from Content-Encoding header
+	contentEncoding := r.Header.Get("Content-Encoding")
 
-	if err := sandbox.ExtractOutputSandbox(r.Context(), jobAd, gzr); err != nil {
+	var reader io.Reader
+	defer r.Body.Close()
+
+	if contentEncoding == "zstd" {
+		// Decompress using zstd
+		zstdr, err := zstd.NewReader(r.Body)
+		if err != nil {
+			h.logger.Errorf(logging.DestinationGeneral, "Failed to create zstd reader for job %s: %v", jobID, err)
+			http.Error(w, "Failed to decompress zstd data", http.StatusBadRequest)
+			return
+		}
+		defer zstdr.Close()
+		reader = zstdr
+	} else {
+		// Default to gzip
+		gzr, err := gzip.NewReader(r.Body)
+		if err != nil {
+			h.logger.Errorf(logging.DestinationGeneral, "Failed to create gzip reader for job %s: %v", jobID, err)
+			http.Error(w, "Failed to read gzip data", http.StatusBadRequest)
+			return
+		}
+		defer gzr.Close()
+		reader = gzr
+	}
+
+	if err := sandbox.ExtractOutputSandbox(r.Context(), jobAd, reader); err != nil {
 		h.logger.Errorf(logging.DestinationGeneral, "Failed to extract output sandbox for job %s: %v", jobID, err)
 		http.Error(w, "Failed to extract output sandbox", http.StatusInternalServerError)
 		return

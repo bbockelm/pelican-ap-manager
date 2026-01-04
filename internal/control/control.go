@@ -35,7 +35,7 @@ func DefaultConfig() Config {
 		SpecMinRatePerMinute:       1.0,
 		SpecRecoverStepPerMin:      1.0,
 		SpecRecoverDelay:           15 * time.Minute,
-		AdditiveIncreaseGBPerMin:   1000,
+		AdditiveIncreaseGBPerMin:   10,
 		MultiplicativeDecrease:     0.5,
 		ErrorGreenThreshold:        0.005,
 		ErrorYellowThreshold:       0.05,

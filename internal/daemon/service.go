@@ -432,11 +432,19 @@ func (s *Service) updatePairControllers() {
 
 	for pair := range pairs {
 		metrics := pairMetrics(s.controlCfg, s.state, s.tracker, pair.Source, pair.Destination)
+		
+		// Log control metrics before capacity update for debugging
+		bandErrors := control.ClassifyBand(metrics.ErrorRate, s.controlCfg.ErrorGreenThreshold, s.controlCfg.ErrorYellowThreshold)
+		bandCost := control.ClassifyBand(metrics.CostPct/100.0, s.controlCfg.CostGreenThresholdPercent/100.0, s.controlCfg.CostYellowThresholdPercent/100.0)
+		s.Printf("pair control: %s -> %s | ErrorRate=%f (band=%v) CostPct=%f%% (band=%v)", 
+			pair.Source, pair.Destination, metrics.ErrorRate, bandErrors, metrics.CostPct, bandCost)
+		
 		prev := s.state.PairState(pair.Source, pair.Destination)
 		next := controller.Step(now, prev, metrics)
 		s.state.SetPairState(pair.Source, pair.Destination, next)
 	}
 }
+
 
 // getNextSequence returns the next sequence number for an ad and increments it
 func (s *Service) getNextSequence(adName string) int {

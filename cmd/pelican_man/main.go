@@ -140,7 +140,7 @@ func main() {
 			}
 		}()
 	} else {
-		logger.Infof(htcondorlogging.DestinationGeneral, "Web server not configured (set PELICAN_MANAGER_WEB_LISTEN_ADDRESS or PELICAN_MANAGER_WEB_SOCKET_PATH)")
+		logger.Infof(htcondorlogging.DestinationGeneral, "Web server not configured (set PELICAN_MANAGER_WEB_LISTEN_ADDRESS or PELICAN_REGISTRATION_SOCKET)")
 	}
 
 	sigs := make(chan os.Signal, 1)
