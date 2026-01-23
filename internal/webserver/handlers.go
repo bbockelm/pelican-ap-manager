@@ -60,12 +60,12 @@ func (h *Handlers) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get UID/GID from Unix socket if available
-	uid, gid := getSocketCredentials(r)
+	uid, gid := getSocketCredentials(r, h.logger)
 
 	// Registration is only allowed over Unix domain sockets for security
 	// If socket path is configured and we got -1,-1 credentials, reject the request
 	if h.socketPath != "" && (uid < 0 || gid < 0) {
-		h.logger.Errorf(logging.DestinationGeneral, "Registration attempted over non-socket connection")
+		h.logger.Errorf(logging.DestinationGeneral, "Registration attempted over non-socket connection, uid=%d gid=%d", uid, gid)
 		http.Error(w, "Registration requires Unix domain socket connection", http.StatusForbidden)
 		return
 	}
@@ -284,7 +284,7 @@ func (h *Handlers) authenticateRequest(w http.ResponseWriter, r *http.Request, j
 	}
 
 	// Try Unix socket UID/GID authentication
-	uid, gid := getSocketCredentials(r)
+	uid, gid := getSocketCredentials(r, h.logger)
 	if uid >= 0 {
 		jobAdJSON, err := h.db.ValidateUIDAccess(jobID, uid, gid)
 		if err != nil {

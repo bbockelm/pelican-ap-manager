@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	condorconfig "github.com/bbockelm/golang-htcondor/config"
@@ -17,15 +19,19 @@ type Config struct {
 	StatePath         string
 	InfoPath          string
 	CollectorHost     string
+	ScheddAddr        string
 	ScheddName        string
 	SiteAttribute     string
 	JobMirrorPath     string
 	JobQueueLogPath   string
+	LogPath           string
 	WebListenAddress  string
 	WebSocketPath     string
 	WebTLSCert        string
 	WebTLSKey         string
 	WebDBPath         string
+	AddressFilePath   string
+	MasterSockPath    string
 	condorCfg         *condorconfig.Config // Store for logging initialization
 }
 
@@ -40,6 +46,7 @@ const (
 	defaultSiteAttribute     = "MachineAttrGLIDEIN_ResourceName0"
 	defaultJobMirrorPath     = ""
 	defaultJobQueueLogPath   = ""
+	defaultWebSocketPath     = "" // Will be set to $(SPOOL)/pelican_manager.sock
 
 	macroPollInterval            = "PELICAN_MANAGER_POLL_INTERVAL"
 	macroPollIntervalLegacy      = "PEL_POLL_INTERVAL"
@@ -68,6 +75,8 @@ const (
 	macroWebTLSCert              = "PELICAN_MANAGER_WEB_TLS_CERT"
 	macroWebTLSKey               = "PELICAN_MANAGER_WEB_TLS_KEY"
 	macroWebDBPath               = "PELICAN_MANAGER_WEB_DB_PATH"
+	macroAddressFilePath         = "PELICAN_MANAGER_ADDRESS_FILE"
+	macroMasterSockPath          = "MASTER_ADDR_FILE"
 )
 
 // Load returns configuration derived from the active HTCondor configuration,
@@ -85,6 +94,12 @@ func Load() (*Config, error) {
 		spoolDir = "./data"
 	}
 
+	// Get LOG directory for default paths
+	logDir := firstStringMacro(condorCfg, "LOG")
+	if logDir == "" {
+		logDir = "./log"
+	}
+
 	cfg := &Config{
 		PollInterval:      defaultPollInterval,
 		AdvertiseInterval: defaultAdvertiseInterval,
@@ -94,15 +109,19 @@ func Load() (*Config, error) {
 		StatePath:         fmt.Sprintf("%s/pelican_state.json", spoolDir),
 		InfoPath:          fmt.Sprintf("%s/pelican_info.json", spoolDir),
 		CollectorHost:     defaultCollectorHost,
+		ScheddAddr:        "",
 		ScheddName:        defaultScheddName,
 		SiteAttribute:     defaultSiteAttribute,
 		JobMirrorPath:     defaultJobMirrorPath,
 		JobQueueLogPath:   defaultJobQueueLogPath,
+		LogPath:           logDir,
 		WebListenAddress:  "",
-		WebSocketPath:     "",
+		WebSocketPath:     fmt.Sprintf("%s/pelican_manager.sock", spoolDir),
 		WebTLSCert:        fmt.Sprintf("%s/pelican-certs/server.crt", spoolDir),
 		WebTLSKey:         fmt.Sprintf("%s/pelican-certs/server.key", spoolDir),
 		WebDBPath:         fmt.Sprintf("%s/pelican_web.db", spoolDir),
+		AddressFilePath:   "", // Will be set based on LOG directory
+		MasterSockPath:    "", // Will be discovered from master
 		condorCfg:         condorCfg,
 	}
 
@@ -145,8 +164,27 @@ func Load() (*Config, error) {
 	if v := firstStringMacro(condorCfg, macroCollectorHost, macroCollectorHostLegacy); v != "" {
 		cfg.CollectorHost = v
 	}
+
+	// If COLLECTOR_HOST ends with :0 or is not resolvable, try reading .collector_address file
+	if needsCollectorAddressFile(cfg.CollectorHost) {
+		if addr := readCollectorAddressFile(cfg.LogPath); addr != "" {
+			cfg.CollectorHost = addr
+		}
+	}
+
 	if v := firstStringMacro(condorCfg, macroScheddName, macroScheddNameLegacy); v != "" {
 		cfg.ScheddName = v
+	}
+
+	// Resolve Schedd address from config or address file
+	if scheddHost := firstStringMacro(condorCfg, "SCHEDD_HOST"); scheddHost != "" {
+		scheddPort := firstStringMacro(condorCfg, "SCHEDD_PORT")
+		if scheddPort == "" {
+			scheddPort = "9618"
+		}
+		cfg.ScheddAddr = fmt.Sprintf("%s:%s", scheddHost, scheddPort)
+	} else if addr := readScheddAddressFile(cfg.LogPath); addr != "" {
+		cfg.ScheddAddr = addr
 	}
 	if v := firstStringMacro(condorCfg, macroSiteAttribute, macroSiteAttributeLegacy); v != "" {
 		cfg.SiteAttribute = v
@@ -172,6 +210,24 @@ func Load() (*Config, error) {
 	if v := firstStringMacro(condorCfg, macroWebDBPath); v != "" {
 		cfg.WebDBPath = v
 	}
+
+	// Set address file path using LOG directory
+	if cfg.LogPath != "" {
+		// Only set AddressFilePath if not explicitly configured
+		if v := firstStringMacro(condorCfg, macroAddressFilePath); v != "" {
+			cfg.AddressFilePath = v
+		} else {
+			cfg.AddressFilePath = fmt.Sprintf("%s/.pelican_manager_address", cfg.LogPath)
+		}
+	}
+
+	// Get master socket path for heartbeat communication
+	if v := firstStringMacro(condorCfg, macroMasterSockPath); v != "" {
+		cfg.MasterSockPath = v
+	}
+
+	// Keep the underlying HTCondor configuration for downstream components (logging, HTTP handler, etc.).
+	cfg.condorCfg = condorCfg
 
 	return cfg, nil
 }
@@ -257,11 +313,91 @@ func parseDurationMacro(cfg *condorconfig.Config, names ...string) (time.Duratio
 	return 0, nil
 }
 
+// readScheddAddressFile reads the schedd address from LOG/.schedd_address file.
+func readScheddAddressFile(logDir string) string {
+	if logDir == "" {
+		return ""
+	}
+
+	addrFile := fmt.Sprintf("%s/.schedd_address", logDir)
+	data, err := os.ReadFile(addrFile)
+	if err != nil {
+		return ""
+	}
+
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.Contains(line, "(null)") {
+			continue
+		}
+		if strings.HasPrefix(line, "<") {
+			if idx := strings.Index(line, "?"); idx > 0 {
+				return line[1:idx]
+			}
+			if idx := strings.Index(line, ">"); idx > 0 {
+				return line[1:idx]
+			}
+		}
+	}
+
+	return ""
+}
+
 func firstStringMacro(cfg *condorconfig.Config, names ...string) string {
 	for _, name := range names {
 		if v, ok := cfg.Get(name); ok && v != "" {
 			return v
 		}
 	}
+	return ""
+}
+
+// needsCollectorAddressFile checks if the collector host needs to be resolved from the address file.
+// Returns true if the host ends with :0 (dynamic port) or if it's not resolvable.
+func needsCollectorAddressFile(collectorHost string) bool {
+	if collectorHost == "" {
+		return false
+	}
+
+	// Check if it ends with :0 (dynamic port assignment)
+	if len(collectorHost) > 2 && collectorHost[len(collectorHost)-2:] == ":0" {
+		return true
+	}
+
+	return false
+}
+
+// readCollectorAddressFile reads the collector address from LOG/.collector_address file.
+// This is used when COLLECTOR_HOST is configured with a dynamic port (:0).
+func readCollectorAddressFile(logDir string) string {
+	if logDir == "" {
+		return ""
+	}
+
+	addrFile := fmt.Sprintf("%s/.collector_address", logDir)
+	data, err := os.ReadFile(addrFile)
+	if err != nil {
+		return ""
+	}
+
+	// Parse the address file - it may contain multiple lines, we want the sinful string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.Contains(line, "(null)") {
+			continue
+		}
+		// Look for sinful string format: <IP:port...>
+		if strings.HasPrefix(line, "<") {
+			// Extract host:port from sinful string
+			if idx := strings.Index(line, "?"); idx > 0 {
+				// Remove the sinful wrapper and query params
+				return line[1:idx]
+			}
+			if idx := strings.Index(line, ">"); idx > 0 {
+				return line[1:idx]
+			}
+		}
+	}
+
 	return ""
 }

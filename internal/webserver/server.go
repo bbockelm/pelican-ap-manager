@@ -15,14 +15,18 @@ import (
 	htcondorlogging "github.com/bbockelm/golang-htcondor/logging"
 )
 
+var connContextKey = &struct{}{}
+
 // ServerConfig holds configuration options for creating a web server.
 type ServerConfig struct {
-	ListenAddress string
-	SocketPath    string
-	TLSCert       string
-	TLSKey        string
-	DBPath        string
-	Logger        *htcondorlogging.Logger
+	ListenAddress  string
+	SocketPath     string
+	TLSCert        string
+	TLSKey         string
+	DBPath         string
+	Logger         *htcondorlogging.Logger
+	HTCondorConfig *htcondorconfig.Config
+	ScheddAddr     string
 }
 
 type Server struct {
@@ -68,15 +72,26 @@ func NewServerWithConfig(config *ServerConfig) (*Server, error) {
 	// Create HTCondor HTTP handler (best effort). If it fails due to missing
 	// HTCondor configuration (common in unit tests), we continue without it.
 	var htcondorHandler *httpserver.Handler
-	if htcondorConfig, err := htcondorconfig.New(); err == nil {
+	htcondorConfig := config.HTCondorConfig
+	if htcondorConfig == nil {
+		var err error
+		htcondorConfig, err = htcondorconfig.New()
+		if err != nil {
+			logger.Warnf(htcondorlogging.DestinationGeneral, "HTCondor config unavailable: %v", err)
+		}
+	}
+
+	if htcondorConfig != nil {
 		// Try to get schedd address from config
-		scheddAddr := ""
-		if host, _ := htcondorConfig.Get("SCHEDD_HOST"); host != "" {
-			port, _ := htcondorConfig.Get("SCHEDD_PORT")
-			if port == "" {
-				port = "9618" // Default schedd port
+		scheddAddr := config.ScheddAddr
+		if scheddAddr == "" {
+			if host, _ := htcondorConfig.Get("SCHEDD_HOST"); host != "" {
+				port, _ := htcondorConfig.Get("SCHEDD_PORT")
+				if port == "" {
+					port = "9618" // Default schedd port
+				}
+				scheddAddr = host + ":" + port
 			}
-			scheddAddr = host + ":" + port
 		}
 
 		// Get database paths from config or use defaults
@@ -97,8 +112,6 @@ func NewServerWithConfig(config *ServerConfig) (*Server, error) {
 		} else {
 			logger.Warnf(htcondorlogging.DestinationGeneral, "HTCondor handler disabled: %v", err)
 		}
-	} else {
-		logger.Warnf(htcondorlogging.DestinationGeneral, "HTCondor config unavailable: %v", err)
 	}
 
 	mux := http.NewServeMux()
@@ -132,6 +145,10 @@ func NewServerWithConfig(config *ServerConfig) (*Server, error) {
 			ReadTimeout:  30 * time.Second,
 			WriteTimeout: 30 * time.Second,
 			IdleTimeout:  60 * time.Second,
+			// ConnContext injects the connection into request context for Unix socket credential extraction
+			ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+				return context.WithValue(ctx, connContextKey, c)
+			},
 		},
 		logger:      logger,
 		listenAddr:  listenAddr,

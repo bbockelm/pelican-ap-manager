@@ -143,6 +143,9 @@ func (s *Service) Run(ctx context.Context) error {
 	defer pollTicker.Stop()
 	defer advTicker.Stop()
 
+	// Advertise immediately on startup
+	s.advertiseOnce()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -404,13 +407,14 @@ func (s *Service) advertiseOnce() {
 		return
 	}
 
+	// Write to info file if configured
 	if s.infoPath != "" {
 		if err := s.writeInfoAds(ads); err != nil {
 			s.Printf("info file write error: %v", err)
 		}
-		return
 	}
 
+	// Always advertise to collector
 	if err := s.condor.AdvertiseClassAds(ads); err != nil {
 		s.Printf("advertise error: %v", err)
 	}

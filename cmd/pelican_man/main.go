@@ -5,6 +5,8 @@ import (
 	"flag"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -67,6 +69,22 @@ func main() {
 
 	cfg = cfg.WithOverrides(0, 0, 0, 0, 0, "", *infoPath, *collector, *schedd, "", "")
 
+	logger.Infof(htcondorlogging.DestinationGeneral, "collector config after load: host=%s logpath=%s", cfg.CollectorHost, cfg.LogPath)
+
+	// If collector host needs address file (dynamic port :0), poll for it
+	needsPolling := needsCollectorAddressFileResolution(cfg.CollectorHost, cfg.LogPath)
+	logger.Infof(htcondorlogging.DestinationGeneral, "needs collector address polling: %v (host=%s)", needsPolling, cfg.CollectorHost)
+	if needsPolling {
+		logger.Infof(htcondorlogging.DestinationGeneral, "waiting for collector address file discovery... (logpath=%s)", cfg.LogPath)
+		resolvedAddr := pollForCollectorAddress(cfg.LogPath, 60*time.Second, logger)
+		if resolvedAddr != "" {
+			cfg.CollectorHost = resolvedAddr
+			logger.Infof(htcondorlogging.DestinationGeneral, "discovered collector address: %s", cfg.CollectorHost)
+		} else {
+			logger.Warnf(htcondorlogging.DestinationGeneral, "collector address file not found after 60s, will retry at runtime")
+		}
+	}
+
 	logger.Infof(htcondorlogging.DestinationGeneral, "loading state from %s", cfg.StatePath)
 
 	st, err := state.Load(cfg.StatePath)
@@ -124,9 +142,33 @@ func main() {
 
 	var wg sync.WaitGroup
 
+	// Write address file for condor_master discovery
+	if err := daemon.WriteAddressFile(cfg.AddressFilePath, cfg.WebSocketPath); err != nil {
+		logger.Warnf(htcondorlogging.DestinationGeneral, "failed to write address file: %v", err)
+	}
+
+	// Initialize master communicator for heartbeats and ready signals
+	masterComm := daemon.NewMasterCommunicator(cfg.MasterSockPath, logger)
+	if err := masterComm.SendReady(); err != nil {
+		logger.Warnf(htcondorlogging.DestinationGeneral, "failed to send ready signal: %v", err)
+	}
+
+	// Start periodic heartbeats to condor_master (every 5 minutes)
+	heartbeatInterval := 5 * time.Minute
+	_ = masterComm.StartHeartbeat(ctx, heartbeatInterval)
+
 	// Start web server if configured
 	if cfg.WebListenAddress != "" || cfg.WebSocketPath != "" {
-		webSrv, err := webserver.NewServer(cfg.WebListenAddress, cfg.WebSocketPath, cfg.WebTLSCert, cfg.WebTLSKey, cfg.WebDBPath, logger)
+		webSrv, err := webserver.NewServerWithConfig(&webserver.ServerConfig{
+			ListenAddress:  cfg.WebListenAddress,
+			SocketPath:     cfg.WebSocketPath,
+			TLSCert:        cfg.WebTLSCert,
+			TLSKey:         cfg.WebTLSKey,
+			DBPath:         cfg.WebDBPath,
+			Logger:         logger,
+			HTCondorConfig: cfg.HTCondorConfig(),
+			ScheddAddr:     cfg.ScheddAddr,
+		})
 		if err != nil {
 			logger.Errorf(htcondorlogging.DestinationGeneral, "web server initialization failed: %v", err)
 			os.Exit(1)
@@ -176,4 +218,64 @@ func main() {
 	}()
 
 	wg.Wait()
+}
+
+// needsCollectorAddressFileResolution checks if we need to poll for the collector address file.
+func needsCollectorAddressFileResolution(collectorHost, logPath string) bool {
+	if collectorHost == "" || logPath == "" {
+		return false
+	}
+	// Check if it ends with :0 (dynamic port assignment)
+	if len(collectorHost) > 2 && collectorHost[len(collectorHost)-2:] == ":0" {
+		return true
+	}
+	return false
+}
+
+// pollForCollectorAddress polls the collector address file until it's available or timeout.
+func pollForCollectorAddress(logPath string, timeout time.Duration, logger *htcondorlogging.Logger) string {
+	deadline := time.Now().Add(timeout)
+	addrFile := filepath.Join(logPath, ".collector_address")
+
+	for time.Now().Before(deadline) {
+		// Check if file exists first
+		if info, err := os.Stat(addrFile); err == nil && info.Size() > 0 {
+			addr := readCollectorAddressFromFile(addrFile)
+			if addr != "" {
+				return addr
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	return ""
+}
+
+// readCollectorAddressFromFile reads and parses the collector address file.
+func readCollectorAddressFromFile(addrFile string) string {
+	data, err := os.ReadFile(addrFile)
+	if err != nil {
+		return ""
+	}
+
+	// Parse the address file - it may contain multiple lines, we want the sinful string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.Contains(line, "(null)") {
+			continue
+		}
+		// Look for sinful string format: <IP:port...>
+		if strings.HasPrefix(line, "<") {
+			// Extract host:port from sinful string
+			if idx := strings.Index(line, "?"); idx > 0 {
+				// Remove the sinful wrapper and query params
+				return line[1:idx]
+			}
+			if idx := strings.Index(line, ">"); idx > 0 {
+				return line[1:idx]
+			}
+		}
+	}
+
+	return ""
 }

@@ -4,7 +4,7 @@ go 1.24.0
 
 require (
 	github.com/PelicanPlatform/classad v0.0.6
-	github.com/bbockelm/golang-htcondor v0.0.7
+	github.com/bbockelm/golang-htcondor v0.0.8
 	github.com/glebarez/sqlite v1.11.0
 	github.com/jellydator/ttlcache/v3 v3.3.0
 	github.com/klauspost/compress v1.18.2
@@ -14,7 +14,8 @@ require (
 
 require (
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
-	github.com/bbockelm/cedar v0.0.20 // indirect
+	github.com/bbockelm/cedar v0.0.22 // indirect
+	github.com/bbockelm/gosssd v0.0.1 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cristalhq/jwt/v4 v4.0.2 // indirect
@@ -28,7 +29,6 @@ require (
 	github.com/go-logr/logr v1.3.0 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/gobuffalo/pop/v6 v6.1.1 // indirect
-	github.com/godbus/dbus/v5 v5.2.2 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.0 // indirect
 	github.com/golang/mock v1.6.0 // indirect

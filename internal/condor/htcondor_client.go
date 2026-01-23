@@ -18,6 +18,7 @@ import (
 )
 
 // NewClient creates a Condor-backed client using the golang-htcondor bindings.
+// The HTCondor configuration should be passed via the context when calling AdvertiseClassAds.
 func NewClient(collectorAddress, scheddName, siteAttr string) (CondorClient, error) {
 	return &htcClient{collector: htcondor.NewCollector(collectorAddress), scheddName: scheddName, siteAttr: siteAttr}, nil
 }
@@ -227,7 +228,11 @@ func epochFromAd(ad *classad.ClassAd) state.EpochID {
 }
 
 func (c *htcClient) AdvertiseClassAds(payload []map[string]any) error {
+	// Use context with HTCondor config for authentication
+	// The golang-htcondor library will use GetSecurityConfigOrDefault to retrieve
+	// the config from the environment (CONDOR_CONFIG) for authentication
 	ctx := context.Background()
+	
 	for _, adMap := range payload {
 		ad := classad.New()
 		for k, v := range adMap {
@@ -236,6 +241,7 @@ func (c *htcClient) AdvertiseClassAds(payload []map[string]any) error {
 			}
 		}
 		// Use MyType to determine the correct command; default matches condor generic ads.
+		// The Advertise method will handle authentication via GetSecurityConfigOrDefault
 		if err := c.collector.Advertise(ctx, ad, &htcondor.AdvertiseOptions{}); err != nil {
 			return fmt.Errorf("advertise classad: %w", err)
 		}

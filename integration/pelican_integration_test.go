@@ -200,11 +200,13 @@ ALLOW_ADMINISTRATOR = *
 ALLOW_NEGOTIATOR = *
 ALLOW_OWNER = *
 ALLOW_CLIENT = *
+ALLOW_DAEMON = *
 SEC_DEFAULT_AUTHENTICATION = OPTIONAL
 SEC_DEFAULT_ENCRYPTION = OPTIONAL
 SEC_DEFAULT_INTEGRITY = OPTIONAL
+PELICAN_MANAGER_LOG = $(LOG)/PelicanManagerLog
 PELICAN_MANAGER_STATS_WINDOW = 5m
-PELICAN_MANAGER_ADVERTISE_INTERVAL = 5m
+PELICAN_MANAGER_ADVERTISE_INTERVAL = 5s
 PELICAN_MANAGER_POLL_INTERVAL = 1s
 PELICAN_MANAGER_JOB_MIRROR_PATH = %s
 PELICAN_MANAGER_STATE_PATH = %s
@@ -648,7 +650,7 @@ func verifyPelicanSummaryAds(ctx context.Context, collectorAddr string, timeout 
 
 	for time.Now().Before(deadline) {
 		queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		ads, _, err := col.QueryAdsWithOptions(queryCtx, "Any", "MyType == \"PelicanSummary\"", &htcondor.QueryOptions{Projection: []string{
+		ads, _, err := col.QueryAdsWithOptions(queryCtx, "PelicanSummary", "true", &htcondor.QueryOptions{Projection: []string{
 			"Name",
 			"MyType",
 			"ScheddName",
@@ -668,6 +670,12 @@ func verifyPelicanSummaryAds(ctx context.Context, collectorAddr string, timeout 
 		}
 
 		if len(ads) == 0 {
+			// Check if info file exists as a debugging aid
+			if infoPath, ok := os.LookupEnv("PELICAN_MANAGER_INFO_PATH"); ok {
+				if data, err := os.ReadFile(infoPath); err == nil {
+					t.Logf("DEBUG: info file exists with %d bytes", len(data))
+				}
+			}
 			t.Logf("no PelicanSummary ads found yet (retrying)")
 			time.Sleep(2 * time.Second)
 			continue
