@@ -35,6 +35,7 @@ import (
 	"github.com/bbockelm/pelican-ap-manager/internal/jobqueue"
 	"github.com/bbockelm/pelican-ap-manager/internal/state"
 	"github.com/bbockelm/pelican-ap-manager/internal/stats"
+	"github.com/bbockelm/pelican-ap-manager/internal/store"
 	"github.com/bbockelm/pelican-ap-manager/internal/webserver"
 )
 
@@ -122,6 +123,29 @@ func run() error {
 		return err
 	}
 
+	// Rate rules: the operator's static policy plus the control loop's own
+	// conclusions, persisted so both survive a restart. Failing to open the
+	// store is not fatal -- the daemon still observes and advertises -- but it
+	// does mean no static policy is in force, which is worth an error-level
+	// line rather than a warning.
+	ruleStore, storeDesc, err := store.Open(store.Options{
+		DBAddress: cfg.RuleDBAddress,
+		DBTable:   cfg.RuleDBTable,
+		FilePath:  cfg.RuleStorePath,
+		Config:    d.Config(),
+	})
+	if err != nil {
+		log.Errorf(htcondorlogging.DestinationGeneral, "rate rule store unavailable; no static rules will be applied: %v", err)
+	} else {
+		defer func() { _ = ruleStore.Close() }()
+		log.Infof(htcondorlogging.DestinationGeneral, "rate rule store: %s", storeDesc)
+		svc.SetRuleStore(ruleStore)
+		syncStaticRules(context.Background(), ruleStore, cfg, log)
+	}
+	svc.SetEnforcement(cfg.EnforcementMode)
+	log.Infof(htcondorlogging.DestinationGeneral, "rate limit enforcement mode: %s (%d static rule(s) declared)",
+		cfg.EnforcementMode, len(cfg.StaticRules))
+
 	// A -oneshot run is a diagnostic, not a daemon: no command socket, no master
 	// signaling, no web server. Run the single cycle and exit.
 	if *oneshot {
@@ -162,6 +186,14 @@ func run() error {
 		}
 		newCfg = newCfg.WithOverrides(0, 0, 0, 0, 0, "", *infoPath, *collectorFlag, *scheddFlag, "", "")
 		svc.ReloadConfig(newCfg)
+		// Enforcement mode and the static rule set are both reconfigurable:
+		// flipping to observing, or retiring a rule, should not need a restart.
+		svc.SetEnforcement(newCfg.EnforcementMode)
+		log.Infof(htcondorlogging.DestinationGeneral, "rate limit enforcement mode: %s (%d static rule(s) declared)",
+			newCfg.EnforcementMode, len(newCfg.StaticRules))
+		if ruleStore != nil {
+			syncStaticRules(context.Background(), ruleStore, newCfg, log)
+		}
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -211,6 +243,32 @@ func run() error {
 	cancel()
 	wg.Wait()
 	return serveErr
+}
+
+// syncStaticRules pushes the configuration's rate rules into the store and
+// retires the config-managed rules that are no longer declared.
+//
+// A store that cannot be written is logged and tolerated: the daemon keeps
+// running, and any rules already installed in the schedd stay in force until
+// they lapse. The operator sees why in the log rather than in a crash loop.
+func syncStaticRules(ctx context.Context, rs store.RuleStore, cfg *config.Config, log *htcondorlogging.Logger) {
+	syncCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := store.SyncConfigRules(syncCtx, rs, cfg.StaticRules); err != nil {
+		log.Errorf(htcondorlogging.DestinationGeneral, "syncing static rate rules: %v", err)
+		return
+	}
+	for _, r := range cfg.StaticRules {
+		log.Infof(htcondorlogging.DestinationGeneral, "static rate rule %s: user=%q site=%q %d jobs/%s%s",
+			r.Name, r.User, r.Site, r.RateCount, r.Window(), noteSuffix(r.Note))
+	}
+}
+
+func noteSuffix(note string) string {
+	if note == "" {
+		return ""
+	}
+	return " (" + note + ")"
 }
 
 // buildService assembles the polling/advertising service and the state it

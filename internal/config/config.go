@@ -7,6 +7,7 @@ import (
 	"time"
 
 	condorconfig "github.com/bbockelm/golang-htcondor/config"
+	"github.com/bbockelm/pelican-ap-manager/internal/ratelimit"
 )
 
 // Config holds runtime options for the pelican_man daemon.
@@ -31,7 +32,28 @@ type Config struct {
 	WebTLSKey         string
 	WebDBPath         string
 	AddressFilePath   string
-	condorCfg         *condorconfig.Config // Store for logging initialization
+
+	// EnforcementMode decides what the daemon does with the rate limits it
+	// derives: install them, or compute and publish them while installing only
+	// the operator's static rules. See internal/ratelimit.
+	EnforcementMode ratelimit.Mode
+
+	// StaticRules are the operator's rate rules, declared in the HTCondor
+	// configuration (PELICAN_MANAGER_RATE_RULES plus one
+	// PELICAN_MANAGER_RATE_RULE_<NAME> per rule). They are applied in every
+	// enforcement mode.
+	StaticRules []ratelimit.Rule
+
+	// RuleStorePath is the JSON document backing the rate-rule store when no
+	// htcondordb is configured.
+	RuleStorePath string
+
+	// RuleDBAddress, when set, points the rate-rule store at an htcondordb
+	// daemon instead of the local JSON document. RuleDBTable names the table.
+	RuleDBAddress string
+	RuleDBTable   string
+
+	condorCfg *condorconfig.Config // Store for logging initialization
 }
 
 const (
@@ -75,7 +97,19 @@ const (
 	macroWebTLSKey               = "PELICAN_MANAGER_WEB_TLS_KEY"
 	macroWebDBPath               = "PELICAN_MANAGER_WEB_DB_PATH"
 	macroAddressFilePath         = "PELICAN_MANAGER_ADDRESS_FILE"
+	macroEnforcementMode         = "PELICAN_MANAGER_ENFORCEMENT_MODE"
+	macroRateRules               = "PELICAN_MANAGER_RATE_RULES"
+	macroRateRulePrefix          = "PELICAN_MANAGER_RATE_RULE_"
+	macroRuleStorePath           = "PELICAN_MANAGER_RULE_STORE_PATH"
+	macroRuleDBAddress           = "PELICAN_MANAGER_RULE_DB_ADDRESS"
+	macroRuleDBTable             = "PELICAN_MANAGER_RULE_DB_TABLE"
 )
+
+// defaultEnforcementMode preserves the daemon's historical behavior: limits
+// derived by the control loop are installed. An operator evaluating the
+// controller sets PELICAN_MANAGER_ENFORCEMENT_MODE = observing, which keeps the
+// static rules in force and withholds only the derived ones.
+const defaultEnforcementMode = ratelimit.ModeEnforcing
 
 // Load returns configuration derived from the active HTCondor configuration,
 // mirroring how condor tools discover settings. Macros can be set in the
@@ -132,6 +166,8 @@ func LoadFrom(condorCfg *condorconfig.Config) (*Config, error) {
 		WebTLSKey:         fmt.Sprintf("%s/pelican-certs/server.key", spoolDir),
 		WebDBPath:         fmt.Sprintf("%s/pelican_web.db", spoolDir),
 		AddressFilePath:   "", // Will be set based on LOG directory
+		EnforcementMode:   defaultEnforcementMode,
+		RuleStorePath:     fmt.Sprintf("%s/pelican_rate_rules.json", spoolDir),
 		condorCfg:         condorCfg,
 	}
 
@@ -205,6 +241,17 @@ func LoadFrom(condorCfg *condorconfig.Config) (*Config, error) {
 	if v := firstStringMacro(condorCfg, macroJobQueueLog); v != "" {
 		cfg.JobQueueLogPath = v
 	}
+
+	// Set address file path using LOG directory
+	if cfg.LogPath != "" {
+		// Only set AddressFilePath if not explicitly configured
+		if v := firstStringMacro(condorCfg, macroAddressFilePath); v != "" {
+			cfg.AddressFilePath = v
+		} else {
+			cfg.AddressFilePath = fmt.Sprintf("%s/.pelican_manager_address", cfg.LogPath)
+		}
+	}
+
 	if v := firstStringMacro(condorCfg, macroWebListenAddress); v != "" {
 		cfg.WebListenAddress = v
 	}
@@ -221,20 +268,81 @@ func LoadFrom(condorCfg *condorconfig.Config) (*Config, error) {
 		cfg.WebDBPath = v
 	}
 
-	// Set address file path using LOG directory
-	if cfg.LogPath != "" {
-		// Only set AddressFilePath if not explicitly configured
-		if v := firstStringMacro(condorCfg, macroAddressFilePath); v != "" {
-			cfg.AddressFilePath = v
-		} else {
-			cfg.AddressFilePath = fmt.Sprintf("%s/.pelican_manager_address", cfg.LogPath)
+	if v := firstStringMacro(condorCfg, macroEnforcementMode); v != "" {
+		mode, err := ratelimit.ParseMode(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid %s: %w", macroEnforcementMode, err)
 		}
+		cfg.EnforcementMode = mode
 	}
+	if v := firstStringMacro(condorCfg, macroRuleStorePath); v != "" {
+		cfg.RuleStorePath = v
+	}
+	if v := firstStringMacro(condorCfg, macroRuleDBAddress); v != "" {
+		cfg.RuleDBAddress = v
+	}
+	if v := firstStringMacro(condorCfg, macroRuleDBTable); v != "" {
+		cfg.RuleDBTable = v
+	}
+
+	rules, err := loadStaticRules(condorCfg)
+	if err != nil {
+		return nil, err
+	}
+	cfg.StaticRules = rules
 
 	// Keep the underlying HTCondor configuration for downstream components (logging, HTTP handler, etc.).
 	cfg.condorCfg = condorCfg
 
 	return cfg, nil
+}
+
+// loadStaticRules reads the operator's rate rules. The list macro names them;
+// each name has its own macro carrying the rule body:
+//
+//	PELICAN_MANAGER_RATE_RULES = ligo_ucsd, psu_all
+//	PELICAN_MANAGER_RATE_RULE_LIGO_UCSD = user=ligo site=UCSD rate=20 window=60s
+//	PELICAN_MANAGER_RATE_RULE_PSU_ALL   = site=PSU-LIGO rate=5 window=1m note="incident 4471"
+//
+// One macro per rule rather than one macro holding all of them: it keeps each
+// rule independently overridable from a config.d drop-in, which is how these
+// tend to be deployed (and undeployed).
+//
+// A named rule with no body, or a body that does not parse, is an error rather
+// than a skipped rule. Silently ignoring a malformed rate limit would leave the
+// operator believing a limit is in force when it is not.
+func loadStaticRules(condorCfg *condorconfig.Config) ([]ratelimit.Rule, error) {
+	raw := firstStringMacro(condorCfg, macroRateRules)
+	if raw == "" {
+		return nil, nil
+	}
+
+	var rules []ratelimit.Rule
+	seen := make(map[string]bool)
+	for _, name := range strings.Split(raw, ",") {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if seen[name] {
+			return nil, fmt.Errorf("%s lists %q more than once", macroRateRules, name)
+		}
+		seen[name] = true
+
+		macro := macroRateRulePrefix + strings.ToUpper(name)
+		spec := firstStringMacro(condorCfg, macro)
+		if spec == "" {
+			return nil, fmt.Errorf("%s names rule %q but %s is not set", macroRateRules, name, macro)
+		}
+		rule, err := ratelimit.ParseRule(name, spec)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", macro, err)
+		}
+		rule.ConfigManaged = true
+		rules = append(rules, rule)
+	}
+	ratelimit.SortRules(rules)
+	return rules, nil
 }
 
 // WithOverrides applies optional overrides for unit tests or CLI flags.
