@@ -419,6 +419,12 @@ func walkExprForUserAndSite(node ast.Expr, siteAttribute string) (user, site str
 	}
 
 	switch n := node.(type) {
+	case *ast.ParenExpr:
+		// The parser preserves explicit parentheses as their own node, and
+		// buildLimitExpression wraps both the whole expression and the source
+		// disjunction in them, so descend through.
+		return walkExprForUserAndSite(n.Inner, siteAttribute)
+
 	case *ast.BinaryOp:
 		// Check if this is a comparison operator (==, =?=, or is)
 		// Note: The AST represents =?= as "is"

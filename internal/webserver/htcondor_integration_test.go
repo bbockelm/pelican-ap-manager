@@ -13,7 +13,7 @@ import (
 	"time"
 
 	htcondorconfig "github.com/bbockelm/golang-htcondor/config"
-	"github.com/bbockelm/golang-htcondor/httpserver"
+	"github.com/bbockelm/golang-htcondor/webapi/httpserver"
 )
 
 // TestHTCondorHandlerIntegration verifies that golang-htcondor's HTTP handler

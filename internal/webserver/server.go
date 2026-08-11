@@ -11,8 +11,8 @@ import (
 	"time"
 
 	htcondorconfig "github.com/bbockelm/golang-htcondor/config"
-	"github.com/bbockelm/golang-htcondor/httpserver"
 	htcondorlogging "github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/httpserver"
 )
 
 var connContextKey = &struct{}{}
