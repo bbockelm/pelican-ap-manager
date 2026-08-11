@@ -435,18 +435,28 @@ func stripHostPort(sinful string) string {
 }
 
 func buildPelicanBinary(t *testing.T, workDir string) (string, error) {
-	binPath := filepath.Join(workDir, "pelican_man")
+	return buildBinary(t, workDir, "pelican_man")
+}
+
+// buildWebBinary builds the standalone HTTP daemon. pelican_man serves no HTTP,
+// so any test that touches the sandbox API has to run pelican_web too.
+func buildWebBinary(t *testing.T, workDir string) (string, error) {
+	return buildBinary(t, workDir, "pelican_web")
+}
+
+func buildBinary(t *testing.T, workDir, name string) (string, error) {
+	binPath := filepath.Join(workDir, name)
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", fmt.Errorf("getwd: %w", err)
 	}
 	moduleRoot := filepath.Dir(cwd)
-	cmd := exec.Command("go", "build", "-o", binPath, "./cmd/pelican_man")
+	cmd := exec.Command("go", "build", "-o", binPath, "./cmd/"+name)
 	cmd.Env = os.Environ()
 	cmd.Dir = moduleRoot
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("go build: %v (%s)", err, string(out))
+		return "", fmt.Errorf("go build %s: %v (%s)", name, err, string(out))
 	}
 	return binPath, nil
 }

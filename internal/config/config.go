@@ -20,17 +20,11 @@ type Config struct {
 	StatePath         string
 	InfoPath          string
 	CollectorHost     string
-	ScheddAddr        string
 	ScheddName        string
 	SiteAttribute     string
 	JobMirrorPath     string
 	JobQueueLogPath   string
 	LogPath           string
-	WebListenAddress  string
-	WebSocketPath     string
-	WebTLSCert        string
-	WebTLSKey         string
-	WebDBPath         string
 	AddressFilePath   string
 
 	// EnforcementMode decides what the daemon does with the rate limits it
@@ -67,7 +61,6 @@ const (
 	defaultSiteAttribute     = "MachineAttrGLIDEIN_ResourceName0"
 	defaultJobMirrorPath     = ""
 	defaultJobQueueLogPath   = ""
-	defaultWebSocketPath     = "" // Will be set to $(SPOOL)/pelican_manager.sock
 
 	macroPollInterval            = "PELICAN_MANAGER_POLL_INTERVAL"
 	macroPollIntervalLegacy      = "PEL_POLL_INTERVAL"
@@ -91,11 +84,6 @@ const (
 	macroStatsWindow             = "PELICAN_MANAGER_STATS_WINDOW"
 	macroDirectorCacheTTL        = "PELICAN_MANAGER_DIRECTOR_CACHE_TTL"
 	macroJobQueueLog             = "JOB_QUEUE_LOG"
-	macroWebListenAddress        = "PELICAN_MANAGER_WEB_LISTEN_ADDRESS"
-	macroWebSocketPath           = "PELICAN_REGISTRATION_SOCKET"
-	macroWebTLSCert              = "PELICAN_MANAGER_WEB_TLS_CERT"
-	macroWebTLSKey               = "PELICAN_MANAGER_WEB_TLS_KEY"
-	macroWebDBPath               = "PELICAN_MANAGER_WEB_DB_PATH"
 	macroAddressFilePath         = "PELICAN_MANAGER_ADDRESS_FILE"
 	macroEnforcementMode         = "PELICAN_MANAGER_ENFORCEMENT_MODE"
 	macroRateRules               = "PELICAN_MANAGER_RATE_RULES"
@@ -154,17 +142,11 @@ func LoadFrom(condorCfg *condorconfig.Config) (*Config, error) {
 		StatePath:         fmt.Sprintf("%s/pelican_state.json", spoolDir),
 		InfoPath:          fmt.Sprintf("%s/pelican_info.json", spoolDir),
 		CollectorHost:     defaultCollectorHost,
-		ScheddAddr:        "",
 		ScheddName:        defaultScheddName,
 		SiteAttribute:     defaultSiteAttribute,
 		JobMirrorPath:     defaultJobMirrorPath,
 		JobQueueLogPath:   defaultJobQueueLogPath,
 		LogPath:           logDir,
-		WebListenAddress:  "",
-		WebSocketPath:     fmt.Sprintf("%s/pelican_manager.sock", spoolDir),
-		WebTLSCert:        fmt.Sprintf("%s/pelican-certs/server.crt", spoolDir),
-		WebTLSKey:         fmt.Sprintf("%s/pelican-certs/server.key", spoolDir),
-		WebDBPath:         fmt.Sprintf("%s/pelican_web.db", spoolDir),
 		AddressFilePath:   "", // Will be set based on LOG directory
 		EnforcementMode:   defaultEnforcementMode,
 		RuleStorePath:     fmt.Sprintf("%s/pelican_rate_rules.json", spoolDir),
@@ -222,16 +204,6 @@ func LoadFrom(condorCfg *condorconfig.Config) (*Config, error) {
 		cfg.ScheddName = v
 	}
 
-	// Resolve Schedd address from config or address file
-	if scheddHost := firstStringMacro(condorCfg, "SCHEDD_HOST"); scheddHost != "" {
-		scheddPort := firstStringMacro(condorCfg, "SCHEDD_PORT")
-		if scheddPort == "" {
-			scheddPort = "9618"
-		}
-		cfg.ScheddAddr = fmt.Sprintf("%s:%s", scheddHost, scheddPort)
-	} else if addr := readScheddAddressFile(cfg.LogPath); addr != "" {
-		cfg.ScheddAddr = addr
-	}
 	if v := firstStringMacro(condorCfg, macroSiteAttribute, macroSiteAttributeLegacy); v != "" {
 		cfg.SiteAttribute = v
 	}
@@ -250,22 +222,6 @@ func LoadFrom(condorCfg *condorconfig.Config) (*Config, error) {
 		} else {
 			cfg.AddressFilePath = fmt.Sprintf("%s/.pelican_manager_address", cfg.LogPath)
 		}
-	}
-
-	if v := firstStringMacro(condorCfg, macroWebListenAddress); v != "" {
-		cfg.WebListenAddress = v
-	}
-	if v := firstStringMacro(condorCfg, macroWebSocketPath); v != "" {
-		cfg.WebSocketPath = v
-	}
-	if v := firstStringMacro(condorCfg, macroWebTLSCert); v != "" {
-		cfg.WebTLSCert = v
-	}
-	if v := firstStringMacro(condorCfg, macroWebTLSKey); v != "" {
-		cfg.WebTLSKey = v
-	}
-	if v := firstStringMacro(condorCfg, macroWebDBPath); v != "" {
-		cfg.WebDBPath = v
 	}
 
 	if v := firstStringMacro(condorCfg, macroEnforcementMode); v != "" {
@@ -424,36 +380,6 @@ func parseDurationMacro(cfg *condorconfig.Config, names ...string) (time.Duratio
 		return d, nil
 	}
 	return 0, nil
-}
-
-// readScheddAddressFile reads the schedd address from LOG/.schedd_address file.
-func readScheddAddressFile(logDir string) string {
-	if logDir == "" {
-		return ""
-	}
-
-	addrFile := fmt.Sprintf("%s/.schedd_address", logDir)
-	data, err := os.ReadFile(addrFile)
-	if err != nil {
-		return ""
-	}
-
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.Contains(line, "(null)") {
-			continue
-		}
-		if strings.HasPrefix(line, "<") {
-			if idx := strings.Index(line, "?"); idx > 0 {
-				return line[1:idx]
-			}
-			if idx := strings.Index(line, ">"); idx > 0 {
-				return line[1:idx]
-			}
-		}
-	}
-
-	return ""
 }
 
 func firstStringMacro(cfg *condorconfig.Config, names ...string) string {

@@ -14,15 +14,19 @@ The daemon provides the following capabilities:
 
 ## Installation
 
-The daemon is intended to run as a service managed by `condor_master`. Add it to your HTCondor configuration:
+Two daemons run under `condor_master`. `pelican_man` polls, summarizes and drives rate limits; `pelican_web` serves the HTTP surface (the sandbox API used by the Pelican transfer plugin, plus the golang-htcondor REST API). They are separate binaries so `pelican_man` does not have to link the web stack; see [docs/WEBSERVER.md](docs/WEBSERVER.md).
 
 ```
-DAEMON_LIST = $(DAEMON_LIST) PELICAN_MAN
-PELICAN_MAN = /path/to/pelican_man
-PELICAN_MAN_ARGS =
+DAEMON_LIST = $(DAEMON_LIST) PELICAN_MANAGER PELICAN_WEB
+PELICAN_MANAGER = /path/to/pelican_man
+PELICAN_MANAGER_ARGS =
+PELICAN_WEB = /path/to/pelican_web
+PELICAN_WEB_ARGS =
 ```
 
-Ensure the daemon binary has appropriate permissions and that the state directory (see `PELICAN_MANAGER_STATE_PATH` below) is writable by the HTCondor user.
+`PELICAN_WEB` is only needed if Pelican transfer plugins register sandboxes; omit it to run the control loop alone.
+
+Ensure the daemon binaries have appropriate permissions and that the state directory (see `PELICAN_MANAGER_STATE_PATH` below) is writable by the HTCondor user.
 
 ## Configuration
 
@@ -110,11 +114,13 @@ See [docs/pelican-limit-ad-attributes.md](docs/pelican-limit-ad-attributes.md) f
 
 ### Building from Source
 
-Requires `golang-htcondor` and HTCondor development libraries installed on the system:
-
 ```bash
-go build ./cmd/pelican_man
+make build          # both binaries into bin/
+make manager        # just pelican_man
+make web            # just pelican_web
 ```
+
+Both carry a `-version` flag, stamped from `git describe` by the Makefile.
 
 ### Development Workflow
 

@@ -89,10 +89,16 @@ func runManagedDaemonScenario(t *testing.T, rootMode bool) {
 		}
 	}
 
-	// Build pelican binary path first so we can include it in config
+	// Build both daemons first so we can include their paths in config.
+	// pelican_man serves no HTTP: the sandbox API this test exercises belongs to
+	// pelican_web, so condor_master has to run both.
 	pelicanPath, err := buildPelicanBinary(t, rootDir)
 	if err != nil {
 		t.Fatalf("build pelican: %v", err)
+	}
+	pelicanWebPath, err := buildWebBinary(t, rootDir)
+	if err != nil {
+		t.Fatalf("build pelican_web: %v", err)
 	}
 
 	// Prepare all daemon overrides upfront (only essential test-specific settings)
@@ -101,7 +107,10 @@ func runManagedDaemonScenario(t *testing.T, rootMode bool) {
 		"PELICAN_MANAGER_POLL_INTERVAL":      "1s",
 		"PELICAN_MANAGER_ADVERTISE_INTERVAL": "5s",
 		"PELICAN_MANAGER_DEBUG":              "cedar:debug",
-		"DAEMON_LIST":                        "MASTER, COLLECTOR, SHARED_PORT, NEGOTIATOR, SCHEDD, STARTD, PELICAN_MANAGER",
+		"PELICAN_WEB":                        pelicanWebPath,
+		"PELICAN_WEB_LOG":                    filepath.Join(rootDir, "log", "PelicanWebLog"),
+		"PELICAN_WEB_DEBUG":                  "cedar:debug",
+		"DAEMON_LIST":                        "MASTER, COLLECTOR, SHARED_PORT, NEGOTIATOR, SCHEDD, STARTD, PELICAN_MANAGER, PELICAN_WEB",
 	}
 
 	if err := writeMiniCondorConfig(configPath, rootDir, socketDir, statePath, mirrorPath, t, daemonOverrides); err != nil {
@@ -216,7 +225,17 @@ func runManagedDaemonScenario(t *testing.T, rootMode bool) {
 		t.Fatalf("fetch job ad: %v", err)
 	}
 
+	// The sandbox socket belongs to pelican_web, which comes up independently of
+	// pelican_man, so wait for it rather than assuming the earlier pelican_man
+	// readiness checks covered it.
 	socketPath := filepath.Join(rootDir, "spool", "pelican_manager.sock")
+	if err := waitForSocket(socketPath, 45*time.Second); err != nil {
+		printHTCondorLogs(rootDir, t)
+		if data, rerr := os.ReadFile(filepath.Join(rootDir, "log", "PelicanWebLog")); rerr == nil {
+			t.Logf("=== PELICAN_WEB LOG ===\n%s\n=== END LOG ===", string(data))
+		}
+		t.Fatalf("pelican_web sandbox socket: %v", err)
+	}
 	client := socketHTTPClient(socketPath)
 
 	registerResp := registerSandbox(t, client, jobAd, rootDir)
@@ -513,6 +532,20 @@ func waitForLogFile(logPath string, timeout time.Duration) error {
 		time.Sleep(500 * time.Millisecond)
 	}
 	return fmt.Errorf("log file %s not ready", logPath)
+}
+
+// waitForSocket waits for a Unix domain socket to appear. It cannot reuse
+// waitForLogFile: a socket always stats as zero bytes, so the size check there
+// would never be satisfied.
+func waitForSocket(path string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if info, err := os.Stat(path); err == nil && info.Mode()&os.ModeSocket != 0 {
+			return nil
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return fmt.Errorf("socket %s did not appear within %s", path, timeout)
 }
 
 func fileOwner(path string) (int, error) {

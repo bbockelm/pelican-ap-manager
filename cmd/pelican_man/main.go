@@ -4,6 +4,11 @@
 // the summaries to the collector, and drives schedd startup limits from the
 // resulting control decisions.
 //
+// It serves no HTTP. The sandbox API and the golang-htcondor REST API live in
+// the pelican_web daemon, which must be in DAEMON_LIST for Pelican transfer
+// plugins to register sandboxes. Keeping them apart is what lets this binary
+// avoid linking the web stack (OAuth2/OIDC, OpenTelemetry, sqlite) at all.
+//
 // The daemon lifecycle -- configuration, HTCondor logging, privilege drop,
 // condor_master readiness/keepalive, SIGHUP reconfigure, shared-port command
 // socket -- is the golang-htcondor daemon framework's. This file only wires the
@@ -36,7 +41,6 @@ import (
 	"github.com/bbockelm/pelican-ap-manager/internal/state"
 	"github.com/bbockelm/pelican-ap-manager/internal/stats"
 	"github.com/bbockelm/pelican-ap-manager/internal/store"
-	"github.com/bbockelm/pelican-ap-manager/internal/webserver"
 )
 
 // subsystem is the HTCondor subsystem name. It selects the per-daemon log knobs
@@ -208,31 +212,6 @@ func run() error {
 			log.Errorf(htcondorlogging.DestinationGeneral, "service terminated with error: %v", err)
 		}
 	}()
-
-	if cfg.WebListenAddress != "" || cfg.WebSocketPath != "" {
-		webSrv, err := webserver.NewServerWithConfig(&webserver.ServerConfig{
-			ListenAddress:  cfg.WebListenAddress,
-			SocketPath:     cfg.WebSocketPath,
-			TLSCert:        cfg.WebTLSCert,
-			TLSKey:         cfg.WebTLSKey,
-			DBPath:         cfg.WebDBPath,
-			Logger:         log,
-			HTCondorConfig: d.Config(),
-			ScheddAddr:     cfg.ScheddAddr,
-		})
-		if err != nil {
-			return fmt.Errorf("web server initialization failed: %w", err)
-		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := webSrv.Start(ctx); err != nil && err != context.Canceled {
-				log.Errorf(htcondorlogging.DestinationGeneral, "web server error: %v", err)
-			}
-		}()
-	} else {
-		log.Infof(htcondorlogging.DestinationGeneral, "Web server not configured (set PELICAN_MANAGER_WEB_LISTEN_ADDRESS or PELICAN_REGISTRATION_SOCKET)")
-	}
 
 	log.Infof(htcondorlogging.DestinationGeneral, "pelican_man starting: command_socket=%s under_master=%v %s",
 		ln.Addr().String(), d.UnderMaster(), cfg.EffectiveIntervals())
