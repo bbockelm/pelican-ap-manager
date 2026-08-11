@@ -31,7 +31,6 @@ type Config struct {
 	WebTLSKey         string
 	WebDBPath         string
 	AddressFilePath   string
-	MasterSockPath    string
 	condorCfg         *condorconfig.Config // Store for logging initialization
 }
 
@@ -76,7 +75,6 @@ const (
 	macroWebTLSKey               = "PELICAN_MANAGER_WEB_TLS_KEY"
 	macroWebDBPath               = "PELICAN_MANAGER_WEB_DB_PATH"
 	macroAddressFilePath         = "PELICAN_MANAGER_ADDRESS_FILE"
-	macroMasterSockPath          = "MASTER_ADDR_FILE"
 )
 
 // Load returns configuration derived from the active HTCondor configuration,
@@ -86,6 +84,19 @@ func Load() (*Config, error) {
 	condorCfg, err := condorconfig.New()
 	if err != nil {
 		return nil, fmt.Errorf("condor config: %w", err)
+	}
+	return LoadFrom(condorCfg)
+}
+
+// LoadFrom is Load over an already-loaded HTCondor configuration. The daemon
+// bootstrap (daemon.New) owns config loading -- it needs the subsystem and
+// local-name scoping in place before it drops privileges and opens the log --
+// so the daemon hands its config here rather than having us load a second,
+// unscoped copy. Reconfigure (SIGHUP) takes the same path with the freshly
+// reloaded config.
+func LoadFrom(condorCfg *condorconfig.Config) (*Config, error) {
+	if condorCfg == nil {
+		return nil, fmt.Errorf("condor config: nil")
 	}
 
 	// Get SPOOL directory for default paths
@@ -121,7 +132,6 @@ func Load() (*Config, error) {
 		WebTLSKey:         fmt.Sprintf("%s/pelican-certs/server.key", spoolDir),
 		WebDBPath:         fmt.Sprintf("%s/pelican_web.db", spoolDir),
 		AddressFilePath:   "", // Will be set based on LOG directory
-		MasterSockPath:    "", // Will be discovered from master
 		condorCfg:         condorCfg,
 	}
 
@@ -219,11 +229,6 @@ func Load() (*Config, error) {
 		} else {
 			cfg.AddressFilePath = fmt.Sprintf("%s/.pelican_manager_address", cfg.LogPath)
 		}
-	}
-
-	// Get master socket path for heartbeat communication
-	if v := firstStringMacro(condorCfg, macroMasterSockPath); v != "" {
-		cfg.MasterSockPath = v
 	}
 
 	// Keep the underlying HTCondor configuration for downstream components (logging, HTTP handler, etc.).

@@ -1,16 +1,31 @@
+// Command pelican_man is the Pelican AP manager daemon. It runs under
+// condor_master as an HTCondor daemon (subsystem PELICAN_MANAGER): it polls the
+// schedd/collector for transfer epochs, summarizes them per user/site, publishes
+// the summaries to the collector, and drives schedd startup limits from the
+// resulting control decisions.
+//
+// The daemon lifecycle -- configuration, HTCondor logging, privilege drop,
+// condor_master readiness/keepalive, SIGHUP reconfigure, shared-port command
+// socket -- is the golang-htcondor daemon framework's. This file only wires the
+// pelican-specific services onto it.
 package main
 
 import (
 	"context"
 	"flag"
+	"fmt"
+	"net"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
+	"github.com/bbockelm/cedar/commands"
+	cedarserver "github.com/bbockelm/cedar/server"
+	htcondor "github.com/bbockelm/golang-htcondor"
+	condorconfig "github.com/bbockelm/golang-htcondor/config"
+	condordaemon "github.com/bbockelm/golang-htcondor/daemon"
 	"github.com/bbockelm/golang-htcondor/droppriv"
 	htcondorlogging "github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/pelican-ap-manager/internal/condor"
@@ -23,80 +38,193 @@ import (
 	"github.com/bbockelm/pelican-ap-manager/internal/webserver"
 )
 
+// subsystem is the HTCondor subsystem name. It selects the per-daemon log knobs
+// (PELICAN_MANAGER_LOG, MAX_PELICAN_MANAGER_LOG, PELICAN_MANAGER_DEBUG) and the
+// PELICAN_MANAGER.<key> configuration scope.
+const subsystem = "PELICAN_MANAGER"
+
+// version is stamped at build time (see the Makefile).
+var version = "dev"
+
 func main() {
-	oneshoot := flag.Bool("oneshot", false, "run a single poll/advertise cycle and print findings")
-	schedd := flag.String("schedd", "", "override schedd name")
-	collector := flag.String("collector", "", "override collector host")
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "pelican_man:", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	showVersion := flag.Bool("version", false, "print the version and exit")
+	oneshot := flag.Bool("oneshot", false, "run a single poll/advertise cycle and print findings")
+	scheddFlag := flag.String("schedd", "", "override schedd name")
+	collectorFlag := flag.String("collector", "", "override collector host")
 	infoPath := flag.String("info-path", "", "write info ClassAds to the given file (default: SPOOL/pelican_info.json)")
+	listen := flag.String("listen", "127.0.0.1:0", "command-socket bind address when not running under condor_master")
+	// condor_master passes these to every daemon it starts; flag.Parse would
+	// reject them otherwise. -local-name additionally scopes config lookups.
+	localName := flag.String("local-name", "", "HTCondor subsystem local-name; passed by condor_master")
+	_ = flag.String("sock", "", "HTCondor shared-port endpoint name; accepted for compatibility (fd inherited via CONDOR_INHERIT)")
 	flag.Parse()
 
-	cfg, err := config.Load()
+	if *showVersion {
+		fmt.Println("pelican_man", version)
+		return nil
+	}
+
+	condorCfg, err := condorconfig.NewWithOptions(condorconfig.ConfigOptions{
+		Subsystem: subsystem,
+		LocalName: *localName,
+	})
 	if err != nil {
-		// Can't use logger yet, fall back to stderr
-		os.Stderr.WriteString("config error: " + err.Error() + "\n")
-		os.Exit(1)
+		return fmt.Errorf("loading config: %w", err)
 	}
 
-	// Initialize logging using HTCondor config
-	logger, err := htcondorlogging.FromConfigWithDaemon("PELICAN_MANAGER", cfg.HTCondorConfig())
+	// Bootstrap: HTCondor logging, condor_master integration (DC_SET_READY +
+	// DC_CHILDALIVE), and the privilege drop to the condor user when started as
+	// root. The drop happens inside New, before the log file is opened, so every
+	// file this process creates belongs to the dropped-to user.
+	d, err := condordaemon.New(condordaemon.Options{
+		Subsys:    subsystem,
+		LocalName: *localName,
+		Config:    condorCfg,
+	})
 	if err != nil {
-		os.Stderr.WriteString("logging setup error: " + err.Error() + "\n")
-		os.Exit(1)
+		return err
 	}
+	log := d.Logger()
 
-	// Initialize droppriv manager if running as root
-	if os.Geteuid() == 0 {
-		logger.Infof(htcondorlogging.DestinationGeneral, "Running as root, enabling privilege drop mode")
+	// Rebuild the process-wide droppriv singleton now that the drop has happened,
+	// so components that switch to a job owner (the sandbox HTTP handlers) see the
+	// post-drop identity as their baseline.
+	droppriv.ReloadDefaultManager()
 
-		dropPrivConfig := droppriv.ConfigFromHTCondor(cfg.HTCondorConfig())
-		dropPrivConfig.Enabled = true
-
-		privMgr, err := droppriv.NewManager(dropPrivConfig)
-		if err != nil {
-			logger.Errorf(htcondorlogging.DestinationGeneral, "Failed to initialize privilege manager: %v", err)
-			os.Exit(1)
-		}
-
-		if err := privMgr.Start(); err != nil {
-			logger.Errorf(htcondorlogging.DestinationGeneral, "Failed to start privilege manager: %v", err)
-			os.Exit(1)
-		}
-
-		// Store in atomic pointer so sandbox APIs can use it
-		droppriv.ReloadDefaultManager()
-		logger.Infof(htcondorlogging.DestinationGeneral, "Privilege manager initialized and started")
+	cfg, err := config.LoadFrom(d.Config())
+	if err != nil {
+		return fmt.Errorf("pelican config: %w", err)
 	}
+	cfg = cfg.WithOverrides(0, 0, 0, 0, 0, "", *infoPath, *collectorFlag, *scheddFlag, "", "")
 
-	cfg = cfg.WithOverrides(0, 0, 0, 0, 0, "", *infoPath, *collector, *schedd, "", "")
-
-	logger.Infof(htcondorlogging.DestinationGeneral, "collector config after load: host=%s logpath=%s", cfg.CollectorHost, cfg.LogPath)
+	log.Infof(htcondorlogging.DestinationGeneral, "collector config after load: host=%s logpath=%s", cfg.CollectorHost, cfg.LogPath)
 
 	// If collector host needs address file (dynamic port :0), poll for it
-	needsPolling := needsCollectorAddressFileResolution(cfg.CollectorHost, cfg.LogPath)
-	logger.Infof(htcondorlogging.DestinationGeneral, "needs collector address polling: %v (host=%s)", needsPolling, cfg.CollectorHost)
-	if needsPolling {
-		logger.Infof(htcondorlogging.DestinationGeneral, "waiting for collector address file discovery... (logpath=%s)", cfg.LogPath)
-		resolvedAddr := pollForCollectorAddress(cfg.LogPath, 60*time.Second, logger)
-		if resolvedAddr != "" {
+	if needsCollectorAddressFileResolution(cfg.CollectorHost, cfg.LogPath) {
+		log.Infof(htcondorlogging.DestinationGeneral, "waiting for collector address file discovery... (logpath=%s)", cfg.LogPath)
+		if resolvedAddr := pollForCollectorAddress(cfg.LogPath, 60*time.Second); resolvedAddr != "" {
 			cfg.CollectorHost = resolvedAddr
-			logger.Infof(htcondorlogging.DestinationGeneral, "discovered collector address: %s", cfg.CollectorHost)
+			log.Infof(htcondorlogging.DestinationGeneral, "discovered collector address: %s", cfg.CollectorHost)
 		} else {
-			logger.Warnf(htcondorlogging.DestinationGeneral, "collector address file not found after 60s, will retry at runtime")
+			log.Warnf(htcondorlogging.DestinationGeneral, "collector address file not found after 60s, will retry at runtime")
 		}
 	}
 
-	logger.Infof(htcondorlogging.DestinationGeneral, "loading state from %s", cfg.StatePath)
+	svc, err := buildService(cfg, log, *oneshot)
+	if err != nil {
+		return err
+	}
 
+	// A -oneshot run is a diagnostic, not a daemon: no command socket, no master
+	// signaling, no web server. Run the single cycle and exit.
+	if *oneshot {
+		return svc.Run(context.Background())
+	}
+
+	// Command socket: the inherited shared-port endpoint under condor_master,
+	// else a plain bind. Serving the standard DaemonCore commands on it is what
+	// makes condor_ping / condor_reconfig -daemon / condor_off -daemon work
+	// against this daemon.
+	ln, err := d.Listener(func() (net.Listener, error) {
+		return (&net.ListenConfig{}).Listen(context.Background(), "tcp", *listen)
+	})
+	if err != nil {
+		return fmt.Errorf("command-socket listener: %w", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	sec, err := htcondor.GetServerSecurityConfig(d.Config(), commands.DC_NOP, "DEFAULT")
+	if err != nil {
+		return fmt.Errorf("building security config: %w", err)
+	}
+	cmdSrv := cedarserver.New(sec)
+	d.RegisterDefaultCommands(cmdSrv)
+
+	if path := writeAddressFile(d, cfg, ln); path != "" {
+		defer func() { _ = os.Remove(path) }()
+	}
+
+	// SIGHUP / DC_RECONFIG: re-derive the pelican configuration from the freshly
+	// reloaded HTCondor config and push the runtime-adjustable knobs into the
+	// service.
+	d.OnReconfig(func(newCondorCfg *condorconfig.Config) {
+		newCfg, rerr := config.LoadFrom(newCondorCfg)
+		if rerr != nil {
+			log.Errorf(htcondorlogging.DestinationGeneral, "config reload error: %v", rerr)
+			return
+		}
+		newCfg = newCfg.WithOverrides(0, 0, 0, 0, 0, "", *infoPath, *collectorFlag, *scheddFlag, "", "")
+		svc.ReloadConfig(newCfg)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := svc.Run(ctx); err != nil && ctx.Err() == nil {
+			log.Errorf(htcondorlogging.DestinationGeneral, "service terminated with error: %v", err)
+		}
+	}()
+
+	if cfg.WebListenAddress != "" || cfg.WebSocketPath != "" {
+		webSrv, err := webserver.NewServerWithConfig(&webserver.ServerConfig{
+			ListenAddress:  cfg.WebListenAddress,
+			SocketPath:     cfg.WebSocketPath,
+			TLSCert:        cfg.WebTLSCert,
+			TLSKey:         cfg.WebTLSKey,
+			DBPath:         cfg.WebDBPath,
+			Logger:         log,
+			HTCondorConfig: d.Config(),
+			ScheddAddr:     cfg.ScheddAddr,
+		})
+		if err != nil {
+			return fmt.Errorf("web server initialization failed: %w", err)
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := webSrv.Start(ctx); err != nil && err != context.Canceled {
+				log.Errorf(htcondorlogging.DestinationGeneral, "web server error: %v", err)
+			}
+		}()
+	} else {
+		log.Infof(htcondorlogging.DestinationGeneral, "Web server not configured (set PELICAN_MANAGER_WEB_LISTEN_ADDRESS or PELICAN_REGISTRATION_SOCKET)")
+	}
+
+	log.Infof(htcondorlogging.DestinationGeneral, "pelican_man starting: command_socket=%s under_master=%v %s",
+		ln.Addr().String(), d.UnderMaster(), cfg.EffectiveIntervals())
+
+	// Blocks until a termination signal, a command-server error, or DC_OFF. The
+	// deferred cancel then stops the service loop and the web server.
+	serveErr := d.Serve(ctx, ln, cmdSrv.Serve)
+	cancel()
+	wg.Wait()
+	return serveErr
+}
+
+// buildService assembles the polling/advertising service and the state it
+// carries across restarts.
+func buildService(cfg *config.Config, log *htcondorlogging.Logger, oneshot bool) (*daemon.Service, error) {
+	log.Infof(htcondorlogging.DestinationGeneral, "loading state from %s", cfg.StatePath)
 	st, err := state.Load(cfg.StatePath)
 	if err != nil {
-		logger.Errorf(htcondorlogging.DestinationGeneral, "state load error: %v", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("state load: %w", err)
 	}
 
 	condorClient, err := condor.NewClient(cfg.CollectorHost, cfg.ScheddName, cfg.SiteAttribute)
 	if err != nil {
-		logger.Errorf(htcondorlogging.DestinationGeneral, "condor client init failed: %v", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("condor client init: %w", err)
 	}
 
 	tracker := stats.NewTracker(cfg.StatsWindow)
@@ -128,96 +256,40 @@ func main() {
 		tracker.Load(preload)
 	}
 
-	directorClient := director.New(cfg.DirectorCacheTTL)
-
-	jobMirror, err := jobqueue.NewMirror(cfg.JobQueueLogPath, condorClient, logger)
+	jobMirror, err := jobqueue.NewMirror(cfg.JobQueueLogPath, condorClient, log)
 	if err != nil {
-		logger.Infof(htcondorlogging.DestinationGeneral, "job mirror initialization failed: %v; falling back to schedd polling", err)
+		log.Infof(htcondorlogging.DestinationGeneral, "job mirror initialization failed: %v; falling back to schedd polling", err)
 	}
 
-	svc := daemon.NewService(condorClient, st, cfg.StatePath, cfg.PollInterval, cfg.AdvertiseInterval, cfg.EpochLookback, cfg.StatsWindow, tracker, jobMirror, cfg.JobMirrorPath, directorClient, logger, cfg.InfoPath, cfg.ScheddName, cfg.SiteAttribute, *oneshoot)
+	return daemon.NewService(condorClient, st, cfg.StatePath, cfg.PollInterval, cfg.AdvertiseInterval,
+		cfg.EpochLookback, cfg.StatsWindow, tracker, jobMirror, cfg.JobMirrorPath,
+		director.New(cfg.DirectorCacheTTL), log, cfg.InfoPath, cfg.ScheddName, cfg.SiteAttribute, oneshot), nil
+}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	var wg sync.WaitGroup
-
-	// Write address file for condor_master discovery
-	if err := daemon.WriteAddressFile(cfg.AddressFilePath, cfg.WebSocketPath); err != nil {
-		logger.Warnf(htcondorlogging.DestinationGeneral, "failed to write address file: %v", err)
+// writeAddressFile publishes the command address to PELICAN_MANAGER_ADDRESS_FILE
+// (default $(LOG)/.pelican_manager_address) as a sinful string, so condor tools
+// and the master can reach this daemon's command port. Returns the path written,
+// or "" when no address file is configured.
+func writeAddressFile(d *condordaemon.Daemon, cfg *config.Config, ln net.Listener) string {
+	path := cfg.AddressFilePath
+	if strings.TrimSpace(path) == "" {
+		return ""
 	}
-
-	// Initialize master communicator for heartbeats and ready signals
-	masterComm := daemon.NewMasterCommunicator(cfg.MasterSockPath, logger)
-	if err := masterComm.SendReady(); err != nil {
-		logger.Warnf(htcondorlogging.DestinationGeneral, "failed to send ready signal: %v", err)
-	}
-
-	// Start periodic heartbeats to condor_master (every 5 minutes)
-	heartbeatInterval := 5 * time.Minute
-	_ = masterComm.StartHeartbeat(ctx, heartbeatInterval)
-
-	// Start web server if configured
-	if cfg.WebListenAddress != "" || cfg.WebSocketPath != "" {
-		webSrv, err := webserver.NewServerWithConfig(&webserver.ServerConfig{
-			ListenAddress:  cfg.WebListenAddress,
-			SocketPath:     cfg.WebSocketPath,
-			TLSCert:        cfg.WebTLSCert,
-			TLSKey:         cfg.WebTLSKey,
-			DBPath:         cfg.WebDBPath,
-			Logger:         logger,
-			HTCondorConfig: cfg.HTCondorConfig(),
-			ScheddAddr:     cfg.ScheddAddr,
-		})
-		if err != nil {
-			logger.Errorf(htcondorlogging.DestinationGeneral, "web server initialization failed: %v", err)
-			os.Exit(1)
+	if dir := filepath.Dir(path); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			d.Logger().Warnf(htcondorlogging.DestinationGeneral, "could not create address file directory %s: %v", dir, err)
+			return ""
 		}
-
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := webSrv.Start(ctx); err != nil && err != context.Canceled {
-				logger.Errorf(htcondorlogging.DestinationGeneral, "web server error: %v", err)
-			}
-		}()
-	} else {
-		logger.Infof(htcondorlogging.DestinationGeneral, "Web server not configured (set PELICAN_MANAGER_WEB_LISTEN_ADDRESS or PELICAN_REGISTRATION_SOCKET)")
 	}
-
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-	go func() {
-		for {
-			sig := <-sigs
-			switch sig {
-			case syscall.SIGHUP:
-				logger.Infof(htcondorlogging.DestinationGeneral, "SIGHUP received; reloading configuration")
-				newCfg, err := config.Load()
-				if err != nil {
-					logger.Errorf(htcondorlogging.DestinationGeneral, "config reload error: %v", err)
-					continue
-				}
-				// Apply any CLI overrides
-				newCfg = newCfg.WithOverrides(0, 0, 0, 0, 0, "", *infoPath, *collector, *schedd, "", "")
-				svc.ReloadConfig(newCfg)
-			case syscall.SIGINT, syscall.SIGTERM:
-				logger.Infof(htcondorlogging.DestinationGeneral, "signal received; shutting down")
-				cancel()
-				return
-			}
-		}
-	}()
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := svc.Run(ctx); err != nil {
-			logger.Errorf(htcondorlogging.DestinationGeneral, "service terminated with error: %v", err)
-		}
-	}()
-
-	wg.Wait()
+	addr := ln.Addr().String()
+	if sinful, ok := d.AdvertisedSinful(); ok {
+		addr = sinful
+	}
+	if err := os.WriteFile(path, []byte("<"+addr+">\n"), 0o644); err != nil {
+		d.Logger().Warnf(htcondorlogging.DestinationGeneral, "could not write address file %s: %v", path, err)
+		return ""
+	}
+	return path
 }
 
 // needsCollectorAddressFileResolution checks if we need to poll for the collector address file.
@@ -226,22 +298,18 @@ func needsCollectorAddressFileResolution(collectorHost, logPath string) bool {
 		return false
 	}
 	// Check if it ends with :0 (dynamic port assignment)
-	if len(collectorHost) > 2 && collectorHost[len(collectorHost)-2:] == ":0" {
-		return true
-	}
-	return false
+	return strings.HasSuffix(collectorHost, ":0")
 }
 
 // pollForCollectorAddress polls the collector address file until it's available or timeout.
-func pollForCollectorAddress(logPath string, timeout time.Duration, logger *htcondorlogging.Logger) string {
+func pollForCollectorAddress(logPath string, timeout time.Duration) string {
 	deadline := time.Now().Add(timeout)
 	addrFile := filepath.Join(logPath, ".collector_address")
 
 	for time.Now().Before(deadline) {
 		// Check if file exists first
 		if info, err := os.Stat(addrFile); err == nil && info.Size() > 0 {
-			addr := readCollectorAddressFromFile(addrFile)
-			if addr != "" {
+			if addr := readCollectorAddressFromFile(addrFile); addr != "" {
 				return addr
 			}
 		}
