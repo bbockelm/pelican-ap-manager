@@ -1,16 +1,67 @@
-BINARY=pelican_man
-PKG=github.com/bbockelm/pelican-ap-manager
+# pelican-ap-manager build.
+#
+# Two binaries: pelican_man (the polling/control daemon) and pelican_web (the
+# HTTP surface -- sandbox API plus the golang-htcondor REST API). They share the
+# module and most of their configuration; pelican_web exists so the serving work
+# can be run, restarted and sized independently of the control loop.
+#
+# `go build` is itself incremental (build cache), so the phony targets just
+# invoke it.
 
-.PHONY: build build-condor clean fetch-job-epochs
+BIN_DIR ?= bin
+PKG     := github.com/bbockelm/pelican-ap-manager
 
-build:
-	GOFLAGS= go build -o $(BINARY) ./cmd/pelican_man
+# Version stamped into both binaries' -version flag (main.version); a plain
+# `go build` without this leaves it "dev".
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS := -X main.version=$(VERSION)
 
-build-condor:
-	GOFLAGS= go build -tags condor -o $(BINARY) ./cmd/pelican_man
+# The sibling modules (classad, cedar, golang-htcondor, htcondordb) are private
+# and resolved directly from GitHub rather than through the module proxy, so a
+# just-pushed dependency tag is usable immediately. GOFLAGS is cleared because
+# the ambient environment often carries a -mod=vendor/-mod=readonly that would
+# fight `go mod tidy`.
+GOENV := GOFLAGS= GOPRIVATE=github.com/bbockelm,github.com/PelicanPlatform
+GO    ?= go
 
-clean:
-	rm -f $(BINARY)
+.PHONY: all build manager web build-condor version test test-integration vet fmt tidy clean \
+        fetch-job-epochs
+
+all: build
+
+build: manager web ## Build both binaries into $(BIN_DIR)
+
+manager: ## Build the pelican_man polling/control daemon
+	$(GOENV) $(GO) build -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/pelican_man ./cmd/pelican_man
+
+web: ## Build the pelican_web HTTP daemon
+	$(GOENV) $(GO) build -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/pelican_web ./cmd/pelican_web
+
+build-condor: ## Build both binaries with the `condor` build tag
+	$(GOENV) $(GO) build -tags condor -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/pelican_man ./cmd/pelican_man
+	$(GOENV) $(GO) build -tags condor -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/pelican_web ./cmd/pelican_web
+
+version: ## Print the version that would be stamped
+	@echo $(VERSION)
+
+test: ## Run the unit test suite
+	$(GOENV) $(GO) test ./...
+
+test-integration: ## Run the tests that need a local HTCondor (condor_master on PATH)
+	$(GOENV) $(GO) test -tags integration -timeout 30m ./integration/...
+
+vet: ## Static checks, including the build-tagged sources
+	$(GOENV) $(GO) vet ./...
+	$(GOENV) $(GO) vet -tags integration,condor ./...
+
+fmt: ## Rewrite sources with gofmt
+	$(GOENV) gofmt -w $$($(GO) list -f '{{.Dir}}' ./...)
+
+tidy: ## Reconcile go.mod / go.sum
+	$(GOENV) $(GO) mod tidy
+
+clean: ## Remove built binaries
+	rm -rf $(BIN_DIR) pelican_man pelican_web
 
 fetch-job-epochs:
 	GOFLAGS= go run -tags condor ./tools/collect_job_epochs \
