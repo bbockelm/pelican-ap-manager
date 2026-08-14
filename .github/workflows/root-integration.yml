@@ -45,6 +45,10 @@ jobs:
           # The condor package creates the account the daemons drop to; fail
           # loudly here rather than letting the test skip.
           id condor
+          # A separate ordinary account to submit jobs as. Neither root nor the
+          # condor daemon account may own HTCondor jobs.
+          useradd --create-home pelicansubmit
+          id pelicansubmit
 
       - name: Checkout
         uses: actions/checkout@v4

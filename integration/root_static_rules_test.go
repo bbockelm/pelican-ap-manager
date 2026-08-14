@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -489,7 +491,22 @@ func submitJobForSandbox(t *testing.T, ctx context.Context, env *rootPool) int64
 		return clusterID
 	}
 
-	submitFile := writeSandboxSubmitFile(t, env.rootDir)
+	owner := submitAsUser()
+	u, uerr := user.Lookup(owner)
+	if uerr != nil {
+		t.Fatalf("submit account %q does not exist: %v -- create it (useradd %s) or set PELICAN_SUBMIT_USER", owner, uerr, owner)
+	}
+	uid, _ := strconv.Atoi(u.Uid)
+	gid, _ := strconv.Atoi(u.Gid)
+
+	// The submitting user needs a directory it owns: condor_submit writes the
+	// job log and the schedd's spool copies read the executable and input.
+	submitDir := filepath.Join(env.rootDir, "submit")
+	if err := os.MkdirAll(submitDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", submitDir, err)
+	}
+	submitFile := writeSandboxSubmitFile(t, submitDir)
+	chownRecursive(t, submitDir, uid, gid)
 	// An external command rather than the Go API: setuid in a running Go process
 	// affects only the calling thread, so this process cannot drop for one call.
 	//
@@ -497,18 +514,11 @@ func submitJobForSandbox(t *testing.T, ctx context.Context, env *rootPool) int64
 	// login for a locked system account like condor even when the caller is
 	// root. runuser is the root-only tool that skips authentication.
 	script := fmt.Sprintf("CONDOR_CONFIG=%s condor_submit -terse %s", env.configPath, submitFile)
-	out, err := exec.CommandContext(ctx, "runuser", "-u", submitAsUser, "--", "/bin/sh", "-c", script).CombinedOutput()
+	out, err := exec.CommandContext(ctx, "runuser", "-u", owner, "--", "/bin/sh", "-c", script).CombinedOutput()
 	if err != nil {
-		t.Logf("runuser -u %s -- sh -c %q\nexit: %v\noutput: %q", submitAsUser, script, err, string(out))
-		// An empty output means the wrapper failed before condor_submit ran, so
-		// report what the account actually looks like.
-		if id, ierr := exec.Command("getent", "passwd", submitAsUser).CombinedOutput(); ierr == nil {
-			t.Logf("passwd entry: %s", strings.TrimSpace(string(id)))
-		} else {
-			t.Logf("no passwd entry for %s: %v", submitAsUser, ierr)
-		}
+		t.Logf("runuser -u %s -- sh -c %q\nexit: %v\noutput: %q", owner, script, err, string(out))
 		printHTCondorLogs(env.rootDir, t)
-		t.Fatalf("submitting as %s: %v", submitAsUser, err)
+		t.Fatalf("submitting as %s: %v", owner, err)
 	}
 
 	// -terse prints "cluster.proc - cluster.proc".
@@ -520,9 +530,17 @@ func submitJobForSandbox(t *testing.T, ctx context.Context, env *rootPool) int64
 }
 
 // submitAsUser is the unprivileged account the privileged variant submits as.
-// The condor account already owns the pool directory, so it can read the job
-// files and write the job log.
-const submitAsUser = "condor"
+//
+// Not root (HTCondor rejects the submission outright) and not condor: the
+// schedd refuses to create a User record for its own daemon account -- "The
+// given user is not allowed to own jobs". It has to be an ordinary account,
+// which CI creates. PELICAN_SUBMIT_USER overrides the name.
+func submitAsUser() string {
+	if u := os.Getenv("PELICAN_SUBMIT_USER"); u != "" {
+		return u
+	}
+	return "pelicansubmit"
+}
 
 // writeSandboxSubmitFile lays down the job and its input, and returns the path
 // to the submit description.
