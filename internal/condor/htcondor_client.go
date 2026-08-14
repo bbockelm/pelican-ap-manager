@@ -30,18 +30,79 @@ type htcClient struct {
 	siteAttr   string
 }
 
+// LocateSchedd finds the schedd this manager is responsible for and returns a
+// client for it.
+//
+// The name is matched leniently on purpose. HTCondor's SCHEDD_NAME is
+// conventionally the bare name ("submit-1"), while the schedd advertises
+// Name = "<SCHEDD_NAME>@<FULL_HOSTNAME>". A collector query for the bare name
+// therefore matches nothing -- and since PELICAN_MANAGER_SCHEDD_NAME falls back
+// to SCHEDD_NAME, the documented configuration would never resolve. So: try the
+// configured name exactly, then, if it carries no "@", try it as the local part
+// of a qualified name.
+//
+// An empty name locates any schedd, which is what a single-schedd AP wants.
+func (c *htcClient) LocateSchedd(ctx context.Context) (*htcondor.Schedd, error) {
+	location, err := c.collector.LocateDaemon(ctx, "Schedd", c.scheddName)
+	if err == nil {
+		return htcondor.NewSchedd(location.Name, location.Address), nil
+	}
+	if c.scheddName == "" || strings.Contains(c.scheddName, "@") {
+		return nil, fmt.Errorf("locate schedd %q: %w", c.scheddName, err)
+	}
+
+	qualified, qerr := c.locateScheddByLocalPart(ctx, c.scheddName)
+	if qerr != nil {
+		// Both attempts matter to whoever has to fix this: the first names what
+		// was configured, the second says what the collector actually holds.
+		return nil, fmt.Errorf("locate schedd %q: %w (also tried %s@...: %v)", c.scheddName, err, c.scheddName, qerr)
+	}
+	return qualified, nil
+}
+
+// locateScheddByLocalPart finds a schedd whose advertised Name is
+// "<localPart>@<something>".
+//
+// It lists the schedd ads and matches in Go rather than pushing a regexp() into
+// the collector constraint: constraint evaluation is the collector's ClassAd
+// dialect, and a pool has a handful of schedds, so filtering here is both
+// cheaper to reason about and immune to what the collector does or does not
+// implement.
+func (c *htcClient) locateScheddByLocalPart(ctx context.Context, localPart string) (*htcondor.Schedd, error) {
+	ads, _, err := c.collector.QueryAdsWithOptions(ctx, htcondor.ScheddAdType, "", &htcondor.QueryOptions{
+		Projection: []string{"Name", "MyAddress"},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("querying collector for schedd ads: %w", err)
+	}
+
+	prefix := localPart + "@"
+	var seen []string
+	for _, ad := range ads {
+		name, _ := ad.EvaluateAttrString("Name")
+		seen = append(seen, name)
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		addr, _ := ad.EvaluateAttrString("MyAddress")
+		if addr == "" {
+			return nil, fmt.Errorf("schedd %q advertises no MyAddress", name)
+		}
+		return htcondor.NewSchedd(name, addr), nil
+	}
+	return nil, fmt.Errorf("no schedd named %s* among %v", prefix, seen)
+}
+
 func (c *htcClient) FetchTransferEpochs(sinceEpoch state.EpochID, cutoff time.Time) ([]TransferRecord, state.EpochID, error) {
 	sinceExpr := sinceExpr(cutoff, sinceEpoch)
 	log.Printf("condor: fetch transfer epochs start since=%v cutoff=%v expr=%q", sinceEpoch, cutoff, sinceExpr)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	location, err := c.collector.LocateDaemon(ctx, "Schedd", c.scheddName)
+	schedd, err := c.LocateSchedd(ctx)
 	if err != nil {
-		return nil, sinceEpoch, fmt.Errorf("locate schedd: %w", err)
+		return nil, sinceEpoch, err
 	}
-
-	schedd := htcondor.NewSchedd(location.Name, location.Address)
 
 	opts := &htcondor.HistoryQueryOptions{
 		Source:    htcondor.HistorySourceTransfer,
@@ -121,12 +182,10 @@ func (c *htcClient) FetchJobEpochs(sinceEpoch state.EpochID, cutoff time.Time) (
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	location, err := c.collector.LocateDaemon(ctx, "Schedd", c.scheddName)
+	schedd, err := c.LocateSchedd(ctx)
 	if err != nil {
-		return nil, sinceEpoch, fmt.Errorf("locate schedd: %w", err)
+		return nil, sinceEpoch, err
 	}
-
-	schedd := htcondor.NewSchedd(location.Name, location.Address)
 
 	projection := []string{
 		"ClusterId",
@@ -255,12 +314,10 @@ func (c *htcClient) QueryJobs(ctx context.Context, constraint string, projection
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	location, err := c.collector.LocateDaemon(ctx, "Schedd", c.scheddName)
+	schedd, err := c.LocateSchedd(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("locate schedd: %w", err)
+		return nil, err
 	}
-
-	schedd := htcondor.NewSchedd(location.Name, location.Address)
 	ads, _, err := schedd.QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{Projection: projection})
 	if err != nil {
 		return nil, fmt.Errorf("query jobs: %w", err)

@@ -3,10 +3,12 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
+	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/pelican-ap-manager/internal/condor"
 	"github.com/bbockelm/pelican-ap-manager/internal/state"
 )
@@ -229,4 +231,11 @@ func (m *mockCondorClient) AdvertiseClassAds(payload []map[string]any) error {
 func (m *mockCondorClient) QueryJobs(ctx context.Context, constraint string, projection []string) ([]*classad.ClassAd, error) {
 	// Not needed for summarization test
 	return nil, nil
+}
+
+// LocateSchedd reports that no schedd is reachable. The summarization test runs
+// without a pool, so the rate-limit manager stays disabled -- which is what this
+// mock is meant to exercise: summarization on its own.
+func (m *mockCondorClient) LocateSchedd(ctx context.Context) (*htcondor.Schedd, error) {
+	return nil, fmt.Errorf("mock condor client has no schedd")
 }
