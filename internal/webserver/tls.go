@@ -99,7 +99,9 @@ func GenerateTestCertificate(certPath, keyPath, hostname string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create cert file: %w", err)
 	}
-	defer certFile.Close()
+	// Closed explicitly below: a failure flushing this file leaves a truncated
+	// certificate that the daemon would happily try to load on its next start.
+	defer func() { _ = certFile.Close() }()
 
 	// Write host certificate
 	if err := pem.Encode(certFile, &pem.Block{
@@ -122,7 +124,7 @@ func GenerateTestCertificate(certPath, keyPath, hostname string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create key file: %w", err)
 	}
-	defer keyFile.Close()
+	defer func() { _ = keyFile.Close() }()
 
 	hostPrivateKeyBytes, err := x509.MarshalPKCS8PrivateKey(hostPrivateKey)
 	if err != nil {
@@ -134,6 +136,17 @@ func GenerateTestCertificate(certPath, keyPath, hostname string) error {
 		Bytes: hostPrivateKeyBytes,
 	}); err != nil {
 		return fmt.Errorf("failed to write host private key: %w", err)
+	}
+
+	// Close both files here rather than leaving it to the deferred cleanup: the
+	// flush happens on Close, so this is where a full disk or a failing mount
+	// turns into a truncated certificate or key. Reporting success without
+	// checking would leave the daemon to discover it on its next start.
+	if err := certFile.Close(); err != nil {
+		return fmt.Errorf("failed to flush cert file %s: %w", certPath, err)
+	}
+	if err := keyFile.Close(); err != nil {
+		return fmt.Errorf("failed to flush key file %s: %w", keyPath, err)
 	}
 
 	return nil

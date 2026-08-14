@@ -21,7 +21,7 @@ func TestAutomaticCertificateGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
-	defer srv.db.Close()
+	defer func() { _ = srv.db.Close() }()
 
 	// Certificates should not exist yet
 	if _, err := os.Stat(certPath); err == nil {
@@ -69,7 +69,7 @@ func TestCertificateDirectoryCreation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
-	defer srv.db.Close()
+	defer func() { _ = srv.db.Close() }()
 
 	// Directory should not exist
 	certDir := filepath.Dir(certPath)

@@ -41,7 +41,7 @@ func getSocketCredentials(r *http.Request, logger *htcondorlogging.Logger) (int,
 		logger.Errorf(htcondorlogging.DestinationGeneral, "Failed to get file: %v", err)
 		return -1, -1
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	cred, err := syscall.GetsockoptUcred(int(file.Fd()), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
 	if err != nil {
