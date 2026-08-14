@@ -606,12 +606,11 @@ func writeSandboxSubmitFile(t *testing.T, workDir string) string {
 // an endpoint inherited from condor_master, or one it self-registered in the
 // shared-port directory.
 //
-// Deliberately an observation, not an assertion. Setting DC_DAEMON_LIST is what
-// HTCondor's own source says makes the master treat a third-party daemon as
-// DaemonCore, but with it set here the master still passes no SharedPort token
-// and the daemons take the self-registering path -- which works, and which is
-// how they are reachable today. Asserting either way would be encoding a
-// behavior nobody has confirmed.
+// Deliberately an observation, not an assertion. DC_DAEMON_LIST is set in this
+// pool, but what it buys is the master's liveness supervision (DC_CHILDALIVE),
+// not an inherited shared-port endpoint -- the daemons self-register one, which
+// works and is how they are reachable. Which of the two paths a daemon takes is
+// worth recording when something goes wrong, but is not a property to pin.
 func logCommandSocketMode(t *testing.T, env *rootPool) {
 	t.Helper()
 

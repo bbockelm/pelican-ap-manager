@@ -10,7 +10,7 @@ DAEMON_LIST    = $(DAEMON_LIST) PELICAN_MANAGER PELICAN_WEB
 DC_DAEMON_LIST = +PELICAN_MANAGER PELICAN_WEB
 ```
 
-`DC_DAEMON_LIST` marks the daemon as a DaemonCore daemon so `condor_master` manages its command socket. The built-in list covers only HTCondor's own daemons, so a third-party one has to be added.
+`DC_DAEMON_LIST` marks the daemon as a DaemonCore daemon, putting it under `condor_master`'s liveness supervision: the master expects a `DC_CHILDALIVE` heartbeat and kills a daemon that stops sending one (`NOT_RESPONDING_TIMEOUT`). The built-in list covers only HTCondor's own daemons, so a third-party one has to be added.
 
 Without `PELICAN_WEB` running, Pelican transfer plugins cannot register sandboxes.
 
