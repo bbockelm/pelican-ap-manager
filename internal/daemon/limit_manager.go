@@ -2,11 +2,8 @@ package daemon
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"math"
-	"strings"
 	"time"
 
 	"github.com/PelicanPlatform/classad/ast"
@@ -14,7 +11,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	htcondorlogging "github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/pelican-ap-manager/internal/control"
-	"github.com/bbockelm/pelican-ap-manager/internal/stats"
+	"github.com/bbockelm/pelican-ap-manager/internal/ratelimit"
 )
 
 const (
@@ -34,11 +31,18 @@ type UserSitePair struct {
 	Site string
 }
 
-// limitManager tracks active schedd startup limits and their usage
+// limitManager owns the schedd startup limits this daemon installs.
+//
+// It is driven by rules (internal/ratelimit), not by control state directly:
+// the caller decides which rules should exist -- the operator's static policy
+// plus, when enforcing, the control loop's dynamic conclusions -- and this
+// reconciles the schedd against that set. Keeping the decision and the
+// installation apart is what lets observing mode withhold the dynamic rules
+// without the schedd-facing code knowing anything about modes.
 type limitManager struct {
 	schedd        *htcondor.Schedd
 	logger        *htcondorlogging.Logger
-	activeLimits  map[string]*limitState
+	activeLimits  map[string]*limitState // keyed by the schedd limit name (rule.LimitName())
 	cfg           limitConfig
 	daemonName    string
 	siteAttribute string
@@ -52,14 +56,14 @@ type limitConfig struct {
 }
 
 type limitState struct {
-	uuid          string
-	userSitePair  UserSitePair
-	lastHit       time.Time
-	lastUpdated   time.Time
-	rateCount     int
-	capacityGBMin float64
-	hitCount      int64
-	jobsSkipped   int64
+	uuid        string
+	rule        ratelimit.Rule
+	lastHit     time.Time
+	lastUpdated time.Time
+	rateCount   int
+	rateWindow  time.Duration
+	hitCount    int64
+	jobsSkipped int64
 }
 
 // newLimitManager creates a limit manager for the schedd
@@ -90,35 +94,42 @@ func newLimitManager(schedd *htcondor.Schedd, daemonName string, siteAttribute s
 		return m
 	}
 
-	// Re-adopt existing limits
+	// Re-adopt limits this daemon (or a previous incarnation of it) installed.
+	// The limit's Name is derived from the rule name, so it is the key that
+	// survives a restart; the expression is parsed only to describe what was
+	// adopted, since reconcile rewrites it from the rule anyway.
 	for _, limitInfo := range limits {
-		user, site, ok := parseLimitExpression(limitInfo.Expression, siteAttribute)
-		if !ok {
-			logger.Infof(htcondorlogging.DestinationGeneral, "skipping limit %s: could not parse expression %q", limitInfo.UUID, limitInfo.Expression)
+		if limitInfo.Name == "" {
+			logger.Infof(htcondorlogging.DestinationGeneral, "skipping unnamed limit %s during re-adoption", limitInfo.UUID)
 			continue
 		}
-
-		pair := UserSitePair{User: user, Site: site}
-		pairTag := pairKey(pair)
 
 		lastHit := time.Now()
 		if limitInfo.LastIgnored > 0 {
 			lastHit = time.Unix(limitInfo.LastIgnored, 0)
 		}
 
-		m.activeLimits[pairTag] = &limitState{
-			uuid:          limitInfo.UUID,
-			userSitePair:  pair,
-			lastHit:       lastHit,
-			lastUpdated:   time.Now(),
-			rateCount:     limitInfo.RateCount,
-			capacityGBMin: 0, // Will be recomputed on next update
-			hitCount:      0,
-			jobsSkipped:   0,
+		window := time.Duration(limitInfo.RateWindow) * time.Second
+		if window <= 0 {
+			window = m.cfg.interval
 		}
 
-		logger.Infof(htcondorlogging.DestinationGeneral, "re-adopted limit %s for user=%s site=%s: %d jobs/%ds",
-			limitInfo.UUID, user, site, limitInfo.RateCount, limitInfo.RateWindow)
+		m.activeLimits[limitInfo.Name] = &limitState{
+			uuid:        limitInfo.UUID,
+			rule:        ratelimit.Rule{Name: limitInfo.Name, Expression: limitInfo.Expression, RateCount: limitInfo.RateCount, RateWindow: window},
+			lastHit:     lastHit,
+			lastUpdated: time.Now(),
+			rateCount:   limitInfo.RateCount,
+			rateWindow:  window,
+		}
+
+		if user, site, ok := parseLimitExpression(limitInfo.Expression, siteAttribute); ok {
+			logger.Infof(htcondorlogging.DestinationGeneral, "re-adopted limit %s (%s) for user=%s site=%s: %d jobs/%ds",
+				limitInfo.UUID, limitInfo.Name, user, site, limitInfo.RateCount, limitInfo.RateWindow)
+		} else {
+			logger.Infof(htcondorlogging.DestinationGeneral, "re-adopted limit %s (%s): %d jobs/%ds (expression %q)",
+				limitInfo.UUID, limitInfo.Name, limitInfo.RateCount, limitInfo.RateWindow, limitInfo.Expression)
+		}
 	}
 
 	if len(m.activeLimits) > 0 {
@@ -128,64 +139,72 @@ func newLimitManager(schedd *htcondor.Schedd, daemonName string, siteAttribute s
 	return m
 }
 
-// updateLimits synchronizes schedd limits based on user+site pairs and their states
-// Only creates/updates limits when a pair is in RED state; removes stale limits
-func (m *limitManager) updateLimits(ctx context.Context, userSitePairs map[UserSitePair]control.PairState, tracker *stats.Tracker, controlCfg control.Config, windowMetrics map[UserSitePair]outcomeMetrics) error {
+// reconcile makes the schedd's startup limits match the given rule set: it
+// creates limits that are missing, updates those whose rate has moved
+// materially, and drops those whose rule is gone and which have not been hit
+// recently.
+//
+// The rules passed in are already filtered for the enforcement mode -- an
+// observing daemon simply hands over fewer of them.
+func (m *limitManager) reconcile(ctx context.Context, rules []ratelimit.Rule) error {
 	if !m.cfg.enabled {
 		return nil
 	}
 
 	now := time.Now()
+	desired := make(map[string]ratelimit.Rule, len(rules))
 
-	// Determine which user+site pairs need limits (RED state only)
-	// The pairs are already filtered by the caller based on their control state
-	pairsNeedingLimits := make(map[UserSitePair]control.PairState)
-	for pair, state := range userSitePairs {
-		// Note: Caller should pre-filter to only pass pairs in RED state
-		pairsNeedingLimits[pair] = state
-	}
+	for _, rule := range rules {
+		key := rule.LimitName()
+		desired[key] = rule
 
-	// Update or create limits for pairs in RED state
-	for pair, state := range pairsNeedingLimits {
-		pairTag := pairKey(pair)
-		existing, exists := m.activeLimits[pairTag]
-
-		// Extract sources from window metrics
-		sources := []string{}
-		if wm, ok := windowMetrics[pair]; ok {
-			sources = wm.sources
-		}
-
-		// For now, use a default rate count based on capacity
-		// TODO: Improve rate count calculation with actual sandbox/transfer metrics
-		rateCount := m.calculateRateCountFromCapacity(state.CapacityGBPerMin, controlCfg)
-
-		if exists {
-			// Update existing limit if rate changed significantly
-			if m.shouldUpdateLimit(existing, rateCount, state.CapacityGBPerMin) {
-				if err := m.updateLimit(ctx, existing, pair, rateCount, state.CapacityGBPerMin, sources); err != nil {
-					m.logger.Infof(htcondorlogging.DestinationGeneral, "limit update error for user=%s site=%s: %v", pair.User, pair.Site, err)
-				}
+		existing, exists := m.activeLimits[key]
+		switch {
+		case !exists:
+			if err := m.createLimit(ctx, rule); err != nil {
+				m.logger.Infof(htcondorlogging.DestinationGeneral, "limit create error for rule %s: %v", rule.Name, err)
 			}
-		} else {
-			// Create new limit
-			if err := m.createLimit(ctx, pair, rateCount, state.CapacityGBPerMin, sources); err != nil {
-				m.logger.Infof(htcondorlogging.DestinationGeneral, "limit create error for user=%s site=%s: %v", pair.User, pair.Site, err)
+		case m.shouldUpdateLimit(existing, rule):
+			if err := m.updateLimit(ctx, existing, rule); err != nil {
+				m.logger.Infof(htcondorlogging.DestinationGeneral, "limit update error for rule %s: %v", rule.Name, err)
 			}
 		}
 	}
 
-	// Remove stale limits (not hit recently and no longer in RED state)
-	if err := m.removeStale(ctx, now, pairsNeedingLimits); err != nil {
+	if err := m.removeStale(ctx, now, desired); err != nil {
 		m.logger.Infof(htcondorlogging.DestinationGeneral, "limit cleanup error: %v", err)
 	}
 
-	// Query current limits to update lastHit times and statistics
 	if err := m.refreshLimitStats(ctx); err != nil {
 		m.logger.Infof(htcondorlogging.DestinationGeneral, "limit refresh error: %v", err)
 	}
 
 	return nil
+}
+
+// dynamicRuleName is the stable rule name for the control loop's own limit on a
+// (user, site) pair. It has to be deterministic: it is how a limit installed by
+// a previous incarnation of the daemon is recognized as this pair's limit
+// rather than orphaned and re-created.
+func dynamicRuleName(pair UserSitePair) string {
+	return sanitizeLimitLabel(pair.User) + "_at_" + sanitizeLimitLabel(pair.Site)
+}
+
+// dynamicRule builds the control loop's rule for a (user, site) pair from the
+// capacity the AIMD controller settled on.
+func (m *limitManager) dynamicRule(pair UserSitePair, state control.PairState, cfg control.Config, sources []string) ratelimit.Rule {
+	return ratelimit.Rule{
+		Name:       dynamicRuleName(pair),
+		Origin:     ratelimit.OriginDynamic,
+		User:       pair.User,
+		Site:       pair.Site,
+		Sources:    sources,
+		RateCount:  m.calculateRateCountFromCapacity(state.CapacityGBPerMin, cfg),
+		RateWindow: m.cfg.interval,
+		Note: fmt.Sprintf("control loop: %.1f GB/min capacity for %s at %s",
+			state.CapacityGBPerMin, pair.User, pair.Site),
+		UpdatedAt: time.Now(),
+	}
 }
 
 // calculateRateCountFromCapacity converts capacity (GB/min) to jobs per interval
@@ -217,121 +236,122 @@ func (m *limitManager) calculateRateCountFromCapacity(capacityGBPerMin float64, 
 	return int(math.Ceil(jobsPerInterval))
 }
 
-// shouldUpdateLimit determines if a limit needs updating based on rate changes
-func (m *limitManager) shouldUpdateLimit(existing *limitState, newRateCount int, newCapacityGBMin float64) bool {
-	// Update if rate count differs by more than 20% or capacity changed significantly
-	rateDiff := math.Abs(float64(newRateCount-existing.rateCount)) / float64(existing.rateCount)
-	capacityDiff := math.Abs(newCapacityGBMin-existing.capacityGBMin) / existing.capacityGBMin
-
-	return rateDiff > 0.2 || capacityDiff > 0.2
+// shouldUpdateLimit reports whether an installed limit has drifted from its
+// rule enough to be worth a schedd round trip.
+//
+// A static rule is compared exactly: the operator wrote a number and expects
+// that number, so any change is worth pushing. A dynamic rule is compared with
+// a 20% deadband, because the AIMD controller moves its capacity on every cycle
+// and rewriting the limit each time would be pure churn.
+func (m *limitManager) shouldUpdateLimit(existing *limitState, rule ratelimit.Rule) bool {
+	if existing.rateWindow != rule.Window() {
+		return true
+	}
+	// The expression can move independently of the rate (a rule's source list
+	// grows as new origins are observed), so it has to be compared too.
+	if existing.rule.ClassAdExpression(m.siteAttribute) != rule.ClassAdExpression(m.siteAttribute) {
+		return true
+	}
+	if rule.Origin == ratelimit.OriginStatic {
+		return existing.rateCount != rule.RateCount
+	}
+	if existing.rateCount == 0 {
+		return rule.RateCount != 0
+	}
+	rateDiff := math.Abs(float64(rule.RateCount-existing.rateCount)) / float64(existing.rateCount)
+	return rateDiff > 0.2
 }
 
-// createLimit creates a new schedd startup limit
-func (m *limitManager) createLimit(ctx context.Context, pair UserSitePair, rateCount int, capacityGBMin float64, sources []string) error {
-	tag := m.limitTag()
-	name := fmt.Sprintf("pelican_%s_at_%s", sanitizeLimitLabel(pair.User), sanitizeLimitLabel(pair.Site))
-
-	// Build ClassAd expression to match jobs with this user at this site
-	// The expression matches on:
-	// - JOB.Owner (user)
-	// - PelicanInputPrefixes (source URL prefixes)
-	// - MACHINE.GLIDEIN_Site (execution site)
-	expression := m.buildLimitExpression(pair.User, pair.Site, sources)
-
-	// Set expiration to 2x the inactivity timeout to allow for some delay in cleanup
-	expirationTime := time.Now().Add(m.cfg.expirationInactivity * 2).Unix()
-
-	req := &htcondor.StartupLimitRequest{
-		Tag:        tag,
-		Name:       name,
-		Expression: expression,
-		RateCount:  rateCount,
-		RateWindow: int(m.cfg.interval.Seconds()),
-		Expiration: int(expirationTime),
-	}
-
-	uuid, err := m.schedd.CreateStartupLimit(ctx, req)
+// createLimit installs a new schedd startup limit for a rule.
+func (m *limitManager) createLimit(ctx context.Context, rule ratelimit.Rule) error {
+	uuid, err := m.pushLimit(ctx, "", rule)
 	if err != nil {
 		return fmt.Errorf("create startup limit: %w", err)
 	}
 
-	pairTag := pairKey(pair)
-	m.activeLimits[pairTag] = &limitState{
-		uuid:          uuid,
-		userSitePair:  pair,
-		lastHit:       time.Now(),
-		lastUpdated:   time.Now(),
-		rateCount:     rateCount,
-		capacityGBMin: capacityGBMin,
-		hitCount:      0,
-		jobsSkipped:   0,
+	m.activeLimits[rule.LimitName()] = &limitState{
+		uuid:        uuid,
+		rule:        rule,
+		lastHit:     time.Now(),
+		lastUpdated: time.Now(),
+		rateCount:   rule.RateCount,
+		rateWindow:  rule.Window(),
 	}
 
-	m.logger.Infof(htcondorlogging.DestinationGeneral, "created limit %s for user=%s site=%s: %d jobs/%ds (%.1f GB/min capacity)",
-		uuid, pair.User, pair.Site, rateCount, int(m.cfg.interval.Seconds()), capacityGBMin)
-
+	m.logger.Infof(htcondorlogging.DestinationGeneral, "created %s limit %s (%s): %d jobs/%s",
+		rule.Origin, uuid, rule.Name, rule.RateCount, rule.Window())
 	return nil
 }
 
-// updateLimit updates an existing schedd startup limit
-func (m *limitManager) updateLimit(ctx context.Context, existing *limitState, pair UserSitePair, rateCount int, capacityGBMin float64, sources []string) error {
-	name := fmt.Sprintf("pelican_%s_at_%s", sanitizeLimitLabel(pair.User), sanitizeLimitLabel(pair.Site))
-	expression := m.buildLimitExpression(pair.User, pair.Site, sources)
-
-	// Refresh expiration time on every update
-	expirationTime := time.Now().Add(m.cfg.expirationInactivity * 2).Unix()
-
-	req := &htcondor.StartupLimitRequest{
-		UUID:       existing.uuid,
-		Tag:        m.limitTag(),
-		Name:       name,
-		Expression: expression,
-		RateCount:  rateCount,
-		RateWindow: int(m.cfg.interval.Seconds()),
-		Expiration: int(expirationTime),
-	}
-
-	uuid, err := m.schedd.CreateStartupLimit(ctx, req)
+// updateLimit rewrites an installed limit in place from its rule.
+func (m *limitManager) updateLimit(ctx context.Context, existing *limitState, rule ratelimit.Rule) error {
+	uuid, err := m.pushLimit(ctx, existing.uuid, rule)
 	if err != nil {
 		return fmt.Errorf("update startup limit: %w", err)
 	}
 
 	existing.uuid = uuid
-	existing.rateCount = rateCount
-	existing.capacityGBMin = capacityGBMin
+	existing.rule = rule
+	existing.rateCount = rule.RateCount
+	existing.rateWindow = rule.Window()
 	existing.lastUpdated = time.Now()
 
-	m.logger.Infof(htcondorlogging.DestinationGeneral, "updated limit %s for user=%s site=%s: %d jobs/%ds (%.1f GB/min capacity)",
-		uuid, pair.User, pair.Site, rateCount, int(m.cfg.interval.Seconds()), capacityGBMin)
-
+	m.logger.Infof(htcondorlogging.DestinationGeneral, "updated %s limit %s (%s): %d jobs/%s",
+		rule.Origin, uuid, rule.Name, rule.RateCount, rule.Window())
 	return nil
 }
 
-// removeStale removes limits that haven't been hit recently and are no longer in RED state
-func (m *limitManager) removeStale(ctx context.Context, now time.Time, activeRedPairs map[UserSitePair]control.PairState) error {
-	for pairTag, limit := range m.activeLimits {
-		// Keep limit if still in RED state
-		if _, inRed := activeRedPairs[limit.userSitePair]; inRed {
-			continue
-		}
-
-		// Remove if not hit for expiration period
-		if now.Sub(limit.lastHit) > m.cfg.expirationInactivity {
-			// To remove a limit, we query and delete via the tag
-			// The golang-htcondor API handles removal through the schedd
-			// For now, just remove from our tracking (schedd will expire it)
-			m.logger.Infof(htcondorlogging.DestinationGeneral, "removing stale limit %s for user=%s site=%s (last hit %v ago)",
-				limit.uuid, limit.userSitePair.User, limit.userSitePair.Site, now.Sub(limit.lastHit))
-			delete(m.activeLimits, pairTag)
+// pushLimit sends one create-or-update to the schedd. uuid empty means create.
+func (m *limitManager) pushLimit(ctx context.Context, uuid string, rule ratelimit.Rule) (string, error) {
+	// The limit's own expiration is a backstop, not the policy: it is refreshed
+	// on every update, so it only fires if this daemon stops running. Twice the
+	// inactivity timeout leaves room for a slow poll cycle without letting a
+	// forgotten limit outlive the daemon indefinitely.
+	expiration := m.cfg.expirationInactivity * 2
+	// A rule with its own deadline must not outlive it, even if the daemon dies
+	// the moment after installing it.
+	if !rule.ExpiresAt.IsZero() {
+		if until := time.Until(rule.ExpiresAt); until < expiration {
+			expiration = until
 		}
 	}
 
+	req := &htcondor.StartupLimitRequest{
+		UUID:       uuid,
+		Tag:        m.limitTag(),
+		Name:       rule.LimitName(),
+		Expression: rule.ClassAdExpression(m.siteAttribute),
+		RateCount:  rule.RateCount,
+		RateWindow: int(rule.Window().Seconds()),
+		Expiration: int(time.Now().Add(expiration).Unix()),
+	}
+	return m.schedd.CreateStartupLimit(ctx, req)
+}
+
+// removeStale drops limits whose rule is no longer desired and which have not
+// been hit for the inactivity window. The delay matters: a pair can drop out of
+// RED for one poll and come straight back, and tearing the limit down and
+// rebuilding it would reset the schedd's token bucket each time.
+func (m *limitManager) removeStale(ctx context.Context, now time.Time, desired map[string]ratelimit.Rule) error {
+	for key, limit := range m.activeLimits {
+		if _, wanted := desired[key]; wanted {
+			continue
+		}
+		if now.Sub(limit.lastHit) <= m.cfg.expirationInactivity {
+			continue
+		}
+		// The schedd expires limits on its own (see pushLimit), so dropping our
+		// tracking is enough to stop refreshing it; it lapses shortly after.
+		m.logger.Infof(htcondorlogging.DestinationGeneral, "releasing stale limit %s (%s), last hit %v ago",
+			limit.uuid, key, now.Sub(limit.lastHit).Truncate(time.Second))
+		delete(m.activeLimits, key)
+	}
 	return nil
 }
 
 // refreshLimitStats queries the schedd to update lastHit times and statistics based on actual usage
 func (m *limitManager) refreshLimitStats(ctx context.Context) error {
-	for pairTag, limit := range m.activeLimits {
+	for key, limit := range m.activeLimits {
 		limits, err := m.schedd.QueryStartupLimits(ctx, limit.uuid, "")
 		if err != nil {
 			m.logger.Infof(htcondorlogging.DestinationGeneral, "query limit %s error (skipping): %v", limit.uuid, err)
@@ -346,13 +366,12 @@ func (m *limitManager) refreshLimitStats(ctx context.Context) error {
 				if newLastHit.After(limit.lastHit) {
 					limit.lastHit = newLastHit
 					limit.hitCount++
-					limit.jobsSkipped = int64(limitInfo.JobsSkipped)
-					m.logger.Infof(htcondorlogging.DestinationGeneral, "limit %s for user=%s site=%s was hit at %v (total skipped=%d)",
-						limit.uuid, limit.userSitePair.User, limit.userSitePair.Site,
-						limit.lastHit, limit.jobsSkipped)
+					limit.jobsSkipped = limitInfo.JobsSkipped
+					m.logger.Infof(htcondorlogging.DestinationGeneral, "limit %s (%s) was hit at %v (total skipped=%d)",
+						limit.uuid, key, limit.lastHit, limit.jobsSkipped)
 				}
 			}
-			m.activeLimits[pairTag] = limit
+			m.activeLimits[key] = limit
 		}
 	}
 
@@ -362,16 +381,6 @@ func (m *limitManager) refreshLimitStats(ctx context.Context) error {
 // limitTag returns the static tag used for all limits managed by this daemon
 func (m *limitManager) limitTag() string {
 	return m.daemonName
-}
-
-// pairKey generates a stable hash for a user+site pair to use as map key
-func pairKey(pair UserSitePair) string {
-	h := sha256.New()
-	h.Write([]byte(pair.User))
-	h.Write([]byte{0})
-	h.Write([]byte(pair.Site))
-	sum := h.Sum(nil)
-	return hex.EncodeToString(sum[:16])
 }
 
 // parseLimitExpression extracts user and site from a limit expression using ClassAd AST parsing
@@ -419,6 +428,12 @@ func walkExprForUserAndSite(node ast.Expr, siteAttribute string) (user, site str
 	}
 
 	switch n := node.(type) {
+	case *ast.ParenExpr:
+		// The parser preserves explicit parentheses as their own node, and
+		// buildLimitExpression wraps both the whole expression and the source
+		// disjunction in them, so descend through.
+		return walkExprForUserAndSite(n.Inner, siteAttribute)
+
 	case *ast.BinaryOp:
 		// Check if this is a comparison operator (==, =?=, or is)
 		// Note: The AST represents =?= as "is"
@@ -511,50 +526,18 @@ func sanitizeLimitLabel(s string) string {
 	return result
 }
 
-// buildLimitExpression constructs a ClassAd expression that matches jobs with:
-// - Specific user (JOB.Owner)
-// - Input sources matching federation prefixes (using stringListMember)
-// - Target machine's site
-func (m *limitManager) buildLimitExpression(user, site string, sources []string) string {
-	// Match on user
-	userExpr := fmt.Sprintf("JOB.Owner =?= %q", user)
-
-	// Match on machine site
-	siteExpr := fmt.Sprintf("TARGET.%s =?= %q", m.siteAttribute, site)
-
-	// Match on source prefixes if any are provided
-	var sourceExpr string
-	if len(sources) > 0 {
-		// Build expression: any source in sources list matches any prefix in PelicanInputPrefixes
-		// Use stringListMember(source, JOB.PelicanInputPrefixes ?: "")
-		conditions := make([]string, len(sources))
-		for i, source := range sources {
-			conditions[i] = fmt.Sprintf("stringListMember(%q, JOB.PelicanInputPrefixes ?: \"\")", source)
-		}
-		// Combine with OR
-		if len(conditions) == 1 {
-			sourceExpr = conditions[0]
-		} else {
-			sourceExpr = "(" + strings.Join(conditions, " || ") + ")"
-		}
-		return fmt.Sprintf("(%s && %s && %s)", userExpr, sourceExpr, siteExpr)
-	}
-
-	// No source filtering, just user and site
-	return fmt.Sprintf("(%s && %s)", userExpr, siteExpr)
-}
-
-// getLimitInfo returns the active limit information for a user+site pair, if any
+// getLimitInfo returns the control loop's own limit for a user+site pair, if
+// one is installed. A static rule that happens to cover the same pair is not
+// reported here: these accessors feed the per-pair fields of the summary ads,
+// which describe what the controller decided, not the whole policy in force.
 func (m *limitManager) getLimitInfo(pair UserSitePair) (rateCount int, rateWindow int, active bool) {
 	if !m.cfg.enabled {
 		return 0, 0, false
 	}
 
-	pairTag := pairKey(pair)
-	if limit, exists := m.activeLimits[pairTag]; exists {
-		return limit.rateCount, int(m.cfg.interval.Seconds()), true
+	if limit, ok := m.dynamicLimit(pair); ok {
+		return limit.rateCount, int(limit.rateWindow.Seconds()), true
 	}
-
 	return 0, int(m.cfg.interval.Seconds()), false
 }
 
@@ -564,11 +547,9 @@ func (m *limitManager) getLimitStats(pair UserSitePair) (hitCount int64, jobsSki
 		return 0, 0, time.Time{}, false
 	}
 
-	pairTag := pairKey(pair)
-	if limit, ok := m.activeLimits[pairTag]; ok {
+	if limit, ok := m.dynamicLimit(pair); ok {
 		return limit.hitCount, limit.jobsSkipped, limit.lastHit, true
 	}
-
 	return 0, 0, time.Time{}, false
 }
 
@@ -578,10 +559,15 @@ func (m *limitManager) getLimitUUID(pair UserSitePair) (uuid string, exists bool
 		return "", false
 	}
 
-	pairTag := pairKey(pair)
-	if limit, ok := m.activeLimits[pairTag]; ok {
+	if limit, ok := m.dynamicLimit(pair); ok {
 		return limit.uuid, true
 	}
-
 	return "", false
+}
+
+// dynamicLimit finds the installed limit for a pair's control-loop rule.
+func (m *limitManager) dynamicLimit(pair UserSitePair) (*limitState, bool) {
+	key := ratelimit.Rule{Name: dynamicRuleName(pair), Origin: ratelimit.OriginDynamic}.LimitName()
+	limit, ok := m.activeLimits[key]
+	return limit, ok
 }

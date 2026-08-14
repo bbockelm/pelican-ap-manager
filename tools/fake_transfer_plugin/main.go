@@ -482,7 +482,10 @@ func (a jobAd) intValueWithPresence(key string) (int, bool) {
 }
 
 func appendLog(line string) {
-	logFile := "/tmp/fake_transfer_plugin.log"
+	logFile := os.Getenv("FAKE_TRANSFER_PLUGIN_LOG")
+	if logFile == "" {
+		return
+	}
 	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return

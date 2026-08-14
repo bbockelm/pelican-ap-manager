@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
@@ -22,8 +23,10 @@ import (
 	"github.com/bbockelm/pelican-ap-manager/internal/control"
 	"github.com/bbockelm/pelican-ap-manager/internal/director"
 	"github.com/bbockelm/pelican-ap-manager/internal/jobqueue"
+	"github.com/bbockelm/pelican-ap-manager/internal/ratelimit"
 	"github.com/bbockelm/pelican-ap-manager/internal/state"
 	"github.com/bbockelm/pelican-ap-manager/internal/stats"
+	"github.com/bbockelm/pelican-ap-manager/internal/store"
 )
 
 const (
@@ -56,6 +59,20 @@ type Service struct {
 	schedd            *htcondor.Schedd
 	adSequence        map[string]int // tracks UpdateSequenceNumber per ad Name
 	outlierFile       *os.File       // file for logging transfer outliers
+
+	// mode decides what the service does with the limits it derives:
+	// ModeEnforcing installs them, ModeObserving computes and publishes them
+	// but installs only the operator's static rules. Guarded by ruleMu because
+	// a reconfigure can change it under the poll loop.
+	mode ratelimit.Mode
+
+	// rules persists the rate rules -- the operator's static policy and the
+	// control loop's own conclusions. Nil when no store is configured, in which
+	// case only in-memory dynamic rules are used and nothing survives a
+	// restart beyond what the schedd itself still holds.
+	rules store.RuleStore
+
+	ruleMu sync.RWMutex
 }
 
 // NewService wires up dependencies for the daemon.
@@ -142,6 +159,9 @@ func (s *Service) Run(ctx context.Context) error {
 	advTicker := time.NewTicker(s.advertiseInterval)
 	defer pollTicker.Stop()
 	defer advTicker.Stop()
+
+	// Advertise immediately on startup
+	s.advertiseOnce()
 
 	for {
 		select {
@@ -404,13 +424,14 @@ func (s *Service) advertiseOnce() {
 		return
 	}
 
+	// Write to info file if configured
 	if s.infoPath != "" {
 		if err := s.writeInfoAds(ads); err != nil {
 			s.Printf("info file write error: %v", err)
 		}
-		return
 	}
 
+	// Always advertise to collector
 	if err := s.condor.AdvertiseClassAds(ads); err != nil {
 		s.Printf("advertise error: %v", err)
 	}
@@ -432,6 +453,13 @@ func (s *Service) updatePairControllers() {
 
 	for pair := range pairs {
 		metrics := pairMetrics(s.controlCfg, s.state, s.tracker, pair.Source, pair.Destination)
+
+		// Log control metrics before capacity update for debugging
+		bandErrors := control.ClassifyBand(metrics.ErrorRate, s.controlCfg.ErrorGreenThreshold, s.controlCfg.ErrorYellowThreshold)
+		bandCost := control.ClassifyBand(metrics.CostPct/100.0, s.controlCfg.CostGreenThresholdPercent/100.0, s.controlCfg.CostYellowThresholdPercent/100.0)
+		s.Printf("pair control: %s -> %s | ErrorRate=%f (band=%v) CostPct=%f%% (band=%v)",
+			pair.Source, pair.Destination, metrics.ErrorRate, bandErrors, metrics.CostPct, bandCost)
+
 		prev := s.state.PairState(pair.Source, pair.Destination)
 		next := controller.Step(now, prev, metrics)
 		s.state.SetPairState(pair.Source, pair.Destination, next)
@@ -467,7 +495,47 @@ func (s *Service) updateLimitControllers() {
 	}
 }
 
-// updateScheddLimits synchronizes schedd startup limits based on user+site pair states
+// SetEnforcement selects what the service does with the limits it derives. It
+// is safe to call while the poll loop is running (a reconfigure does).
+func (s *Service) SetEnforcement(mode ratelimit.Mode) {
+	s.ruleMu.Lock()
+	defer s.ruleMu.Unlock()
+	s.mode = mode
+}
+
+// SetRuleStore attaches the rate-rule store. Passing nil detaches it, leaving
+// the service with in-memory dynamic rules only.
+func (s *Service) SetRuleStore(rs store.RuleStore) {
+	s.ruleMu.Lock()
+	defer s.ruleMu.Unlock()
+	s.rules = rs
+}
+
+// enforcement returns the current mode, defaulting to enforcing when unset so
+// a Service built without SetEnforcement behaves as it always has.
+func (s *Service) enforcement() ratelimit.Mode {
+	s.ruleMu.RLock()
+	defer s.ruleMu.RUnlock()
+	if s.mode == "" {
+		return ratelimit.ModeEnforcing
+	}
+	return s.mode
+}
+
+func (s *Service) ruleStore() store.RuleStore {
+	s.ruleMu.RLock()
+	defer s.ruleMu.RUnlock()
+	return s.rules
+}
+
+// updateScheddLimits reconciles the schedd's startup limits with the rules that
+// should be in force: the operator's persisted static policy, plus -- when
+// enforcing -- a dynamic rule for every (user, site) pair the control loop has
+// classified RED.
+//
+// The dynamic rules are written back to the store as well, so an operator can
+// see what the controller concluded, and so a restart re-adopts those
+// conclusions instead of starting from nothing.
 func (s *Service) updateScheddLimits() {
 	if s.limitMgr == nil {
 		if err := s.ensureLimitManager(); err != nil {
@@ -480,37 +548,94 @@ func (s *Service) updateScheddLimits() {
 		return
 	}
 
-	// Gather user+site pairs from summaries
-	userSitePairs := s.gatherUserSitePairs()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-	// Gather window metrics for sources tracking
+	mode := s.enforcement()
+	rules := s.storedRules(ctx)
+	dynamic := s.deriveDynamicRules()
+
+	// Dynamic rules replace whatever the store holds under the same name: the
+	// controller's current conclusion is the authoritative one.
+	byName := make(map[string]int, len(rules))
+	for i, r := range rules {
+		byName[r.Name] = i
+	}
+	for _, r := range dynamic {
+		if i, ok := byName[r.Name]; ok {
+			rules[i] = r
+			continue
+		}
+		byName[r.Name] = len(rules)
+		rules = append(rules, r)
+	}
+
+	s.persistDynamicRules(ctx, dynamic)
+
+	installable := mode.Installable(rules, time.Now())
+	s.Printf("rate rules: mode=%s stored+derived=%d installable=%d", mode, len(rules), len(installable))
+
+	if err := s.limitMgr.reconcile(ctx, installable); err != nil {
+		s.Printf("limit update error: %v", err)
+	}
+}
+
+// storedRules reads the persisted rule set. A store that is unreachable is
+// logged and treated as empty rather than fatal: losing the operator's static
+// policy for one cycle is bad, but wedging the poll loop is worse, and the
+// rules already installed in the schedd stay in force until they lapse.
+func (s *Service) storedRules(ctx context.Context) []ratelimit.Rule {
+	rs := s.ruleStore()
+	if rs == nil {
+		return nil
+	}
+	rules, err := rs.ListRules(ctx)
+	if err != nil {
+		s.Printf("rate rule store read error (continuing with derived rules only): %v", err)
+		return nil
+	}
+	return rules
+}
+
+// deriveDynamicRules turns the control loop's RED (user, site) pairs into
+// rules. A pair that is not RED gets no rule, which is what eventually retires
+// its limit.
+func (s *Service) deriveDynamicRules() []ratelimit.Rule {
 	windowMetrics := make(map[UserSitePair]outcomeMetrics)
 	if s.tracker != nil {
 		windowMetrics = aggregateLimitWindowMetrics(s, s.tracker.AllTransfers())
 	}
 
-	// For each user+site pair, check if it's in RED state based on its control metrics
-	userSiteStates := make(map[UserSitePair]control.PairState)
-
-	for pair := range userSitePairs {
-		// Get the limit state for this user+site pair
-		limitState := s.state.LimitState(pair.User, pair.Site)
-
-		// Compute metrics for this user+site pair
+	var rules []ratelimit.Rule
+	for pair := range s.gatherUserSitePairs() {
 		metrics := limitMetrics(s.controlCfg, s.state, s.tracker, pair.User, pair.Site)
 		errorBand := control.ClassifyBand(metrics.ErrorRate, s.controlCfg.ErrorGreenThreshold, s.controlCfg.ErrorYellowThreshold)
 		costBand := control.ClassifyBand(metrics.CostPct/100.0, s.controlCfg.CostGreenThresholdPercent/100.0, s.controlCfg.CostYellowThresholdPercent/100.0)
-
-		if errorBand == control.BandRed || costBand == control.BandRed {
-			userSiteStates[pair] = limitState
+		if errorBand != control.BandRed && costBand != control.BandRed {
+			continue
 		}
+
+		var sources []string
+		if wm, ok := windowMetrics[pair]; ok {
+			sources = wm.sources
+		}
+		rules = append(rules, s.limitMgr.dynamicRule(pair, s.state.LimitState(pair.User, pair.Site), s.controlCfg, sources))
 	}
+	return rules
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := s.limitMgr.updateLimits(ctx, userSiteStates, s.tracker, s.controlCfg, windowMetrics); err != nil {
-		s.Printf("limit update error: %v", err)
+// persistDynamicRules records the controller's current conclusions. Failures
+// are logged, not fatal: the rules are still installed this cycle, they just
+// will not survive a restart.
+func (s *Service) persistDynamicRules(ctx context.Context, rules []ratelimit.Rule) {
+	rs := s.ruleStore()
+	if rs == nil {
+		return
+	}
+	for _, r := range rules {
+		if err := rs.PutRule(ctx, r); err != nil {
+			s.Printf("rate rule store write error for %s: %v", r.Name, err)
+		}
 	}
 }
 
@@ -537,17 +662,18 @@ func (s *Service) ensureLimitManager() error {
 		return nil
 	}
 
-	// Locate the schedd
+	// Locate the schedd through the condor client, so this uses the configured
+	// collector. Building a fresh collector from an empty address instead fails
+	// with "no address specified in client configuration", which leaves limitMgr
+	// nil and silently disables rate limiting altogether.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	collector := htcondor.NewCollector("")
-	location, err := collector.LocateDaemon(ctx, "Schedd", s.scheddName)
+	schedd, err := s.condor.LocateSchedd(ctx)
 	if err != nil {
 		return fmt.Errorf("locate schedd: %w", err)
 	}
-
-	s.schedd = htcondor.NewSchedd(location.Name, location.Address)
+	s.schedd = schedd
 
 	// Get daemon name for limit tags - prefer scheddName from config, fall back to hostname
 	daemonName := s.scheddName
@@ -569,7 +695,7 @@ func (s *Service) ensureLimitManager() error {
 	}
 
 	s.limitMgr = newLimitManager(s.schedd, daemonName, s.siteAttribute, s.logger)
-	s.Printf("initialized limit manager for schedd %s at %s (daemon name: %s)", location.Name, location.Address, daemonName)
+	s.Printf("initialized limit manager for schedd %s (daemon name: %s)", s.schedd.Name(), daemonName)
 
 	return nil
 }

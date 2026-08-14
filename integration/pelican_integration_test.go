@@ -1,4 +1,5 @@
 //go:build integration
+// +build integration
 
 package integration
 
@@ -35,10 +36,9 @@ func TestPelicanIntegration(t *testing.T) {
 	mirrorPath := filepath.Join(rootDir, "job_mirror.json")
 	configPath := filepath.Join(rootDir, "condor_config")
 
-	if err := writeMiniCondorConfig(configPath, rootDir, socketDir, statePath, mirrorPath, t); err != nil {
+	if err := writeMiniCondorConfig(configPath, rootDir, socketDir, statePath, mirrorPath, t, nil); err != nil {
 		t.Fatalf("write condor config: %v", err)
 	}
-	t.Setenv("_CONDOR_CONFIG", configPath)
 	t.Setenv("CONDOR_CONFIG", configPath)
 
 	seedEpochHistory(t, projectRoot, filepath.Join(rootDir, "spool"))
@@ -153,7 +153,7 @@ func TestPelicanIntegration(t *testing.T) {
 	}
 }
 
-func writeMiniCondorConfig(configFile, localDir, socketDir, statePath, mirrorPath string, t *testing.T) error {
+func writeMiniCondorConfig(configFile, localDir, socketDir, statePath, mirrorPath string, t *testing.T, extraConfig map[string]string) error {
 	sbinLine, libexecLine := detectCondorPaths(t)
 	if err := os.MkdirAll(filepath.Join(localDir, "log"), 0o755); err != nil {
 		return err
@@ -174,7 +174,11 @@ RUN = $(LOCAL_DIR)/run
 LOCK = $(LOCAL_DIR)/lock
 DAEMON_LIST = MASTER, COLLECTOR, SHARED_PORT, NEGOTIATOR, SCHEDD, STARTD
 SCHEDD_NAME = integration_schedd
-PELICAN_MANAGER_SCHEDD_NAME = integration_schedd@$(FULL_HOSTNAME)
+# Deliberately the bare name, not integration_schedd@$(FULL_HOSTNAME): that is
+# how operators actually set SCHEDD_NAME, and the schedd advertises it qualified
+# with its own idea of the hostname (which here is "localhost", from
+# NETWORK_INTERFACE). Hardcoding the qualified form made every schedd lookup miss.
+PELICAN_MANAGER_SCHEDD_NAME = integration_schedd
 SCHEDD_INTERVAL = 5
 UPDATE_INTERVAL = 5
 CONDOR_HOST = 127.0.0.1
@@ -182,6 +186,9 @@ NETWORK_INTERFACE = 127.0.0.1
 BIND_ALL_INTERFACES = False
 USE_SHARED_PORT = True
 DAEMON_SOCKET_DIR = %s
+# sun_path is capped at 104 bytes on macOS; SPOOL under the test's temp dir
+# exceeds it, so the sandbox socket goes in the short socket dir instead.
+PELICAN_REGISTRATION_SOCKET = $(DAEMON_SOCKET_DIR)/pelican_manager.sock
 COLLECTOR_HOST = 127.0.0.1:0
 COLLECTOR_ADDRESS_FILE = $(LOG)/.collector_address
 SCHEDD_ADDRESS_FILE = $(LOG)/.schedd_address
@@ -200,11 +207,13 @@ ALLOW_ADMINISTRATOR = *
 ALLOW_NEGOTIATOR = *
 ALLOW_OWNER = *
 ALLOW_CLIENT = *
+ALLOW_DAEMON = *
 SEC_DEFAULT_AUTHENTICATION = OPTIONAL
 SEC_DEFAULT_ENCRYPTION = OPTIONAL
 SEC_DEFAULT_INTEGRITY = OPTIONAL
+PELICAN_MANAGER_LOG = $(LOG)/PelicanManagerLog
 PELICAN_MANAGER_STATS_WINDOW = 5m
-PELICAN_MANAGER_ADVERTISE_INTERVAL = 5m
+PELICAN_MANAGER_ADVERTISE_INTERVAL = 5s
 PELICAN_MANAGER_POLL_INTERVAL = 1s
 PELICAN_MANAGER_JOB_MIRROR_PATH = %s
 PELICAN_MANAGER_STATE_PATH = %s
@@ -223,6 +232,14 @@ NEGOTIATOR_INTERVAL = 5
 NEGOTIATOR_CYCLE_DELAY = 1
 %s%s
 `, localDir, socketDir, mirrorPath, statePath, sbinLine, libexecLine)
+
+	// Append extra config overrides
+	if len(extraConfig) > 0 {
+		config += "\n"
+		for k, v := range extraConfig {
+			config += fmt.Sprintf("%s = %s\n", k, v)
+		}
+	}
 
 	return os.WriteFile(configFile, []byte(config), 0o644)
 }
@@ -425,20 +442,63 @@ func stripHostPort(sinful string) string {
 }
 
 func buildPelicanBinary(t *testing.T, workDir string) (string, error) {
-	binPath := filepath.Join(workDir, "pelican_man")
+	return buildBinary(t, workDir, "pelican_man")
+}
+
+// buildWebBinary builds the standalone HTTP daemon. pelican_man serves no HTTP,
+// so any test that touches the sandbox API has to run pelican_web too.
+func buildWebBinary(t *testing.T, workDir string) (string, error) {
+	return buildBinary(t, workDir, "pelican_web")
+}
+
+// buildBinary produces the named daemon under workDir.
+//
+// PELICAN_MANAGER_BINARY / PELICAN_WEB_BINARY short-circuit the build with an
+// already-compiled binary, which is what the root test needs: `go build` as root
+// would want a root-owned module cache, so CI compiles as the normal user and
+// runs only the test binary privileged. The binary is copied into workDir so it
+// sits inside the tree the test has made readable by the condor user.
+func buildBinary(t *testing.T, workDir, name string) (string, error) {
+	binPath := filepath.Join(workDir, name)
+
+	if prebuilt := os.Getenv(prebuiltEnvVar(name)); prebuilt != "" {
+		if err := copyExecutable(prebuilt, binPath); err != nil {
+			return "", fmt.Errorf("copying prebuilt %s from %s: %w", name, prebuilt, err)
+		}
+		t.Logf("using prebuilt %s from %s", name, prebuilt)
+		return binPath, nil
+	}
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", fmt.Errorf("getwd: %w", err)
 	}
 	moduleRoot := filepath.Dir(cwd)
-	cmd := exec.Command("go", "build", "-o", binPath, "./cmd/pelican_man")
+	cmd := exec.Command("go", "build", "-o", binPath, "./cmd/"+name)
 	cmd.Env = os.Environ()
 	cmd.Dir = moduleRoot
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("go build: %v (%s)", err, string(out))
+		return "", fmt.Errorf("go build %s: %v (%s)", name, err, string(out))
 	}
 	return binPath, nil
+}
+
+// prebuiltEnvVar names the override for a daemon binary: pelican_man ->
+// PELICAN_MANAGER_BINARY, pelican_web -> PELICAN_WEB_BINARY.
+func prebuiltEnvVar(name string) string {
+	if name == "pelican_man" {
+		return "PELICAN_MANAGER_BINARY"
+	}
+	return "PELICAN_WEB_BINARY"
+}
+
+func copyExecutable(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0o755)
 }
 
 func submitSleepJob(ctx context.Context, workDir, collectorAddr, scheddAddr string) (int64, error) {
@@ -640,7 +700,7 @@ func verifyPelicanSummaryAds(ctx context.Context, collectorAddr string, timeout 
 
 	for time.Now().Before(deadline) {
 		queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		ads, err := col.QueryAdsWithProjection(queryCtx, "Any", "MyType == \"PelicanSummary\"", []string{
+		ads, _, err := col.QueryAdsWithOptions(queryCtx, "PelicanSummary", "true", &htcondor.QueryOptions{Projection: []string{
 			"Name",
 			"MyType",
 			"ScheddName",
@@ -650,7 +710,7 @@ func verifyPelicanSummaryAds(ctx context.Context, collectorAddr string, timeout 
 			"WindowFailureCount",
 			"ControlErrorBand",
 			"ControlCostBand",
-		})
+		}})
 		cancel()
 
 		if err != nil {
@@ -660,6 +720,12 @@ func verifyPelicanSummaryAds(ctx context.Context, collectorAddr string, timeout 
 		}
 
 		if len(ads) == 0 {
+			// Check if info file exists as a debugging aid
+			if infoPath, ok := os.LookupEnv("PELICAN_MANAGER_INFO_PATH"); ok {
+				if data, err := os.ReadFile(infoPath); err == nil {
+					t.Logf("DEBUG: info file exists with %d bytes", len(data))
+				}
+			}
 			t.Logf("no PelicanSummary ads found yet (retrying)")
 			time.Sleep(2 * time.Second)
 			continue
