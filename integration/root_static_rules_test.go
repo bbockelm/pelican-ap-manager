@@ -490,13 +490,23 @@ func submitJobForSandbox(t *testing.T, ctx context.Context, env *rootPool) int64
 	}
 
 	submitFile := writeSandboxSubmitFile(t, env.rootDir)
-	// su rather than the Go API: setuid in a running Go process affects only the
-	// calling thread, so dropping this process is not an option.
-	cmd := exec.CommandContext(ctx, "su", submitAsUser, "-s", "/bin/sh", "-c",
-		fmt.Sprintf("CONDOR_CONFIG=%s condor_submit -terse %s", env.configPath, submitFile))
-	out, err := cmd.CombinedOutput()
+	// An external command rather than the Go API: setuid in a running Go process
+	// affects only the calling thread, so this process cannot drop for one call.
+	//
+	// runuser rather than su: su goes through PAM, which commonly refuses a
+	// login for a locked system account like condor even when the caller is
+	// root. runuser is the root-only tool that skips authentication.
+	script := fmt.Sprintf("CONDOR_CONFIG=%s condor_submit -terse %s", env.configPath, submitFile)
+	out, err := exec.CommandContext(ctx, "runuser", "-u", submitAsUser, "--", "/bin/sh", "-c", script).CombinedOutput()
 	if err != nil {
-		t.Logf("condor_submit output:\n%s", string(out))
+		t.Logf("runuser -u %s -- sh -c %q\nexit: %v\noutput: %q", submitAsUser, script, err, string(out))
+		// An empty output means the wrapper failed before condor_submit ran, so
+		// report what the account actually looks like.
+		if id, ierr := exec.Command("getent", "passwd", submitAsUser).CombinedOutput(); ierr == nil {
+			t.Logf("passwd entry: %s", strings.TrimSpace(string(id)))
+		} else {
+			t.Logf("no passwd entry for %s: %v", submitAsUser, ierr)
+		}
 		printHTCondorLogs(env.rootDir, t)
 		t.Fatalf("submitting as %s: %v", submitAsUser, err)
 	}
