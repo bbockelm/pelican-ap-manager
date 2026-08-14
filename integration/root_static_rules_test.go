@@ -96,6 +96,15 @@ func assertStaticRuleBehavior(t *testing.T, env *rootPool) {
 	// The rules are persisted, not merely held in memory.
 	assertRulesPersisted(t, env)
 
+	// Record how each daemon got its command socket (see the function comment:
+	// this is an observation, not a claim).
+	logCommandSocketMode(t, env)
+
+	// An admin can see all of this from the command line. HTCondor exposes no
+	// way to list startup limits, so if these commands regress there is no
+	// other way to answer "is my rule actually in force?".
+	assertInspectionCLI(t, env)
+
 	// The web daemon observes sandboxes: a job's sandbox registers and its input
 	// can be fetched back with the issued token.
 	assertSandboxObserved(t, env)
@@ -109,6 +118,7 @@ type rootPool struct {
 	scheddAddr string
 	socketPath string
 	rulesPath  string
+	managerBin string
 
 	// droppedPrivileges records whether the daemons were meant to drop to the
 	// condor user, which gates the ownership assertions.
@@ -257,6 +267,7 @@ func setupPool(t *testing.T, opts poolOptions) *rootPool {
 	}
 
 	env := &rootPool{
+		managerBin: managerPath,
 		rootDir:    rootDir,
 		socketDir:  socketDir,
 		configPath: configPath,
@@ -579,6 +590,69 @@ func writeSandboxSubmitFile(t *testing.T, workDir string) string {
 		t.Fatalf("write submit file: %v", err)
 	}
 	return submitPath
+}
+
+// logCommandSocketMode records how each daemon obtained its command socket:
+// an endpoint inherited from condor_master, or one it self-registered in the
+// shared-port directory.
+//
+// Deliberately an observation, not an assertion. Setting DC_DAEMON_LIST is what
+// HTCondor's own source says makes the master treat a third-party daemon as
+// DaemonCore, but with it set here the master still passes no SharedPort token
+// and the daemons take the self-registering path -- which works, and which is
+// how they are reachable today. Asserting either way would be encoding a
+// behavior nobody has confirmed.
+func logCommandSocketMode(t *testing.T, env *rootPool) {
+	t.Helper()
+
+	for _, name := range []string{"PelicanManagerLog", "PelicanWebLog"} {
+		log := readFileString(t, filepath.Join(env.rootDir, "log", name))
+		switch {
+		case strings.Contains(log, "accepting shared-port forwarded connections"):
+			t.Logf("%s: adopted the shared-port endpoint inherited from condor_master", name)
+		case strings.Contains(log, "self-registered shared-port endpoint"):
+			t.Logf("%s: self-registered a shared-port endpoint (no SharedPort token inherited)", name)
+		default:
+			t.Logf("%s: bound its own command socket", name)
+		}
+	}
+}
+
+// assertInspectionCLI runs `pelican_man -limits` and `-rules` against the live
+// pool and checks they report the rules that are actually installed.
+func assertInspectionCLI(t *testing.T, env *rootPool) {
+	t.Helper()
+
+	run := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command(env.managerBin, args...)
+		cmd.Env = append(os.Environ(), "CONDOR_CONFIG="+env.configPath)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s %v: %v\n%s", env.managerBin, args, err, string(out))
+		}
+		return string(out)
+	}
+
+	limits := run("-limits")
+	t.Logf("pelican_man -limits:\n%s", limits)
+	for name := range expectedLimits {
+		if !strings.Contains(limits, name) {
+			t.Errorf("-limits did not report %q; got:\n%s", name, limits)
+		}
+	}
+
+	rules := run("-rules")
+	t.Logf("pelican_man -rules:\n%s", rules)
+	for _, name := range []string{"slow_ucsd", "all_psu"} {
+		if !strings.Contains(rules, name) {
+			t.Errorf("-rules did not report %q; got:\n%s", name, rules)
+		}
+	}
+	// The mode is the thing an admin most needs this command to be honest about.
+	if !strings.Contains(rules, "Enforcement mode: observing") {
+		t.Errorf("-rules did not report observing mode; got:\n%s", rules)
+	}
 }
 
 // requireCondorMaster skips (or fails, under requireRootEnv) when there is no
