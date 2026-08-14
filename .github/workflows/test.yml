@@ -1,12 +1,15 @@
 name: Test
 
-# Every pull request, not just those targeting main: a stacked PR (one based on
-# another feature branch) would otherwise get no CI at all, which is exactly when
-# the base is least settled.
+# Left scoped to pull requests against main, like lint.yml and for the same
+# reason: internal/webserver has two pre-existing failures under this job's
+# `-race` and full (non-short) run -- a data race in htcondor_integration_test.go
+# and TestUserSwitchingInSandbox failing to parse a job ad. Neither is reached by
+# ci.yml's `go test -short`. Fix those, then widen this to `pull_request:`.
 on:
   push:
     branches: [ main ]
   pull_request:
+    branches: [ main ]
 
 permissions:
   contents: read

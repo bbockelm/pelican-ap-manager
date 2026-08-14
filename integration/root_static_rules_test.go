@@ -451,11 +451,7 @@ func assertSandboxObserved(t *testing.T, env *rootPool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	clusterID, err := submitSandboxJob(ctx, env.rootDir, env.scheddAddr)
-	if err != nil {
-		printHTCondorLogs(env.rootDir, t)
-		t.Fatalf("submit job: %v", err)
-	}
+	clusterID := submitJobForSandbox(t, ctx, env)
 
 	jobAd, err := fetchJobAd(ctx, env.scheddAddr, clusterID)
 	if err != nil {
@@ -472,6 +468,89 @@ func assertSandboxObserved(t *testing.T, env *rootPool) {
 	if _, ok := files["input.txt"]; !ok {
 		t.Errorf("input sandbox is missing input.txt; got %v", keys(files))
 	}
+}
+
+// submitJobForSandbox puts one job in the queue and returns its cluster id.
+//
+// HTCondor refuses to accept a submission from root ("NewCluster failed with
+// error code 13"), so the privileged variant cannot use the Go submit API
+// directly -- the whole process is root. It shells out to condor_submit through
+// an unprivileged account instead. Only the job ad is needed downstream, so the
+// job does not have to run.
+func submitJobForSandbox(t *testing.T, ctx context.Context, env *rootPool) int64 {
+	t.Helper()
+
+	if !env.droppedPrivileges {
+		clusterID, err := submitSandboxJob(ctx, env.rootDir, env.scheddAddr)
+		if err != nil {
+			printHTCondorLogs(env.rootDir, t)
+			t.Fatalf("submit job: %v", err)
+		}
+		return clusterID
+	}
+
+	submitFile := writeSandboxSubmitFile(t, env.rootDir)
+	// su rather than the Go API: setuid in a running Go process affects only the
+	// calling thread, so dropping this process is not an option.
+	cmd := exec.CommandContext(ctx, "su", submitAsUser, "-s", "/bin/sh", "-c",
+		fmt.Sprintf("CONDOR_CONFIG=%s condor_submit -terse %s", env.configPath, submitFile))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Logf("condor_submit output:\n%s", string(out))
+		printHTCondorLogs(env.rootDir, t)
+		t.Fatalf("submitting as %s: %v", submitAsUser, err)
+	}
+
+	// -terse prints "cluster.proc - cluster.proc".
+	var cluster, proc int64
+	if _, serr := fmt.Sscanf(strings.TrimSpace(string(out)), "%d.%d", &cluster, &proc); serr != nil {
+		t.Fatalf("parsing condor_submit -terse output %q: %v", string(out), serr)
+	}
+	return cluster
+}
+
+// submitAsUser is the unprivileged account the privileged variant submits as.
+// The condor account already owns the pool directory, so it can read the job
+// files and write the job log.
+const submitAsUser = "condor"
+
+// writeSandboxSubmitFile lays down the job and its input, and returns the path
+// to the submit description.
+func writeSandboxSubmitFile(t *testing.T, workDir string) string {
+	t.Helper()
+
+	scriptPath := filepath.Join(workDir, "job.sh")
+	inputPath := filepath.Join(workDir, "input.txt")
+	submitPath := filepath.Join(workDir, "job.sub")
+	resultPath := filepath.Join(workDir, "result.txt")
+
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nset -e\ncat input.txt > result.txt\n"), 0o755); err != nil {
+		t.Fatalf("write job script: %v", err)
+	}
+	if err := os.WriteFile(inputPath, []byte("pelican_input"), 0o644); err != nil {
+		t.Fatalf("write input file: %v", err)
+	}
+
+	submit := fmt.Sprintf(
+		"executable = %s\n"+
+			"output = stdout.txt\n"+
+			"error = stderr.txt\n"+
+			"log = job.log\n"+
+			"initialdir = %s\n"+
+			"transfer_input_files = %s\n"+
+			"transfer_output_files = result.txt\n"+
+			"transfer_output_remaps = \"result.txt=%s\"\n"+
+			"should_transfer_files = YES\n"+
+			"when_to_transfer_output = ON_EXIT\n"+
+			"transfer_executable = True\n"+
+			"leave_in_queue = True\n"+
+			"queue\n",
+		scriptPath, workDir, inputPath, resultPath,
+	)
+	if err := os.WriteFile(submitPath, []byte(submit), 0o644); err != nil {
+		t.Fatalf("write submit file: %v", err)
+	}
+	return submitPath
 }
 
 // requireCondorMaster skips (or fails, under requireRootEnv) when there is no

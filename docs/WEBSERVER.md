@@ -119,7 +119,7 @@ Upload the output sandbox for a job as a gzipped tarball. The tarball is extract
 **Request Body:** Gzipped tarball data
 
 **Authentication:**
-- Unix socket: Authenticated via UID/GID of connecting process  
+- Unix socket: Authenticated via UID/GID of connecting process
 - TCP: Requires valid bearer token
 
 **Extraction Behavior:**

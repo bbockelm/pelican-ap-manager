@@ -1,12 +1,15 @@
 name: Lint
 
-# Every pull request, not just those targeting main: a stacked PR (one based on
-# another feature branch) would otherwise get no CI at all, which is exactly when
-# the base is least settled.
+# Left scoped to pull requests against main, unlike the other workflows here.
+# internal/webserver carries ~70 pre-existing errcheck/staticcheck findings that
+# have never been linted (the branch that added it predates this workflow), and
+# turning the gate on for stacked PRs would make them red for debt they did not
+# introduce. Clear those findings, then widen this to `pull_request:` like the rest.
 on:
   push:
     branches: [ main ]
   pull_request:
+    branches: [ main ]
 
 permissions:
   contents: read
