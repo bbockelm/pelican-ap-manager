@@ -61,6 +61,12 @@ func main() {
 func run() error {
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	oneshot := flag.Bool("oneshot", false, "run a single poll/advertise cycle and print findings")
+	// Inspection commands. HTCondor has no way to list startup limits, so these
+	// are the only way to see what is actually in force.
+	showLimits := flag.Bool("limits", false, "list the startup limits installed in the schedd, then exit")
+	showLimitsAll := flag.Bool("limits-all", false, "as -limits, but include limits installed by anything else")
+	showRules := flag.Bool("rules", false, "list the stored rate rules and whether each is enforced, then exit")
+	toolDebug := flag.Bool("debug", false, "with -limits/-rules, keep the library's connection logging on stderr")
 	scheddFlag := flag.String("schedd", "", "override schedd name")
 	collectorFlag := flag.String("collector", "", "override collector host")
 	infoPath := flag.String("info-path", "", "write info ClassAds to the given file (default: SPOOL/pelican_info.json)")
@@ -82,6 +88,16 @@ func run() error {
 	})
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
+	}
+
+	// The inspection commands run before the daemon bootstrap on purpose: they
+	// are tools an admin runs on the AP, and they must not drop privileges,
+	// open the daemon log, or announce themselves to condor_master.
+	switch {
+	case *showLimits || *showLimitsAll:
+		return reportLimits(context.Background(), condorCfg, os.Stdout, *showLimitsAll, *toolDebug)
+	case *showRules:
+		return reportRules(context.Background(), condorCfg, os.Stdout, *toolDebug)
 	}
 
 	// Bootstrap: HTCondor logging, condor_master integration (DC_SET_READY +

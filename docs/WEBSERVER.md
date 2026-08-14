@@ -5,9 +5,12 @@ The `pelican_web` daemon manages job sandboxes over HTTP, on a Unix domain socke
 `pelican_web` is a separate daemon from `pelican_man`, which serves no HTTP at all. Keeping them apart is what lets `pelican_man` avoid linking the web stack (OAuth2/OIDC, OpenTelemetry, sqlite) — roughly half its binary size. Add it to `DAEMON_LIST` alongside `PELICAN_MANAGER`:
 
 ```
-PELICAN_WEB = /usr/sbin/pelican_web
-DAEMON_LIST = $(DAEMON_LIST), PELICAN_MANAGER, PELICAN_WEB
+PELICAN_WEB    = /usr/sbin/pelican_web
+DAEMON_LIST    = $(DAEMON_LIST) PELICAN_MANAGER PELICAN_WEB
+DC_DAEMON_LIST = +PELICAN_MANAGER PELICAN_WEB
 ```
+
+`DC_DAEMON_LIST` marks the daemon as a DaemonCore daemon so `condor_master` manages its command socket. The built-in list covers only HTCondor's own daemons, so a third-party one has to be added.
 
 Without `PELICAN_WEB` running, Pelican transfer plugins cannot register sandboxes.
 

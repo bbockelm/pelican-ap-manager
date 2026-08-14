@@ -9,16 +9,47 @@ They are separate binaries so `pelican_man` does not link the web stack (OAuth2/
 
 ---
 
+## Install
+
+Download the archive for your platform from the [releases page](https://github.com/bbockelm/pelican-ap-manager/releases) and unpack it over `/usr`:
+
+```bash
+tar -xzf pelican-ap-manager_<version>_linux_amd64.tar.gz --strip-components=1 -C /usr
+```
+
+That puts `pelican_man` and `pelican_web` in `/usr/sbin` — where `condor_master` expects to find daemons — and the docs plus a ready-made drop-in configuration under `/usr/share/doc/pelican-ap-manager/`.
+
+Verify, and check the checksums against `SHA256SUMS.txt` from the same release:
+
+```bash
+pelican_man -version
+pelican_web -version
+```
+
+The archive deliberately does **not** install anything into `/etc/condor/config.d`: dropping a file there would start both daemons on your next `condor_reconfig`, which is your decision rather than the tarball's. Copy the example when you are ready:
+
+```bash
+cp /usr/share/doc/pelican-ap-manager/99-pelican-manager.conf /etc/condor/config.d/
+```
+
 ## Quick start: observe everything, enforce only what you wrote
 
 This is the configuration most sites should start from. The control loop runs, classifies every (user, site) pair, and publishes what it *would* do — but the only limits actually installed are the ones you wrote by hand.
 
 ```
-# /etc/condor/config.d/50-pelican-manager.conf
+# /etc/condor/config.d/99-pelican-manager.conf
 
 PELICAN_MANAGER = /usr/sbin/pelican_man
 PELICAN_WEB     = /usr/sbin/pelican_web
-DAEMON_LIST     = $(DAEMON_LIST) PELICAN_MANAGER PELICAN_WEB
+
+# Start them...
+DAEMON_LIST = $(DAEMON_LIST) PELICAN_MANAGER PELICAN_WEB
+
+# ...and mark them as DaemonCore daemons, which is what makes condor_master
+# manage their command socket. The built-in list covers only HTCondor's own
+# daemons, so a third-party one has to be added; the leading + appends rather
+# than replacing.
+DC_DAEMON_LIST = +PELICAN_MANAGER PELICAN_WEB
 
 # Watch, but do not act on the controller's own conclusions.
 PELICAN_MANAGER_ENFORCEMENT_MODE = observing
@@ -46,11 +77,27 @@ Confirm it took:
 condor_ping -type PELICAN_MANAGER DC_NOP
 condor_ping -type PELICAN_WEB     DC_NOP
 
-# Your rules are installed in the schedd.
-condor_q -limits
+# What the daemon has decided, and whether each rule is being enforced.
+pelican_man -rules
+
+# What is actually installed in the schedd right now.
+pelican_man -limits
 ```
 
-You should see two limits, `pelican_static_ligo_ucsd` and `pelican_static_psu_all`. If you see limits named `pelican_dynamic_*`, you are in `enforcing` mode, not `observing`.
+```
+$ pelican_man -limits
+Startup limits in schedd submit-1@ap.example.org:
+
+NAME                       RATE     ALLOWED  SKIPPED  LAST HIT   EXPRESSION
+pelican_static_ligo_ucsd   20/1m0s  431      12       3m14s ago  ((MY.Owner =?= "ligo") && (TARGET.MachineAttrGLIDE…
+pelican_static_psu_all     5/2m0s   88       0        never      (TARGET.MachineAttrGLIDEIN_ResourceName0 =?= "PSU-…
+
+SKIPPED counts jobs this limit held back. LAST HIT is when it last did so.
+```
+
+You should see one limit per static rule. If you see limits named `pelican_dynamic_*`, you are in `enforcing` mode, not `observing`.
+
+HTCondor itself has no command for this — startup limits live inside the schedd and no `condor_q` or `condor_status` option lists them — which is why `pelican_man` provides it.
 
 When you are ready to let the controller act:
 
@@ -227,8 +274,8 @@ condor_status -any -constraint 'MyType == "PelicanSummary"'
 # observing mode.
 condor_status -any -constraint 'MyType == "PelicanLimit"'
 
-# What is actually installed in the schedd right now.
-condor_q -limits
+# What is actually installed in the schedd right now, from any source.
+pelican_man -limits-all
 ```
 
 Attribute references: [summary ads](docs/pelican-summary-ad-attributes.md), [limit ads](docs/pelican-limit-ad-attributes.md).
@@ -239,7 +286,7 @@ Attribute references: [summary ads](docs/pelican-summary-ad-attributes.md), [lim
 
 ## Troubleshooting
 
-**No limits appear in `condor_q -limits`.**
+**No limits appear in `pelican_man -limits`.**
 Check `PelicanManagerLog` for `limit manager init error`. The manager locates the schedd through `PELICAN_MANAGER_COLLECTOR_HOST`; if the collector is unreachable or the schedd name matches nothing, rate limiting is disabled and the daemon otherwise runs normally. `PELICAN_MANAGER_SCHEDD_NAME` may be set to a name no schedd advertises.
 
 **A `site=` rule never matches.**
@@ -248,11 +295,14 @@ Check `PelicanManagerLog` for `limit manager init error`. The manager locates th
 **`pelican_man` will not start.**
 A malformed rate rule is fatal by design. The log names the offending macro and what it could not parse.
 
+**`condor_ping -type PELICAN_MANAGER` cannot reach the daemon.**
+Check `DC_DAEMON_LIST` includes it, and read the daemon's own account of how it got its command socket — it logs one of *"accepting shared-port forwarded connections"* (inherited from the master), *"self-registered shared-port endpoint"* (its own entry in `DAEMON_SOCKET_DIR`, which is still reachable), or a plain bind. The address file (`$(LOG)/.pelican_manager_address`) holds whichever address it settled on.
+
 **Transfer plugins cannot register sandboxes.**
-`pelican_web` must be in `DAEMON_LIST`; `pelican_man` serves no HTTP. Check `PelicanWebLog` and that `PELICAN_REGISTRATION_SOCKET` is on a short path — a Unix socket path is capped at ~104 bytes.
+`pelican_web` must be in `DAEMON_LIST` and `DC_DAEMON_LIST`; `pelican_man` serves no HTTP. Check `PelicanWebLog` and that `PELICAN_REGISTRATION_SOCKET` is on a short path — a Unix socket path is capped at ~104 bytes.
 
 **Limits exist but nothing is throttled.**
-A rule with `rate=0` counts without blocking, by design. Also confirm the rule's expression matches the jobs you expect: `condor_q -limits -long` shows it.
+A rule with `rate=0` counts without blocking, by design — `pelican_man -limits` shows those as `monitor only`. Otherwise check the `SKIPPED` column: if it is 0 and `LAST HIT` is `never`, the rule's expression is not matching the jobs you expect. The expression is printed alongside it.
 
 ---
 

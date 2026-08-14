@@ -185,6 +185,10 @@ CONDOR_HOST = 127.0.0.1
 NETWORK_INTERFACE = 127.0.0.1
 BIND_ALL_INTERFACES = False
 USE_SHARED_PORT = True
+# Marks the pelican daemons as DaemonCore daemons, which is what the README
+# tells operators to configure -- so the tests run that configuration rather
+# than one no deployment uses.
+DC_DAEMON_LIST = +PELICAN_MANAGER PELICAN_WEB
 DAEMON_SOCKET_DIR = %s
 # sun_path is capped at 104 bytes on macOS; SPOOL under the test's temp dir
 # exceeds it, so the sandbox socket goes in the short socket dir instead.
