@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
+	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/pelican-ap-manager/internal/state"
 )
 
@@ -64,4 +65,11 @@ type CondorClient interface {
 	FetchJobEpochs(sinceEpoch state.EpochID, cutoff time.Time) ([]JobEpochRecord, state.EpochID, error)
 	AdvertiseClassAds(payload []map[string]any) error
 	QueryJobs(ctx context.Context, constraint string, projection []string) ([]*classad.ClassAd, error)
+
+	// LocateSchedd resolves the schedd this manager is responsible for. It is
+	// on the interface because the rate-limit manager needs the same schedd the
+	// history queries use -- and, critically, the same configured collector. A
+	// second lookup built from an empty collector address fails with "no address
+	// specified in client configuration", which silently disables rate limiting.
+	LocateSchedd(ctx context.Context) (*htcondor.Schedd, error)
 }

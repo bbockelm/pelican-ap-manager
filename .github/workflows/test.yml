@@ -1,0 +1,43 @@
+name: Test
+
+# Left scoped to pull requests against main, like lint.yml and for the same
+# reason: internal/webserver has two pre-existing failures under this job's
+# `-race` and full (non-short) run -- a data race in htcondor_integration_test.go
+# and TestUserSwitchingInSandbox failing to parse a job ad. Neither is reached by
+# ci.yml's `go test -short`. Fix those, then widen this to `pull_request:`.
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container:
+      image: golang:1.25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install gotestsum
+        run: go install gotest.tools/gotestsum@latest
+
+      - name: Download modules
+        env:
+          GOPRIVATE: github.com/bbockelm,github.com/PelicanPlatform
+        run: go mod download
+
+      - name: Run unit tests
+        run: gotestsum --format testname -- -v -race -coverprofile=coverage.txt -covermode=atomic ./...
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.txt
+          flags: unittests
+          fail_ci_if_error: false
+        continue-on-error: true

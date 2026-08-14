@@ -1,0 +1,54 @@
+name: Lint
+
+# Left scoped to pull requests against main, unlike the other workflows here.
+# internal/webserver carries ~70 pre-existing errcheck/staticcheck findings that
+# have never been linted (the branch that added it predates this workflow), and
+# turning the gate on for stacked PRs would make them red for debt they did not
+# introduce. Clear those findings, then widen this to `pull_request:` like the rest.
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  golangci-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          args: --timeout=5m
+
+  gofmt:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check formatting
+        run: |
+          set -euo pipefail
+          gofmt -l $(go list -f '{{.Dir}}' ./...) > /tmp/gofmt.out
+          if [ -s /tmp/gofmt.out ]; then
+            echo "Go files need formatting:" && cat /tmp/gofmt.out
+            exit 1
+          fi

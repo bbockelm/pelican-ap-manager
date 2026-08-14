@@ -662,17 +662,18 @@ func (s *Service) ensureLimitManager() error {
 		return nil
 	}
 
-	// Locate the schedd
+	// Locate the schedd through the condor client, so this uses the configured
+	// collector. Building a fresh collector from an empty address instead fails
+	// with "no address specified in client configuration", which leaves limitMgr
+	// nil and silently disables rate limiting altogether.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	collector := htcondor.NewCollector("")
-	location, err := collector.LocateDaemon(ctx, "Schedd", s.scheddName)
+	schedd, err := s.condor.LocateSchedd(ctx)
 	if err != nil {
 		return fmt.Errorf("locate schedd: %w", err)
 	}
-
-	s.schedd = htcondor.NewSchedd(location.Name, location.Address)
+	s.schedd = schedd
 
 	// Get daemon name for limit tags - prefer scheddName from config, fall back to hostname
 	daemonName := s.scheddName
@@ -694,7 +695,7 @@ func (s *Service) ensureLimitManager() error {
 	}
 
 	s.limitMgr = newLimitManager(s.schedd, daemonName, s.siteAttribute, s.logger)
-	s.Printf("initialized limit manager for schedd %s at %s (daemon name: %s)", location.Name, location.Address, daemonName)
+	s.Printf("initialized limit manager for schedd %s (daemon name: %s)", s.schedd.Name(), daemonName)
 
 	return nil
 }

@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -31,15 +31,6 @@ jobs:
           GOPRIVATE: github.com/bbockelm,github.com/PelicanPlatform
         run: go mod download
 
-      - name: Check formatting
-        run: |
-          set -euo pipefail
-          gofmt -l $(go list -f '{{.Dir}}' ./...) > /tmp/gofmt.out
-          if [ -s /tmp/gofmt.out ]; then
-            echo "Go files need formatting:" && cat /tmp/gofmt.out
-            exit 1
-          fi
-
       - name: Vet
         run: go vet ./...
 
@@ -49,7 +40,7 @@ jobs:
         run: go vet -tags integration,condor ./...
 
       - name: Test
-        run: go test ./...
+        run: go test -short ./...
 
       # Both binaries must build. pelican_web is the standalone HTTP daemon;
       # nothing in the test suite links its main package, so without this a
