@@ -174,6 +174,23 @@ expr=(JOB.RequestMemory > 32768 && TARGET.HasSingularity) rate=4
 user=* rate=500 window=60s
 ```
 
+### Limits are leases, not settings
+
+A rule you declare is permanent; the schedd limit derived from it is not. Every limit `pelican_man` installs carries a short lease — 60 seconds by default — and the daemon renews it on every poll cycle.
+
+That is deliberate. These limits exist only because `pelican_man` decided they should, and it is the only thing that can decide they should not. If it dies, a lease means whatever it was throttling returns to full rate within about a minute, rather than staying throttled until somebody notices an unexplained limit in the schedd.
+
+```
+PELICAN_MANAGER_LIMIT_LEASE = 60s
+```
+
+Two constraints:
+
+- The schedd clamps any requested lease to `STARTUP_LIMIT_MAX_EXPIRATION` (5 minutes by default), so raising this above that has no effect without raising the schedd's knob too.
+- Renewal happens once per poll cycle, so `PELICAN_MANAGER_POLL_INTERVAL` must be shorter than the lease. The daemon warns at startup if it is not, because limits would otherwise lapse between cycles and enforcement would come and go.
+
+A lapsed limit is not fatal: the next cycle reinstalls it. But the gap is real, so the two intervals are worth keeping well apart.
+
 ### Where rules live
 
 Rules are persisted so they survive a restart and can be inspected while running. By default that is a JSON document under `SPOOL`:
@@ -209,6 +226,7 @@ All settings come from HTCondor configuration macros, resolved the same way `con
 | `PELICAN_MANAGER_RULE_STORE_PATH` | `$(SPOOL)/pelican_rate_rules.json` | JSON rule store. |
 | `PELICAN_MANAGER_RULE_DB_ADDRESS` | — | htcondordb address; overrides the JSON store. |
 | `PELICAN_MANAGER_RULE_DB_TABLE` | `pelican_rate_rules` | Table name in htcondordb. |
+| `PELICAN_MANAGER_LIMIT_LEASE` | `60s` | How long an installed limit survives without renewal. Must exceed the poll interval; capped by the schedd's `STARTUP_LIMIT_MAX_EXPIRATION`. |
 
 ### Polling and aggregation
 
@@ -300,6 +318,9 @@ Check `DC_DAEMON_LIST` includes it, and read the daemon's own account of how it 
 
 **Transfer plugins cannot register sandboxes.**
 `pelican_web` must be in `DAEMON_LIST` and `DC_DAEMON_LIST`; `pelican_man` serves no HTTP. Check `PelicanWebLog` and that `PELICAN_REGISTRATION_SOCKET` is on a short path — a Unix socket path is capped at ~104 bytes.
+
+**Limits appear and disappear.**
+The lease is not being renewed often enough. `PELICAN_MANAGER_POLL_INTERVAL` must be shorter than `PELICAN_MANAGER_LIMIT_LEASE`; the daemon logs a warning at startup when it is not. A limit that lapses is reinstalled on the next cycle, so the symptom is intermittent enforcement rather than none.
 
 **Limits exist but nothing is throttled.**
 A rule with `rate=0` counts without blocking, by design — `pelican_man -limits` shows those as `monitor only`. Otherwise check the `SKIPPED` column: if it is 0 and `LAST HIT` is `never`, the rule's expression is not matching the jobs you expect. The expression is printed alongside it.

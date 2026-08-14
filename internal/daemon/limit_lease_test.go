@@ -1,0 +1,279 @@
+package daemon
+
+import (
+	"context"
+	"fmt"
+	"testing"
+	"time"
+
+	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondorlogging "github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/pelican-ap-manager/internal/ratelimit"
+)
+
+// fakeSchedd records what the limit manager asks of the schedd and lets a test
+// decide what the schedd holds. It is the piece that was missing: without it,
+// every reconcile path needed a live HTCondor, so nothing checked the lease.
+type fakeSchedd struct {
+	pushes []*htcondor.StartupLimitRequest
+
+	// installed is what a query returns, keyed by UUID. A test can empty it to
+	// simulate a lease running out.
+	installed map[string]*htcondor.StartupLimit
+
+	nextUUID int
+	pushErr  error
+}
+
+func newFakeSchedd() *fakeSchedd {
+	return &fakeSchedd{installed: map[string]*htcondor.StartupLimit{}}
+}
+
+func (f *fakeSchedd) CreateStartupLimit(_ context.Context, req *htcondor.StartupLimitRequest) (string, error) {
+	f.pushes = append(f.pushes, req)
+	if f.pushErr != nil {
+		return "", f.pushErr
+	}
+	uuid := req.UUID
+	if uuid == "" {
+		f.nextUUID++
+		uuid = fmt.Sprintf("uuid-%d", f.nextUUID)
+	}
+	f.installed[uuid] = &htcondor.StartupLimit{
+		UUID: uuid, Tag: req.Tag, Name: req.Name, Expression: req.Expression,
+		RateCount: req.RateCount, RateWindow: req.RateWindow,
+	}
+	return uuid, nil
+}
+
+func (f *fakeSchedd) QueryStartupLimits(_ context.Context, uuid, _ string) ([]*htcondor.StartupLimit, error) {
+	if uuid != "" {
+		if l, ok := f.installed[uuid]; ok {
+			return []*htcondor.StartupLimit{l}, nil
+		}
+		return nil, nil
+	}
+	out := make([]*htcondor.StartupLimit, 0, len(f.installed))
+	for _, l := range f.installed {
+		out = append(out, l)
+	}
+	return out, nil
+}
+
+func newTestLimitManager(t *testing.T, schedd scheddLimits) *limitManager {
+	t.Helper()
+	logger, err := htcondorlogging.New(&htcondorlogging.Config{})
+	if err != nil {
+		t.Fatalf("logger: %v", err)
+	}
+	m := &limitManager{
+		schedd:        schedd,
+		logger:        logger,
+		activeLimits:  map[string]*limitState{},
+		daemonName:    "test-schedd",
+		siteAttribute: "GLIDEIN_Site",
+		cfg: limitConfig{
+			interval:             defaultLimitInterval,
+			expirationInactivity: limitExpirationInactivity,
+			lease:                defaultLimitLease,
+			ewmaAlpha:            ewmaAlpha,
+			enabled:              true,
+		},
+	}
+	return m
+}
+
+func testRule(rate int) ratelimit.Rule {
+	return ratelimit.Rule{
+		Name: "r", Origin: ratelimit.OriginStatic,
+		User: "alice", Site: "UCSD",
+		RateCount: rate, RateWindow: time.Minute,
+	}
+}
+
+// TestLeaseIsSentInSeconds is the direct guard on the bug that started this:
+// StartupLimitRequest.Expiration is seconds from now, and a Unix timestamp was
+// being sent instead. The schedd clamps to STARTUP_LIMIT_MAX_EXPIRATION, so the
+// mistake was invisible in production -- every limit silently came out at the
+// schedd's maximum.
+func TestLeaseIsSentInSeconds(t *testing.T) {
+	f := newFakeSchedd()
+	m := newTestLimitManager(t, f)
+
+	if err := m.reconcile(context.Background(), []ratelimit.Rule{testRule(5)}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(f.pushes) != 1 {
+		t.Fatalf("%d pushes, want 1", len(f.pushes))
+	}
+
+	got := f.pushes[0].Expiration
+	if want := int(defaultLimitLease.Seconds()); got != want {
+		t.Errorf("Expiration = %d, want %d (seconds from now, not a timestamp)", got, want)
+	}
+	// A timestamp would be ~1.8e9. Anything on that scale means the units are
+	// wrong again, whatever the configured lease.
+	if got > 86400 {
+		t.Errorf("Expiration = %d looks like a Unix timestamp, not a duration", got)
+	}
+}
+
+// TestLeaseIsRenewedEveryCycle is the property the daemon depends on: the limits
+// live only as long as it keeps saying so.
+func TestLeaseIsRenewedEveryCycle(t *testing.T) {
+	f := newFakeSchedd()
+	m := newTestLimitManager(t, f)
+	rule := testRule(5)
+
+	for i := 0; i < 3; i++ {
+		if err := m.reconcile(context.Background(), []ratelimit.Rule{rule}); err != nil {
+			t.Fatalf("reconcile %d: %v", i, err)
+		}
+	}
+
+	if len(f.pushes) != 3 {
+		t.Fatalf("%d pushes across 3 cycles, want 3: an unchanged rule must still renew its lease", len(f.pushes))
+	}
+	// The first creates, the rest renew the same limit rather than making new ones.
+	if f.pushes[0].UUID != "" {
+		t.Errorf("first push carried UUID %q, want a create", f.pushes[0].UUID)
+	}
+	for i, p := range f.pushes[1:] {
+		if p.UUID != "uuid-1" {
+			t.Errorf("push %d renewed UUID %q, want uuid-1", i+1, p.UUID)
+		}
+	}
+	if len(f.installed) != 1 {
+		t.Errorf("%d limits installed, want 1", len(f.installed))
+	}
+}
+
+// TestLapsedLimitIsReinstalled covers recovery: if a limit disappears from the
+// schedd -- its lease ran out while the daemon was wedged, or the schedd
+// restarted -- the daemon has to put it back.
+//
+// The renewal does that on its own: the schedd installs under whatever UUID it
+// is handed (StartupLimits[uuid] = ...), so re-pushing an unknown UUID
+// re-creates the limit. That is the path this asserts, because it is the one
+// that runs in practice.
+func TestLapsedLimitIsReinstalled(t *testing.T) {
+	f := newFakeSchedd()
+	m := newTestLimitManager(t, f)
+	rule := testRule(5)
+
+	if err := m.reconcile(context.Background(), []ratelimit.Rule{rule}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	// The limit vanishes from the schedd between cycles.
+	f.installed = map[string]*htcondor.StartupLimit{}
+
+	if err := m.reconcile(context.Background(), []ratelimit.Rule{rule}); err != nil {
+		t.Fatalf("reconcile after lapse: %v", err)
+	}
+	if len(f.installed) != 1 {
+		t.Fatalf("%d limits in the schedd after a lapse, want 1: enforcement did not recover", len(f.installed))
+	}
+}
+
+// TestLimitForgottenWhenRenewalFails covers the case renewal cannot fix: the
+// schedd is unreachable long enough for the lease to run out. The daemon must
+// stop believing the limit exists, so that a later cycle installs a fresh one
+// rather than renewing a UUID nothing is tracking.
+//
+// It only forgets on a *successful* query that comes back empty. A failed query
+// says nothing about whether the limit is there, and forgetting on that could
+// install a duplicate alongside a live limit.
+func TestLimitForgottenWhenRenewalFails(t *testing.T) {
+	f := newFakeSchedd()
+	m := newTestLimitManager(t, f)
+	rule := testRule(5)
+
+	if err := m.reconcile(context.Background(), []ratelimit.Rule{rule}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	// The schedd stops accepting writes and loses the limit.
+	f.pushErr = fmt.Errorf("schedd unreachable")
+	f.installed = map[string]*htcondor.StartupLimit{}
+
+	if err := m.reconcile(context.Background(), []ratelimit.Rule{rule}); err != nil {
+		t.Fatalf("reconcile while unreachable: %v", err)
+	}
+	if len(m.activeLimits) != 0 {
+		t.Fatalf("daemon still believes %d limits are installed after the schedd lost them", len(m.activeLimits))
+	}
+
+	// Once writes work again, the next cycle installs a fresh limit.
+	f.pushErr = nil
+	if err := m.reconcile(context.Background(), []ratelimit.Rule{rule}); err != nil {
+		t.Fatalf("reconcile after recovery: %v", err)
+	}
+	if len(f.installed) != 1 {
+		t.Errorf("%d limits after recovery, want 1", len(f.installed))
+	}
+}
+
+// TestLeaseNeverOutlivesTheRule keeps an expiring rule from being kept alive by
+// the lease past its own deadline.
+func TestLeaseNeverOutlivesTheRule(t *testing.T) {
+	f := newFakeSchedd()
+	m := newTestLimitManager(t, f)
+
+	now := time.Now()
+	rule := testRule(5)
+	rule.ExpiresAt = now.Add(10 * time.Second) // shorter than the 60s lease
+
+	if got, want := m.leaseFor(rule, now), 10*time.Second; got != want {
+		t.Errorf("leaseFor = %v, want %v (capped by the rule's own expiry)", got, want)
+	}
+
+	rule.ExpiresAt = now.Add(time.Hour) // longer than the lease
+	if got, want := m.leaseFor(rule, now), defaultLimitLease; got != want {
+		t.Errorf("leaseFor = %v, want the configured lease %v", got, want)
+	}
+
+	// The schedd rejects a non-future expiration; the floor keeps a
+	// nearly-expired rule from producing one.
+	rule.ExpiresAt = now.Add(-time.Minute)
+	if got := m.leaseFor(rule, now); got < time.Second {
+		t.Errorf("leaseFor = %v, want at least 1s so the schedd accepts it", got)
+	}
+	_ = f
+}
+
+// TestRateChangeStillRewritesTheLimit checks that decoupling renewal from the
+// change deadband did not stop rate changes from reaching the schedd.
+func TestRateChangeStillRewritesTheLimit(t *testing.T) {
+	f := newFakeSchedd()
+	m := newTestLimitManager(t, f)
+
+	if err := m.reconcile(context.Background(), []ratelimit.Rule{testRule(5)}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if err := m.reconcile(context.Background(), []ratelimit.Rule{testRule(50)}); err != nil {
+		t.Fatalf("reconcile with new rate: %v", err)
+	}
+
+	last := f.pushes[len(f.pushes)-1]
+	if last.RateCount != 50 {
+		t.Errorf("last push RateCount = %d, want 50", last.RateCount)
+	}
+	if got := f.installed["uuid-1"].RateCount; got != 50 {
+		t.Errorf("installed RateCount = %d, want 50", got)
+	}
+}
+
+// TestConfiguredLeaseIsHonored makes the operator knob real.
+func TestConfiguredLeaseIsHonored(t *testing.T) {
+	f := newFakeSchedd()
+	m := newTestLimitManager(t, f)
+	m.cfg.lease = 5 * time.Second
+
+	if err := m.reconcile(context.Background(), []ratelimit.Rule{testRule(5)}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if got := f.pushes[0].Expiration; got != 5 {
+		t.Errorf("Expiration = %d, want 5", got)
+	}
+}

@@ -18,6 +18,20 @@ const (
 	// defaultLimitInterval is the rate window for schedd limits (aligned with negotiation cycle)
 	defaultLimitInterval = 60 * time.Second
 
+	// defaultLimitLease is how long a limit the daemon installs stays alive
+	// without being renewed.
+	//
+	// The point of a short lease is that this daemon is the only thing keeping
+	// its limits in force: if it crashes, whatever it was throttling must go
+	// back to running at full rate within about a minute rather than staying
+	// throttled until someone notices. The daemon renews on every poll cycle,
+	// so the lease only ever runs out when the daemon is gone.
+	//
+	// The schedd caps this at STARTUP_LIMIT_MAX_EXPIRATION (5 minutes by
+	// default) and silently clamps anything larger, so asking for more than
+	// that achieves nothing without also raising the schedd's knob.
+	defaultLimitLease = 60 * time.Second
+
 	// limitExpirationInactivity is how long a limit can go without being hit before removal
 	limitExpirationInactivity = 600 * time.Second
 
@@ -39,8 +53,17 @@ type UserSitePair struct {
 // reconciles the schedd against that set. Keeping the decision and the
 // installation apart is what lets observing mode withhold the dynamic rules
 // without the schedd-facing code knowing anything about modes.
+// scheddLimits is the slice of the schedd this manager uses. It exists so the
+// reconcile/renew/expire logic can be tested without a running HTCondor -- the
+// absence of which is how a lease that was never renewed, and an expiration
+// sent in the wrong units, both went unnoticed.
+type scheddLimits interface {
+	CreateStartupLimit(ctx context.Context, req *htcondor.StartupLimitRequest) (string, error)
+	QueryStartupLimits(ctx context.Context, uuid, tag string) ([]*htcondor.StartupLimit, error)
+}
+
 type limitManager struct {
-	schedd        *htcondor.Schedd
+	schedd        scheddLimits
 	logger        *htcondorlogging.Logger
 	activeLimits  map[string]*limitState // keyed by the schedd limit name (rule.LimitName())
 	cfg           limitConfig
@@ -51,6 +74,7 @@ type limitManager struct {
 type limitConfig struct {
 	interval             time.Duration
 	expirationInactivity time.Duration
+	lease                time.Duration
 	ewmaAlpha            float64
 	enabled              bool
 }
@@ -67,7 +91,7 @@ type limitState struct {
 }
 
 // newLimitManager creates a limit manager for the schedd
-func newLimitManager(schedd *htcondor.Schedd, daemonName string, siteAttribute string, logger *htcondorlogging.Logger) *limitManager {
+func newLimitManager(schedd scheddLimits, daemonName string, siteAttribute string, logger *htcondorlogging.Logger) *limitManager {
 	m := &limitManager{
 		schedd:        schedd,
 		logger:        logger,
@@ -77,6 +101,7 @@ func newLimitManager(schedd *htcondor.Schedd, daemonName string, siteAttribute s
 		cfg: limitConfig{
 			interval:             defaultLimitInterval,
 			expirationInactivity: limitExpirationInactivity,
+			lease:                defaultLimitLease,
 			ewmaAlpha:            ewmaAlpha,
 			enabled:              true,
 		},
@@ -159,15 +184,24 @@ func (m *limitManager) reconcile(ctx context.Context, rules []ratelimit.Rule) er
 		desired[key] = rule
 
 		existing, exists := m.activeLimits[key]
-		switch {
-		case !exists:
+		if !exists {
 			if err := m.createLimit(ctx, rule); err != nil {
 				m.logger.Infof(htcondorlogging.DestinationGeneral, "limit create error for rule %s: %v", rule.Name, err)
 			}
-		case m.shouldUpdateLimit(existing, rule):
-			if err := m.updateLimit(ctx, existing, rule); err != nil {
-				m.logger.Infof(htcondorlogging.DestinationGeneral, "limit update error for rule %s: %v", rule.Name, err)
-			}
+			continue
+		}
+
+		// Renew on every cycle, whether or not the rate moved. The limit holds
+		// a short lease precisely so it dies with the daemon; not renewing it
+		// meant enforcement quietly stopped after one lease on a perfectly
+		// healthy daemon, and never resumed, because activeLimits still
+		// believed the limit was installed.
+		//
+		// shouldUpdateLimit no longer decides whether to talk to the schedd --
+		// only whether the rate has moved enough to be worth reporting.
+		changed := m.shouldUpdateLimit(existing, rule)
+		if err := m.renewLimit(ctx, existing, rule, changed); err != nil {
+			m.logger.Infof(htcondorlogging.DestinationGeneral, "limit renew error for rule %s: %v", rule.Name, err)
 		}
 	}
 
@@ -283,11 +317,13 @@ func (m *limitManager) createLimit(ctx context.Context, rule ratelimit.Rule) err
 	return nil
 }
 
-// updateLimit rewrites an installed limit in place from its rule.
-func (m *limitManager) updateLimit(ctx context.Context, existing *limitState, rule ratelimit.Rule) error {
+// renewLimit extends an installed limit's lease, rewriting its rate at the same
+// time. changed says whether the rate moved enough to be worth a log line --
+// renewal itself happens every cycle and would otherwise fill the log.
+func (m *limitManager) renewLimit(ctx context.Context, existing *limitState, rule ratelimit.Rule, changed bool) error {
 	uuid, err := m.pushLimit(ctx, existing.uuid, rule)
 	if err != nil {
-		return fmt.Errorf("update startup limit: %w", err)
+		return fmt.Errorf("renew startup limit: %w", err)
 	}
 
 	existing.uuid = uuid
@@ -296,26 +332,15 @@ func (m *limitManager) updateLimit(ctx context.Context, existing *limitState, ru
 	existing.rateWindow = rule.Window()
 	existing.lastUpdated = time.Now()
 
-	m.logger.Infof(htcondorlogging.DestinationGeneral, "updated %s limit %s (%s): %d jobs/%s",
-		rule.Origin, uuid, rule.Name, rule.RateCount, rule.Window())
+	if changed {
+		m.logger.Infof(htcondorlogging.DestinationGeneral, "updated %s limit %s (%s): %d jobs/%s",
+			rule.Origin, uuid, rule.Name, rule.RateCount, rule.Window())
+	}
 	return nil
 }
 
 // pushLimit sends one create-or-update to the schedd. uuid empty means create.
 func (m *limitManager) pushLimit(ctx context.Context, uuid string, rule ratelimit.Rule) (string, error) {
-	// The limit's own expiration is a backstop, not the policy: it is refreshed
-	// on every update, so it only fires if this daemon stops running. Twice the
-	// inactivity timeout leaves room for a slow poll cycle without letting a
-	// forgotten limit outlive the daemon indefinitely.
-	expiration := m.cfg.expirationInactivity * 2
-	// A rule with its own deadline must not outlive it, even if the daemon dies
-	// the moment after installing it.
-	if !rule.ExpiresAt.IsZero() {
-		if until := time.Until(rule.ExpiresAt); until < expiration {
-			expiration = until
-		}
-	}
-
 	req := &htcondor.StartupLimitRequest{
 		UUID:       uuid,
 		Tag:        m.limitTag(),
@@ -323,9 +348,39 @@ func (m *limitManager) pushLimit(ctx context.Context, uuid string, rule ratelimi
 		Expression: rule.ClassAdExpression(m.siteAttribute),
 		RateCount:  rule.RateCount,
 		RateWindow: int(rule.Window().Seconds()),
-		Expiration: int(time.Now().Add(expiration).Unix()),
+		Expiration: int(m.leaseFor(rule, time.Now()).Seconds()),
 	}
 	return m.schedd.CreateStartupLimit(ctx, req)
+}
+
+// leaseFor is how long the schedd should keep this limit without hearing from
+// us again.
+//
+// StartupLimitRequest.Expiration is *seconds from now*, not an absolute time.
+// Sending a Unix timestamp here -- as this once did -- asks for a lease roughly
+// 56 years long, which the schedd silently clamps to
+// STARTUP_LIMIT_MAX_EXPIRATION. The bug was invisible because the clamp made
+// every limit come out at the schedd's maximum instead of the intended value.
+//
+// A rule with its own deadline never gets a lease that outlives it, so a lapsed
+// rule cannot keep throttling jobs just because the daemon died at the wrong
+// moment.
+func (m *limitManager) leaseFor(rule ratelimit.Rule, now time.Time) time.Duration {
+	lease := m.cfg.lease
+	if lease <= 0 {
+		lease = defaultLimitLease
+	}
+	if !rule.ExpiresAt.IsZero() {
+		if until := rule.ExpiresAt.Sub(now); until < lease {
+			lease = until
+		}
+	}
+	// The schedd rejects an expiration that is not in the future; one second is
+	// the shortest lease it will accept.
+	if lease < time.Second {
+		lease = time.Second
+	}
+	return lease
 }
 
 // removeStale drops limits whose rule is no longer desired and which have not
@@ -349,12 +404,25 @@ func (m *limitManager) removeStale(ctx context.Context, now time.Time, desired m
 	return nil
 }
 
-// refreshLimitStats queries the schedd to update lastHit times and statistics based on actual usage
+// refreshLimitStats queries the schedd to update lastHit times and statistics
+// based on actual usage, and notices limits that are no longer there.
 func (m *limitManager) refreshLimitStats(ctx context.Context) error {
 	for key, limit := range m.activeLimits {
 		limits, err := m.schedd.QueryStartupLimits(ctx, limit.uuid, "")
 		if err != nil {
 			m.logger.Infof(htcondorlogging.DestinationGeneral, "query limit %s error (skipping): %v", limit.uuid, err)
+			continue
+		}
+
+		if len(limits) == 0 {
+			// The limit is gone from the schedd although we still want it --
+			// its lease ran out while we were not looking, or a schedd restart
+			// dropped it. Forget it so the next cycle installs it again;
+			// without this the daemon believes it is still enforcing something
+			// that no longer exists.
+			m.logger.Infof(htcondorlogging.DestinationGeneral,
+				"limit %s (%s) is no longer in the schedd; reinstalling on the next cycle", limit.uuid, key)
+			delete(m.activeLimits, key)
 			continue
 		}
 
