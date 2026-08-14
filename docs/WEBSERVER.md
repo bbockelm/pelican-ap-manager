@@ -1,6 +1,15 @@
 # Pelican Manager Web Server
 
-The pelican_man daemon provides an integrated web server for managing job sandboxes via HTTP over Unix domain sockets or TCP/TLS. The server uses the golang-htcondor sandbox API for creating and extracting job sandboxes.
+The `pelican_web` daemon manages job sandboxes over HTTP, on a Unix domain socket or TCP/TLS. It uses the golang-htcondor sandbox API for creating and extracting job sandboxes.
+
+`pelican_web` is a separate daemon from `pelican_man`, which serves no HTTP at all. Keeping them apart is what lets `pelican_man` avoid linking the web stack (OAuth2/OIDC, OpenTelemetry, sqlite) — roughly half its binary size. Add it to `DAEMON_LIST` alongside `PELICAN_MANAGER`:
+
+```
+PELICAN_WEB = /usr/sbin/pelican_web
+DAEMON_LIST = $(DAEMON_LIST), PELICAN_MANAGER, PELICAN_WEB
+```
+
+Without `PELICAN_WEB` running, Pelican transfer plugins cannot register sandboxes.
 
 ## Features
 

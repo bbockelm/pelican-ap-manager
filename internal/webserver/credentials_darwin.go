@@ -17,12 +17,12 @@ func getSocketCredentials(r *http.Request, logger *htcondorlogging.Logger) (int,
 	if !ok {
 		return -1, -1
 	}
-	
+
 	// If it's a TLS connection, unwrap it to get the underlying connection
 	if tlsConn, ok := conn.(*tls.Conn); ok {
 		conn = tlsConn.NetConn()
 	}
-	
+
 	if unixConn, ok := conn.(*net.UnixConn); ok {
 		file, err := unixConn.File()
 		if err == nil {

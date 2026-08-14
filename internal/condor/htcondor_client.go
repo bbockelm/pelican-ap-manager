@@ -232,7 +232,7 @@ func (c *htcClient) AdvertiseClassAds(payload []map[string]any) error {
 	// The golang-htcondor library will use GetSecurityConfigOrDefault to retrieve
 	// the config from the environment (CONDOR_CONFIG) for authentication
 	ctx := context.Background()
-	
+
 	for _, adMap := range payload {
 		ad := classad.New()
 		for k, v := range adMap {

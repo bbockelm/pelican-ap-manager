@@ -1,10 +1,12 @@
 name: CI
 
+# Every pull request, not just those targeting main: a stacked PR (one based on
+# another feature branch) would otherwise get no CI at all, which is exactly when
+# the base is least settled.
 on:
   push:
     branches: [ main ]
   pull_request:
-    branches: [ main ]
 
 permissions:
   contents: read
@@ -23,6 +25,10 @@ jobs:
           cache: true
 
       - name: Download modules
+        env:
+          # The sibling modules are private; fetch their tags straight from
+          # GitHub rather than through the module proxy.
+          GOPRIVATE: github.com/bbockelm,github.com/PelicanPlatform
         run: go mod download
 
       - name: Check formatting
@@ -37,5 +43,16 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # The integration- and condor-tagged sources are excluded from a plain
+      # `go vet ./...`, so they rot silently unless checked explicitly.
+      - name: Vet build-tagged sources
+        run: go vet -tags integration,condor ./...
+
       - name: Test
         run: go test ./...
+
+      # Both binaries must build. pelican_web is the standalone HTTP daemon;
+      # nothing in the test suite links its main package, so without this a
+      # break there would only surface at release time.
+      - name: Build binaries
+        run: make build
