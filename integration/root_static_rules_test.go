@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -198,6 +199,20 @@ func setupPool(t *testing.T, opts poolOptions) *rootPool {
 	}
 	t.Setenv("CONDOR_CONFIG", configPath)
 
+	// t.TempDir() creates its directories 0700 owned by the invoking user (root
+	// here). HTCondor daemons write their logs as the condor user even while the
+	// process is root, so condor must be able to *traverse* every parent of the
+	// pool directory -- otherwise condor_master fails at startup with "Cannot
+	// open log file". Widen the temp root and its parent before handing the tree
+	// over.
+	if opts.dropPrivileges {
+		for _, dir := range []string{filepath.Dir(rootDir), rootDir} {
+			if err := os.Chmod(dir, 0o755); err != nil {
+				t.Fatalf("chmod %s: %v", dir, err)
+			}
+		}
+	}
+
 	// The daemons run as condor after the drop, so condor has to own everything
 	// they write.
 	for _, dir := range []string{rootDir, socketDir,
@@ -224,6 +239,11 @@ func setupPool(t *testing.T, opts poolOptions) *rootPool {
 	t.Cleanup(func() { stopCondorMaster(condorCmd, t) })
 
 	if err := waitForCondor(rootDir, 90*time.Second, t); err != nil {
+		// When condor_master cannot even open its own log there is nothing for
+		// printHTCondorLogs to show, and the cause is almost always that some
+		// parent directory is not traversable by the condor user. Report the
+		// tree's ownership and modes so that is visible from the CI log alone.
+		dumpDirPermissions(t, rootDir)
 		printHTCondorLogs(rootDir, t)
 		t.Fatalf("condor readiness: %v", err)
 	}
@@ -503,4 +523,26 @@ func sortedKeys[V any](m map[string]V) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// dumpDirPermissions logs owner and mode for the pool directory and each of its
+// parents, which is what distinguishes "the daemon crashed" from "the daemon
+// could not reach its own spool".
+func dumpDirPermissions(t *testing.T, dir string) {
+	t.Helper()
+	for p := dir; ; p = filepath.Dir(p) {
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Logf("perm %s: %v", p, err)
+		} else {
+			uid := -1
+			if st, ok := info.Sys().(*syscall.Stat_t); ok {
+				uid = int(st.Uid)
+			}
+			t.Logf("perm %s: mode=%v uid=%d", p, info.Mode().Perm(), uid)
+		}
+		if p == "/" || filepath.Dir(p) == p {
+			return
+		}
+	}
 }
