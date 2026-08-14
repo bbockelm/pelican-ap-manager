@@ -75,6 +75,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: root-integration-logs
-          path: /tmp/pelroot_*/
+          # t.TempDir() lands under TMPDIR (/tmp in the container), which is
+          # where each daemon's log directory lives; /tmp/pelroot_* holds only
+          # the sockets.
+          path: |
+            /tmp/TestRootStaticRuleEnforcement*/
           if-no-files-found: ignore
           retention-days: 3
