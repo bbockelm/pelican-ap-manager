@@ -210,7 +210,7 @@ PELICAN_MANAGER_STATS_WINDOW = 1h
 
 - Error rate: 8% (red)
 - Stage-in cost: 15% (yellow)
-- Action: 
+- Action:
   - Capacity reduced by 50%
   - Schedd limit created: 50 jobs/60s
   - Limit enforced until error rate drops below 5%

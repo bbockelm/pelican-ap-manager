@@ -582,15 +582,6 @@ func lookupCondorUser(t *testing.T) (int, int, bool) {
 	return uid, gid, true
 }
 
-func moduleRoot(t *testing.T) string {
-	t.Helper()
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	return filepath.Dir(cwd)
-}
-
 func keys(m map[string][]byte) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

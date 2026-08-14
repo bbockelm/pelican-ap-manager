@@ -15,7 +15,7 @@ func TestResolveVirtualSourceOSDF(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/.well-known/pelican-configuration":
-			fmt.Fprintf(w, `{"director_endpoint": %q}`, directorEndpoint)
+			_, _ = fmt.Fprintf(w, `{"director_endpoint": %q}`, directorEndpoint)
 		case r.Method == http.MethodHead && r.URL.Path == "/ospool/ap40/data/foo":
 			headHits++
 			w.Header().Set("X-Pelican-Namespace", "namespace=/ospool/ap40, require-token=true, collections-url=https://ap40.uw.osg-htc.org:8443")
@@ -62,7 +62,7 @@ func TestResolveVirtualSourceWithOrigin(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/.well-known/pelican-configuration":
-			fmt.Fprintf(w, `{"director_endpoint": %q}`, directorEndpoint)
+			_, _ = fmt.Fprintf(w, `{"director_endpoint": %q}`, directorEndpoint)
 		case r.Method == http.MethodHead && r.URL.Path == "/ospool/ap40/data/foo":
 			headHits++
 			w.Header().Set("X-Pelican-Namespace", "namespace=/ospool/ap40")

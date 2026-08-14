@@ -17,7 +17,7 @@ func TestResolveVirtualSourceCleansPathAndQuery(t *testing.T) {
 			w.Header().Set("X-Pelican-Namespace", "namespace=/ospool/ap40")
 			w.WriteHeader(http.StatusOK)
 		case r.Method == http.MethodGet && r.URL.Path == "/.well-known/pelican-configuration":
-			w.Write([]byte(`{"director_endpoint": "` + srv.URL + `"}`))
+			_, _ = w.Write([]byte(`{"director_endpoint": "` + srv.URL + `"}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -59,7 +59,7 @@ func TestResolveVirtualSourceCredentialScheme(t *testing.T) {
 			w.Header().Set("X-Pelican-Namespace", "namespace=/ospool/ap40")
 			w.WriteHeader(http.StatusOK)
 		case r.Method == http.MethodGet && r.URL.Path == "/.well-known/pelican-configuration":
-			w.Write([]byte(`{"director_endpoint": "` + srv.URL + `"}`))
+			_, _ = w.Write([]byte(`{"director_endpoint": "` + srv.URL + `"}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
