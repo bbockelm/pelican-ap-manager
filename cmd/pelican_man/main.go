@@ -163,6 +163,10 @@ func run() error {
 		syncStaticRules(context.Background(), ruleStore, cfg, log)
 	}
 	svc.SetEnforcement(cfg.EnforcementMode)
+	svc.SetLimitLease(cfg.LimitLease)
+	if cfg.LimitLeaseWarning != "" {
+		log.Warnf(htcondorlogging.DestinationGeneral, "%s", cfg.LimitLeaseWarning)
+	}
 	log.Infof(htcondorlogging.DestinationGeneral, "rate limit enforcement mode: %s (%d static rule(s) declared)",
 		cfg.EnforcementMode, len(cfg.StaticRules))
 
@@ -209,6 +213,10 @@ func run() error {
 		// Enforcement mode and the static rule set are both reconfigurable:
 		// flipping to observing, or retiring a rule, should not need a restart.
 		svc.SetEnforcement(newCfg.EnforcementMode)
+		svc.SetLimitLease(newCfg.LimitLease)
+		if newCfg.LimitLeaseWarning != "" {
+			log.Warnf(htcondorlogging.DestinationGeneral, "%s", newCfg.LimitLeaseWarning)
+		}
 		log.Infof(htcondorlogging.DestinationGeneral, "rate limit enforcement mode: %s (%d static rule(s) declared)",
 			newCfg.EnforcementMode, len(newCfg.StaticRules))
 		if ruleStore != nil {

@@ -234,6 +234,13 @@ MAX_TRANSFER_HISTORY = 10000000
 MAX_TRANSFER_HISTORY_ROTATIONS = 1
 NEGOTIATOR_INTERVAL = 5
 NEGOTIATOR_CYCLE_DELAY = 1
+# Short leases so the lease behaviour can be observed in seconds rather than
+# minutes. The schedd's ceiling is deliberately well above the lease the daemon
+# asks for: if the two were equal, a daemon requesting the wrong thing entirely
+# (a Unix timestamp, say) would be clamped to exactly the expected value and the
+# mistake would be invisible.
+STARTUP_LIMIT_MAX_EXPIRATION = 30
+PELICAN_MANAGER_LIMIT_LEASE = 5s
 %s%s
 `, localDir, socketDir, mirrorPath, statePath, sbinLine, libexecLine)
 

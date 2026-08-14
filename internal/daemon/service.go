@@ -66,6 +66,10 @@ type Service struct {
 	// a reconfigure can change it under the poll loop.
 	mode ratelimit.Mode
 
+	// limitLeaseDuration is how long an installed limit survives without
+	// renewal; see limitManager.leaseFor.
+	limitLeaseDuration time.Duration
+
 	// rules persists the rate rules -- the operator's static policy and the
 	// control loop's own conclusions. Nil when no store is configured, in which
 	// case only in-memory dynamic rules are used and nothing survives a
@@ -495,6 +499,20 @@ func (s *Service) updateLimitControllers() {
 	}
 }
 
+// SetLimitLease sets how long an installed schedd limit survives without
+// renewal. Zero keeps the default.
+func (s *Service) SetLimitLease(d time.Duration) {
+	s.ruleMu.Lock()
+	defer s.ruleMu.Unlock()
+	s.limitLeaseDuration = d
+}
+
+func (s *Service) limitLease() time.Duration {
+	s.ruleMu.RLock()
+	defer s.ruleMu.RUnlock()
+	return s.limitLeaseDuration
+}
+
 // SetEnforcement selects what the service does with the limits it derives. It
 // is safe to call while the poll loop is running (a reconfigure does).
 func (s *Service) SetEnforcement(mode ratelimit.Mode) {
@@ -695,6 +713,9 @@ func (s *Service) ensureLimitManager() error {
 	}
 
 	s.limitMgr = newLimitManager(s.schedd, daemonName, s.siteAttribute, s.logger)
+	if lease := s.limitLease(); lease > 0 {
+		s.limitMgr.cfg.lease = lease
+	}
 	s.Printf("initialized limit manager for schedd %s (daemon name: %s)", s.schedd.Name(), daemonName)
 
 	return nil

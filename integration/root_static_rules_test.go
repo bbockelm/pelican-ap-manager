@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -108,6 +109,10 @@ func assertStaticRuleBehavior(t *testing.T, env *rootPool) {
 	// The web daemon observes sandboxes: a job's sandbox registers and its input
 	// can be fetched back with the issued token.
 	assertSandboxObserved(t, env)
+
+	// Last, because it is destructive: it kills pelican_man to watch the leases
+	// expire, and condor_master is configured not to restart it.
+	assertLimitLease(t, env)
 }
 
 // rootPool is a running mini-HTCondor with both pelican daemons under its master.
@@ -189,6 +194,11 @@ func setupPool(t *testing.T, opts poolOptions) *rootPool {
 		"PELICAN_MANAGER_POLL_INTERVAL":      "1s",
 		"PELICAN_MANAGER_ADVERTISE_INTERVAL": "5s",
 		"PELICAN_MANAGER_DEBUG":              "cedar:warn",
+		// A killed pelican_man must stay dead long enough for the lease test to
+		// watch its limits expire; without this the master restarts it within
+		// seconds and reinstalls them.
+		"MASTER_BACKOFF_CONSTANT": "3600",
+		"MASTER_BACKOFF_CEILING":  "3600",
 		// The whole point: the control loop observes and publishes, but only the
 		// operator's static rules are installed.
 		"PELICAN_MANAGER_ENFORCEMENT_MODE": "observing",
@@ -616,6 +626,143 @@ func logCommandSocketMode(t *testing.T, env *rootPool) {
 			t.Logf("%s: bound its own command socket", name)
 		}
 	}
+}
+
+// testLease must match PELICAN_MANAGER_LIMIT_LEASE (and
+// STARTUP_LIMIT_MAX_EXPIRATION) in the test pool's configuration.
+const testLease = 5 * time.Second
+
+// assertLimitLease checks the property the whole lease design exists for: the
+// limits this daemon installs live only as long as it keeps renewing them.
+//
+// Two halves, and both matter:
+//
+//   - A healthy daemon holds its limits past the lease. Without renewal they
+//     lapse after one lease and enforcement silently stops -- which is exactly
+//     what happened before, unnoticed, because every other assertion here runs
+//     within seconds of installation.
+//   - A dead daemon loses them within about a lease, so a crash cannot leave an
+//     access point throttled with nothing left running to lift the limit.
+func assertLimitLease(t *testing.T, env *rootPool) {
+	t.Helper()
+
+	schedd := htcondor.NewSchedd("integration_schedd", env.scheddAddr)
+	pelicanLimits := func(what string) []*htcondor.StartupLimit {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		limits, err := schedd.QueryStartupLimits(ctx, "", "")
+		if err != nil {
+			t.Fatalf("querying limits %s: %v", what, err)
+		}
+		var ours []*htcondor.StartupLimit
+		for _, l := range limits {
+			if strings.HasPrefix(l.Name, "pelican_") {
+				ours = append(ours, l)
+			}
+		}
+		return ours
+	}
+
+	// The lease the schedd actually granted. This is the direct check, and the
+	// one that would have caught sending Expiration as a Unix timestamp: the
+	// schedd clamps an over-long request to STARTUP_LIMIT_MAX_EXPIRATION, so the
+	// symptom was every limit silently coming out at the schedd's maximum
+	// instead of the configured lease.
+	for _, l := range pelicanLimits("for their lease") {
+		remaining := time.Until(time.Unix(l.ExpiresAt, 0))
+		if remaining <= 0 {
+			t.Errorf("limit %s has already expired (ExpiresAt=%d)", l.Name, l.ExpiresAt)
+			continue
+		}
+		if remaining > testLease+2*time.Second {
+			t.Errorf("limit %s holds a %v lease, want about %v -- is Expiration being sent as a duration?",
+				l.Name, remaining.Truncate(time.Second), testLease)
+		}
+	}
+
+	// Past a full lease, with the daemon running: renewal must have kept them.
+	time.Sleep(testLease + 3*time.Second)
+	if n := len(pelicanLimits("after one lease")); n < len(expectedLimits) {
+		dumpPelicanLogs(t, env)
+		t.Fatalf("%d pelican limits remain after one lease (%s); want %d -- the daemon is not renewing them",
+			n, testLease, len(expectedLimits))
+	}
+
+	// Now stop renewing, the way a crash would.
+	killPelicanManager(t, env)
+
+	// The limits must stop applying within a lease. "Stop applying" is the
+	// property, not "disappear": StartupLimitsAllowJob skips a limit the moment
+	// its expires_at passes, while the schedd reaps the entry lazily on a timer.
+	// Asserting on the listing would be testing the reaper's schedule.
+	deadline := time.Now().Add(4 * testLease)
+	for time.Now().Before(deadline) {
+		live := 0
+		for _, l := range pelicanLimits("after the daemon died") {
+			if time.Until(time.Unix(l.ExpiresAt, 0)) > 0 {
+				live++
+			}
+		}
+		if live == 0 {
+			return
+		}
+		time.Sleep(time.Second)
+	}
+
+	var still []string
+	for _, l := range pelicanLimits("at the end") {
+		if remaining := time.Until(time.Unix(l.ExpiresAt, 0)); remaining > 0 {
+			still = append(still, fmt.Sprintf("%s (%v left)", l.Name, remaining.Truncate(time.Second)))
+		}
+	}
+	t.Errorf("pelican limits were still in force %s after the daemon died: %v -- a crashed daemon must not leave the AP throttled",
+		4*testLease, still)
+}
+
+// killPelicanManager stops pelican_man abruptly so the test can watch its leases
+// run out. SIGKILL rather than a graceful shutdown, because a crash is the case
+// the lease exists for; the pool's MASTER_BACKOFF_* settings keep condor_master
+// from restarting it during the assertion.
+//
+// The pid comes from this pool's MasterLog rather than pgrep. A pattern match on
+// the binary name would reach every pelican_man on the host -- a developer's own
+// daemon, or one left behind by an earlier run -- and matching the full path does
+// not work, because condor_master does not exec the daemon with its path as
+// argv[0].
+func killPelicanManager(t *testing.T, env *rootPool) {
+	t.Helper()
+
+	pid := pelicanManagerPID(t, env)
+	if out, err := exec.Command("kill", "-9", strconv.Itoa(pid)).CombinedOutput(); err != nil {
+		t.Fatalf("kill -9 %d: %v (%s)", pid, err, strings.TrimSpace(string(out)))
+	}
+	t.Logf("killed pelican_man (pid %d); watching its limits expire", pid)
+}
+
+// pelicanManagerPID reads the running daemon's pid out of its own log, which
+// records it unconditionally at startup:
+//
+//	msg="daemon starting" ... subsystem=PELICAN_MANAGER pid=33700 under_master=true
+//
+// Not the MasterLog: the master only records a daemon's pid at D_FULLDEBUG, so
+// keying on it would make this test depend on the pool's log verbosity.
+func pelicanManagerPID(t *testing.T, env *rootPool) int {
+	t.Helper()
+
+	log := readFileString(t, filepath.Join(env.rootDir, "log", "PelicanManagerLog"))
+	re := regexp.MustCompile(`subsystem=PELICAN_MANAGER pid=(\d+)`)
+
+	// Last match wins: the master may have restarted the daemon.
+	matches := re.FindAllStringSubmatch(log, -1)
+	if len(matches) == 0 {
+		t.Fatalf("no pid in PelicanManagerLog; cannot kill the daemon to observe its leases expiring")
+	}
+	pid, err := strconv.Atoi(matches[len(matches)-1][1])
+	if err != nil {
+		t.Fatalf("parsing pid %q: %v", matches[len(matches)-1][1], err)
+	}
+	return pid
 }
 
 // assertInspectionCLI runs `pelican_man -limits` and `-rules` against the live

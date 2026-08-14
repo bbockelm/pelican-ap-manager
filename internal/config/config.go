@@ -42,6 +42,17 @@ type Config struct {
 	// htcondordb is configured.
 	RuleStorePath string
 
+	// LimitLease is how long a schedd startup limit installed by this daemon
+	// survives without renewal. It is deliberately short: the limits exist only
+	// while this daemon does, so if it dies whatever it was throttling should
+	// return to full rate within about a lease rather than staying throttled.
+	// The daemon renews every poll cycle.
+	LimitLease time.Duration
+
+	// LimitLeaseWarning is set when the poll interval cannot keep the lease
+	// alive. Non-empty means the daemon should say so at startup.
+	LimitLeaseWarning string
+
 	// RuleDBAddress, when set, points the rate-rule store at an htcondordb
 	// daemon instead of the local JSON document. RuleDBTable names the table.
 	RuleDBAddress string
@@ -56,6 +67,7 @@ const (
 	defaultEpochLookback     = 24 * time.Hour
 	defaultStatsWindow       = 1 * time.Hour
 	defaultDirectorCacheTTL  = 15 * time.Minute
+	defaultLimitLease        = 60 * time.Second
 	defaultCollectorHost     = "localhost:9618"
 	defaultScheddName        = ""
 	defaultSiteAttribute     = "MachineAttrGLIDEIN_ResourceName0"
@@ -91,6 +103,7 @@ const (
 	macroRuleStorePath           = "PELICAN_MANAGER_RULE_STORE_PATH"
 	macroRuleDBAddress           = "PELICAN_MANAGER_RULE_DB_ADDRESS"
 	macroRuleDBTable             = "PELICAN_MANAGER_RULE_DB_TABLE"
+	macroLimitLease              = "PELICAN_MANAGER_LIMIT_LEASE"
 )
 
 // defaultEnforcementMode preserves the daemon's historical behavior: limits
@@ -149,6 +162,7 @@ func LoadFrom(condorCfg *condorconfig.Config) (*Config, error) {
 		LogPath:           logDir,
 		AddressFilePath:   "", // Will be set based on LOG directory
 		EnforcementMode:   defaultEnforcementMode,
+		LimitLease:        defaultLimitLease,
 		RuleStorePath:     fmt.Sprintf("%s/pelican_rate_rules.json", spoolDir),
 		condorCfg:         condorCfg,
 	}
@@ -239,6 +253,22 @@ func LoadFrom(condorCfg *condorconfig.Config) (*Config, error) {
 	}
 	if v := firstStringMacro(condorCfg, macroRuleDBTable); v != "" {
 		cfg.RuleDBTable = v
+	}
+	if d, err := parseDurationMacro(condorCfg, macroLimitLease); err != nil {
+		return nil, fmt.Errorf("invalid %s: %w", macroLimitLease, err)
+	} else if d > 0 {
+		cfg.LimitLease = d
+	}
+
+	// Renewal happens once per poll cycle, so a poll interval at or beyond the
+	// lease cannot keep the limits alive: they would lapse and be reinstalled
+	// over and over, leaving gaps where nothing is throttled. This is a
+	// misconfiguration rather than a fatal error -- the daemon still observes
+	// and advertises correctly -- so it is reported and left to the operator.
+	if cfg.PollInterval >= cfg.LimitLease {
+		cfg.LimitLeaseWarning = fmt.Sprintf(
+			"%s (%s) is not shorter than %s (%s); limits are renewed once per poll and will lapse between cycles",
+			macroPollInterval, cfg.PollInterval, macroLimitLease, cfg.LimitLease)
 	}
 
 	rules, err := loadStaticRules(condorCfg)
