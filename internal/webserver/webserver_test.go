@@ -95,7 +95,7 @@ func TestRegisterJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	logger := createTestLogger(t)
 	handlers := NewHandlers(db, logger, "", "localhost:8080")
@@ -145,7 +145,7 @@ func TestGetSandbox(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	token, _, err := db.RegisterJob("456", `[ ClusterId = 456 ]`, "testuser", 1000, 1000)
 	if err != nil {
@@ -178,7 +178,7 @@ func TestGetSandboxUnauthorized(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	logger := createTestLogger(t)
 	handlers := NewHandlers(db, logger, "", "localhost:8080")
@@ -201,7 +201,7 @@ func TestPutSandbox(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	tmpDir := t.TempDir()
 	token, _, err := db.RegisterJob("789", fmt.Sprintf(`[ ClusterId = 789; Iwd = "%s" ]`, tmpDir), "testuser", 1000, 1000)
@@ -232,7 +232,7 @@ func TestTokenValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	token, _, err := db.RegisterJob("999", `[ ClusterId = 999 ]`, "testuser", 1000, 1000)
 	if err != nil {
@@ -268,7 +268,7 @@ func TestCleanupExpiredTokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if err := db.CleanupExpiredTokens(); err != nil {
 		t.Errorf("Cleanup should not fail: %v", err)
@@ -282,7 +282,7 @@ func TestDBCloseTwice(t *testing.T) {
 		t.Fatalf("Failed to create database: %v", err)
 	}
 
-	db.Close()
+	_ = db.Close()
 	err = db.Close()
 	if err != nil {
 		t.Logf("Second close returned error (expected): %v", err)
@@ -296,7 +296,7 @@ func TestGetSandboxValidToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Create a test directory structure for the job
 	tmpDir := t.TempDir()
@@ -318,7 +318,7 @@ func TestGetSandboxValidToken(t *testing.T) {
 	handlers.HandleGetSandbox(w, req)
 
 	resp := w.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -335,7 +335,7 @@ func TestGetSandboxValidToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create gzip reader: %v", err)
 	}
-	defer gzr.Close()
+	defer func() { _ = gzr.Close() }()
 
 	tr := tar.NewReader(gzr)
 	fileCount := 0
@@ -368,7 +368,7 @@ func TestGetSandboxWrongJobID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	tmpDir := t.TempDir()
 	jobAdJSON := fmt.Sprintf(`[ ClusterId = 200; ProcId = 0; Iwd = "%s" ]`, tmpDir)
@@ -400,7 +400,7 @@ func TestGetSandboxInvalidMethod(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	logger := createTestLogger(t)
 	handlers := NewHandlers(db, logger, "", "localhost:8080")
@@ -425,7 +425,7 @@ func TestGetSandboxMissingAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	logger := createTestLogger(t)
 	handlers := NewHandlers(db, logger, "", "localhost:8080")
@@ -449,7 +449,7 @@ func TestGetSandboxInvalidJobIDFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	logger := createTestLogger(t)
 	handlers := NewHandlers(db, logger, "", "localhost:8080")
@@ -481,7 +481,7 @@ func TestPutSandboxValidToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Create a test directory structure for the job
 	tmpDir := t.TempDir()
@@ -550,8 +550,8 @@ func TestPutSandboxValidToken(t *testing.T) {
 		t.Fatalf("Failed to write tar content: %v", err)
 	}
 
-	tw.Close()
-	gzw.Close()
+	_ = tw.Close()
+	_ = gzw.Close()
 
 	req := httptest.NewRequest(http.MethodPut, "/sandboxes/300.0/output", &buf)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -560,7 +560,7 @@ func TestPutSandboxValidToken(t *testing.T) {
 	handlers.HandlePutSandbox(w, req)
 
 	resp := w.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -613,7 +613,7 @@ func TestPutSandboxWrongJobID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	tmpDir := t.TempDir()
 	jobAdJSON := fmt.Sprintf(`[ ClusterId = 400; ProcId = 0; Iwd = "%s" ]`, tmpDir)
@@ -627,8 +627,8 @@ func TestPutSandboxWrongJobID(t *testing.T) {
 
 	var buf bytes.Buffer
 	gzw := gzip.NewWriter(&buf)
-	gzw.Write([]byte("test output data"))
-	gzw.Close()
+	_, _ = gzw.Write([]byte("test output data"))
+	_ = gzw.Close()
 
 	// Try to upload to a different job ID with the token
 	req := httptest.NewRequest(http.MethodPut, "/sandboxes/999.0/output", &buf)
@@ -650,7 +650,7 @@ func TestPutSandboxInvalidMethod(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	logger := createTestLogger(t)
 	handlers := NewHandlers(db, logger, "", "localhost:8080")
@@ -675,15 +675,15 @@ func TestPutSandboxMissingAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	logger := createTestLogger(t)
 	handlers := NewHandlers(db, logger, "", "localhost:8080")
 
 	var buf bytes.Buffer
 	gzw := gzip.NewWriter(&buf)
-	gzw.Write([]byte("test output data"))
-	gzw.Close()
+	_, _ = gzw.Write([]byte("test output data"))
+	_ = gzw.Close()
 
 	req := httptest.NewRequest(http.MethodPut, "/sandboxes/100.0/output", &buf)
 	// No Authorization header
@@ -704,7 +704,7 @@ func TestPutSandboxInvalidGzip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	tmpDir := t.TempDir()
 	jobAdJSON := fmt.Sprintf(`[ ClusterId = 500; ProcId = 0; Iwd = "%s" ]`, tmpDir)
@@ -737,7 +737,7 @@ func TestPutSandboxInvalidJobIDFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	logger := createTestLogger(t)
 	handlers := NewHandlers(db, logger, "", "localhost:8080")
@@ -795,7 +795,7 @@ func TestSandboxRoutingNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	logger := createTestLogger(t)
 
@@ -807,7 +807,7 @@ func TestSandboxRoutingNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
-	defer srv.db.Close()
+	defer func() { _ = srv.db.Close() }()
 
 	invalidPaths := []string{
 		"/sandboxes/123.0/invalid",
@@ -837,7 +837,7 @@ func TestRegisterJobWithMissingFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	logger := createTestLogger(t)
 	handlers := NewHandlers(db, logger, "", "localhost:8080")
@@ -892,7 +892,7 @@ func TestRegisterJobURLFormation(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Failed to create database: %v", err)
 			}
-			defer db.Close()
+			defer func() { _ = db.Close() }()
 
 			logger := createTestLogger(t)
 			handlers := NewHandlers(db, logger, tt.socketPath, tt.listenAddress)
@@ -980,7 +980,7 @@ func TestSandboxEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	logger := createTestLogger(t)
 
@@ -992,7 +992,7 @@ func TestSandboxEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
-	defer srv.db.Close()
+	defer func() { _ = srv.db.Close() }()
 
 	// Step 1: Create test environment with input files
 	tmpDir := t.TempDir()
@@ -1103,8 +1103,8 @@ func TestSandboxEndToEnd(t *testing.T) {
 		t.Fatalf("Failed to write tar content: %v", err)
 	}
 
-	tw.Close()
-	gzw.Close()
+	_ = tw.Close()
+	_ = gzw.Close()
 
 	req = httptest.NewRequest(http.MethodPut, "/sandboxes/600.0/output", &buf)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -1154,7 +1154,7 @@ func TestSandboxConcurrentAccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	logger := createTestLogger(t)
 	handlers := NewHandlers(db, logger, "", "localhost:8080")
@@ -1212,7 +1212,7 @@ func TestUIDValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	tmpDir := t.TempDir()
 
@@ -1246,7 +1246,7 @@ func TestRegisterJobUIDMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	logger := createTestLogger(t)
 	_ = logger // Not used in this test, but kept for consistency
@@ -1290,7 +1290,7 @@ func TestCrossUserSandboxAccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	logger := createTestLogger(t)
 	handlers := NewHandlers(db, logger, "", "localhost:8080")
@@ -1368,7 +1368,7 @@ func TestTokenJobIDBinding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	tmpDir := t.TempDir()
 
@@ -1434,7 +1434,7 @@ func TestUserSwitchingInSandbox(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
-	defer srv.db.Close()
+	defer func() { _ = srv.db.Close() }()
 
 	// Use "nobody" user for testing (commonly available on Unix systems)
 	testUser := "nobody"
@@ -1448,14 +1448,14 @@ func TestUserSwitchingInSandbox(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Step 1: Create input files as root (simulating schedd behavior)
 	inputDir, err := os.MkdirTemp("", "sandbox_input_*")
 	if err != nil {
 		t.Fatalf("Failed to create input dir: %v", err)
 	}
-	defer os.RemoveAll(inputDir)
+	defer func() { _ = os.RemoveAll(inputDir) }()
 
 	inputFile := filepath.Join(inputDir, "input.txt")
 	if err := os.WriteFile(inputFile, []byte("test input data"), 0644); err != nil {
@@ -1480,10 +1480,14 @@ func TestUserSwitchingInSandbox(t *testing.T) {
 		Err:                "job.err",
 		TransferOutput:     "job.out,job.err",
 	}
-	body, _ := json.Marshal(regReq)
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandbox/register", bytes.NewReader(body))
-	w := httptest.NewRecorder()
+	// The handler stores the job ad in ClassAd form (see HandleRegister); this
+	// test bypasses the handler and writes to the database directly, so it has
+	// to store the same representation. Storing the JSON body instead made the
+	// later read-back fail with "Failed to parse job ad" on its leading brace.
+	jobAd, err := classad.Marshal(&regReq)
+	if err != nil {
+		t.Fatalf("Failed to marshal job ad: %v", err)
+	}
 
 	// Simulate Unix socket credentials for the target user
 	testUID := testUserInfo.Uid
@@ -1491,15 +1495,15 @@ func TestUserSwitchingInSandbox(t *testing.T) {
 
 	// Convert UID/GID strings to ints
 	var uidInt, gidInt int
-	fmt.Sscanf(testUID, "%d", &uidInt)
-	fmt.Sscanf(testGID, "%d", &gidInt)
+	_, _ = fmt.Sscanf(testUID, "%d", &uidInt)
+	_, _ = fmt.Sscanf(testGID, "%d", &gidInt)
 
 	// Note: In a real Unix socket request, these would come from SO_PEERCRED
 	// For testing, we manually call RegisterJob with the correct credentials
 	// RegisterJob signature: RegisterJob(jobID, jobAdJSON, owner string, uid, gid int) (string, int64, error)
-	token, _, err := srv.db.RegisterJob("700.0", string(body), testUser, uidInt, gidInt)
-	if err != nil {
-		t.Fatalf("Failed to register job: %v", err)
+	token, _, rerr := srv.db.RegisterJob("700.0", jobAd, testUser, uidInt, gidInt)
+	if rerr != nil {
+		t.Fatalf("Failed to register job: %v", rerr)
 	}
 
 	// Step 3: Upload output sandbox (simulating job completion)
@@ -1544,10 +1548,10 @@ func TestUserSwitchingInSandbox(t *testing.T) {
 	}
 
 	// Upload the sandbox
-	req = httptest.NewRequest(http.MethodPut, "/sandboxes/700.0/output", &outputBuf)
+	req := httptest.NewRequest(http.MethodPut, "/sandboxes/700.0/output", &outputBuf)
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/gzip")
-	w = httptest.NewRecorder()
+	w := httptest.NewRecorder()
 
 	srv.httpServer.Handler.ServeHTTP(w, req)
 
@@ -1613,7 +1617,7 @@ func TestRegistrationOverTCPRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Create handlers WITH a socket path (enforcing socket-only registration)
 	handlers := NewHandlers(db, logger, "/tmp/test.sock", "")

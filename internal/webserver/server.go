@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	htcondorconfig "github.com/bbockelm/golang-htcondor/config"
@@ -40,7 +41,19 @@ type Server struct {
 	tlsCert         string
 	tlsKey          string
 	cleanupStop     chan struct{}
-	listener        net.Listener
+
+	// listener is written by Start and read by GetListenerAddr, which callers
+	// use to discover a dynamically assigned port while Start is still running.
+	// Those are different goroutines, so the field needs a lock.
+	listenerMu sync.RWMutex
+	listener   net.Listener
+}
+
+// setListener publishes the bound listener.
+func (s *Server) setListener(ln net.Listener) {
+	s.listenerMu.Lock()
+	defer s.listenerMu.Unlock()
+	s.listener = ln
 }
 
 func NewServer(listenAddr, socketPath, tlsCert, tlsKey, dbPath string, logger *htcondorlogging.Logger) (*Server, error) {
@@ -188,7 +201,9 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	s.httpServer.TLSConfig = tlsConfig
 
-	// Decide whether to use Unix socket or TCP
+	// Decide whether to use Unix socket or TCP. The listener is held locally
+	// until it is bound, then published once under the lock.
+	var ln net.Listener
 	if s.socketPath != "" {
 		// Remove existing socket file if present
 		if _, err := os.Stat(s.socketPath); err == nil {
@@ -201,7 +216,8 @@ func (s *Server) Start(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to listen on Unix socket %s: %w", s.socketPath, err)
 		}
-		defer os.Remove(s.socketPath)
+		// Best effort: a leftover socket file is removed and re-bound on the next start.
+		defer func() { _ = os.Remove(s.socketPath) }()
 
 		// Set socket permissions to allow access
 		if err := os.Chmod(s.socketPath, 0666); err != nil {
@@ -209,7 +225,7 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 
 		// Wrap Unix socket listener with TLS
-		s.listener = tls.NewListener(unixListener, tlsConfig)
+		ln = tls.NewListener(unixListener, tlsConfig)
 		s.logger.Infof(htcondorlogging.DestinationGeneral, "Starting TLS web server on Unix socket %s", s.socketPath)
 	} else if s.listenAddr != "" {
 		s.logger.Infof(htcondorlogging.DestinationGeneral, "Starting TLS HTTPS server on %s with cert=%s key=%s", s.listenAddr, s.tlsCert, s.tlsKey)
@@ -220,21 +236,22 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 
 		// Wrap TCP listener with TLS
-		s.listener = tls.NewListener(tcpListener, tlsConfig)
+		ln = tls.NewListener(tcpListener, tlsConfig)
 	} else {
 		return fmt.Errorf("either listenAddr or socketPath must be specified")
 	}
+	s.setListener(ln)
 
 	// Initialize golang-htcondor handler routes and background tasks if present.
 	if s.htcondorHandler != nil {
-		if err := s.htcondorHandler.Start(ctx, s.listener, "https"); err != nil {
+		if err := s.htcondorHandler.Start(ctx, ln, "https"); err != nil {
 			return fmt.Errorf("failed to start htcondor handler: %w", err)
 		}
 	}
 
 	errChan := make(chan error, 1)
 	go func() {
-		if err := s.httpServer.Serve(s.listener); err != nil && err != http.ErrServerClosed {
+		if err := s.httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
 			errChan <- fmt.Errorf("server error: %w", err)
 		}
 		close(errChan)
@@ -259,7 +276,7 @@ func (s *Server) Start(ctx context.Context) error {
 		return ctx.Err()
 	case err := <-errChan:
 		close(s.cleanupStop)
-		s.db.Close()
+		_ = s.db.Close()
 		return err
 	}
 }
@@ -336,6 +353,8 @@ func (s *Server) cleanupLoop(ctx context.Context) {
 
 // GetListenerAddr returns the actual listener address (useful when using :0 for dynamic port assignment)
 func (s *Server) GetListenerAddr() string {
+	s.listenerMu.RLock()
+	defer s.listenerMu.RUnlock()
 	if s.listener != nil {
 		return s.listener.Addr().String()
 	}

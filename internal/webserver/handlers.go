@@ -115,12 +115,16 @@ func (h *Handlers) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	h.logger.Infof(logging.DestinationGeneral, "Registered job %s with token for UID=%d GID=%d", jobID, uid, gid)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(RegisterResponse{
+	if err := json.NewEncoder(w).Encode(RegisterResponse{
 		Token:      token,
 		ExpiresAt:  expiresAt,
 		InputURLs:  []string{inputURL},
 		OutputURLs: []string{outputURL},
-	})
+	}); err != nil {
+		// The job is registered either way; the client simply did not get its
+		// token, and will have to register again.
+		h.logger.Errorf(logging.DestinationGeneral, "Failed to write registration response for job %s: %v", jobID, err)
+	}
 }
 
 func (h *Handlers) HandleGetSandbox(w http.ResponseWriter, r *http.Request) {
@@ -170,11 +174,16 @@ func (h *Handlers) HandleGetSandbox(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Failed to create compression writer", http.StatusInternalServerError)
 			return
 		}
-		defer zstdw.Close()
-
-		// Create the input sandbox tarball using the golang-htcondor sandbox API
+		// Close flushes the final zstd frame, so it cannot be deferred and
+		// discarded: a failure there means the client received a truncated
+		// tarball, and the response has already been declared a success.
 		if err := sandbox.CreateInputSandboxTar(r.Context(), jobAd, zstdw); err != nil {
+			_ = zstdw.Close()
 			h.logger.Errorf(logging.DestinationGeneral, "Failed to create input sandbox for job %s: %v", jobID, err)
+			return
+		}
+		if err := zstdw.Close(); err != nil {
+			h.logger.Errorf(logging.DestinationGeneral, "Failed to flush zstd input sandbox for job %s (client received a truncated tarball): %v", jobID, err)
 			return
 		}
 	} else {
@@ -187,11 +196,16 @@ func (h *Handlers) HandleGetSandbox(w http.ResponseWriter, r *http.Request) {
 		}
 
 		gzw := gzip.NewWriter(w)
-		defer gzw.Close()
 
-		// Create the input sandbox tarball using the golang-htcondor sandbox API
+		// As above: gzip's Close writes the trailer, so an ignored error here is
+		// a silently corrupt tarball.
 		if err := sandbox.CreateInputSandboxTar(r.Context(), jobAd, gzw); err != nil {
+			_ = gzw.Close()
 			h.logger.Errorf(logging.DestinationGeneral, "Failed to create input sandbox for job %s: %v", jobID, err)
+			return
+		}
+		if err := gzw.Close(); err != nil {
+			h.logger.Errorf(logging.DestinationGeneral, "Failed to flush gzip input sandbox for job %s (client received a truncated tarball): %v", jobID, err)
 			return
 		}
 	}
@@ -227,7 +241,7 @@ func (h *Handlers) HandlePutSandbox(w http.ResponseWriter, r *http.Request) {
 	contentEncoding := r.Header.Get("Content-Encoding")
 
 	var reader io.Reader
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 
 	if contentEncoding == "zstd" {
 		// Decompress using zstd
@@ -237,7 +251,7 @@ func (h *Handlers) HandlePutSandbox(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Failed to decompress zstd data", http.StatusBadRequest)
 			return
 		}
-		defer zstdr.Close()
+		defer zstdr.Close() // zstd readers have no error to report
 		reader = zstdr
 	} else {
 		// Default to gzip
@@ -247,7 +261,7 @@ func (h *Handlers) HandlePutSandbox(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Failed to read gzip data", http.StatusBadRequest)
 			return
 		}
-		defer gzr.Close()
+		defer func() { _ = gzr.Close() }()
 		reader = gzr
 	}
 
@@ -260,7 +274,10 @@ func (h *Handlers) HandlePutSandbox(w http.ResponseWriter, r *http.Request) {
 	h.logger.Infof(logging.DestinationGeneral, "Successfully extracted output sandbox for job %s", jobID)
 
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Upload successful"))
+	if _, err := w.Write([]byte("Upload successful")); err != nil {
+		// The sandbox is already extracted; only the acknowledgement was lost.
+		h.logger.Errorf(logging.DestinationGeneral, "Failed to acknowledge output sandbox upload for job %s: %v", jobID, err)
+	}
 }
 
 func (h *Handlers) authenticateRequest(w http.ResponseWriter, r *http.Request, jobID string) (string, bool) {

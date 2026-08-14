@@ -41,12 +41,12 @@ HTTP_API_IDP_DB_PATH = %s/idp.db
 
 	// Set environment variable for HTCondor config
 	oldConfig := os.Getenv("CONDOR_CONFIG")
-	os.Setenv("CONDOR_CONFIG", configFile)
+	_ = os.Setenv("CONDOR_CONFIG", configFile)
 	defer func() {
 		if oldConfig != "" {
-			os.Setenv("CONDOR_CONFIG", oldConfig)
+			_ = os.Setenv("CONDOR_CONFIG", oldConfig)
 		} else {
-			os.Unsetenv("CONDOR_CONFIG")
+			_ = os.Unsetenv("CONDOR_CONFIG")
 		}
 	}()
 
@@ -155,7 +155,7 @@ serverReady:
 		if err != nil {
 			t.Fatalf("Failed to call /api/v1/ping: %v", err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		body, _ := io.ReadAll(resp.Body)
 
@@ -180,7 +180,7 @@ serverReady:
 		if err != nil {
 			t.Fatalf("Failed to call /api/v1/jobs: %v", err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		// The endpoint may require auth; accept 200 (success) or 401 (auth required).
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusUnauthorized {
@@ -198,7 +198,7 @@ serverReady:
 		if err != nil {
 			t.Fatalf("Failed to call /api/v1/sandbox/register: %v", err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		// This endpoint requires POST, so we expect 405
 		if resp.StatusCode != http.StatusMethodNotAllowed {

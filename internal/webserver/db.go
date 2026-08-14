@@ -68,7 +68,7 @@ func NewDB(dbPath string) (*DB, error) {
 	}
 
 	if err := initSchema(db); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
 	}
 
@@ -120,7 +120,7 @@ func (d *DB) RegisterJob(jobID, jobAdJSON, owner string, uid, gid int) (string, 
 	if err != nil {
 		return "", 0, fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }() // no-op once Commit has run
 
 	var registrationID int64
 	err = tx.QueryRow(`
@@ -180,7 +180,7 @@ func (d *DB) ValidateToken(token string) (string, int, int, string, error) {
 	if err != nil {
 		return "", 0, 0, "", fmt.Errorf("failed to query tokens: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var jobID, hashedToken, jobAdJSON string

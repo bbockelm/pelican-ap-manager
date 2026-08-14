@@ -31,7 +31,7 @@ func getSocketCredentials(r *http.Request, logger *htcondorlogging.Logger) (int,
 	if unixConn, ok := conn.(*net.UnixConn); ok {
 		file, err := unixConn.File()
 		if err == nil {
-			defer file.Close()
+			defer func() { _ = file.Close() }()
 
 			// macOS uses LOCAL_PEERCRED with the Xucred structure, at level
 			// SOL_LOCAL -- not SOL_SOCKET, which is where Linux keeps
