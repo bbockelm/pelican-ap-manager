@@ -175,10 +175,11 @@ func runManagedDaemonScenario(t *testing.T, rootMode bool) {
 	if err != nil {
 		t.Fatalf("read address file: %v", err)
 	}
+	// The address file carries the daemon's CEDAR command address as a sinful
+	// string, which is what condor tools dial.
 	addrStr := strings.TrimSpace(string(addrContent))
-	expectedSocketPath := filepath.Join(rootDir, "spool", "pelican_manager.sock")
-	if addrStr != expectedSocketPath {
-		t.Logf("note: address file contains %q (expected %q); this is normal if PELICAN_MANAGER_ADDRESS_FILE or PELICAN_REGISTRATION_SOCKET is explicitly configured", addrStr, expectedSocketPath)
+	if !strings.HasPrefix(addrStr, "<") || !strings.HasSuffix(addrStr, ">") {
+		t.Errorf("address file = %q, want a sinful string like <host:port>", addrStr)
 	}
 
 	scheddAddr, err := getScheddAddress(rootDir, 10*time.Second)
@@ -228,7 +229,7 @@ func runManagedDaemonScenario(t *testing.T, rootMode bool) {
 	// The sandbox socket belongs to pelican_web, which comes up independently of
 	// pelican_man, so wait for it rather than assuming the earlier pelican_man
 	// readiness checks covered it.
-	socketPath := filepath.Join(rootDir, "spool", "pelican_manager.sock")
+	socketPath := filepath.Join(socketDir, "pelican_manager.sock")
 	if err := waitForSocket(socketPath, 45*time.Second); err != nil {
 		printHTCondorLogs(rootDir, t)
 		if data, rerr := os.ReadFile(filepath.Join(rootDir, "log", "PelicanWebLog")); rerr == nil {

@@ -174,7 +174,11 @@ RUN = $(LOCAL_DIR)/run
 LOCK = $(LOCAL_DIR)/lock
 DAEMON_LIST = MASTER, COLLECTOR, SHARED_PORT, NEGOTIATOR, SCHEDD, STARTD
 SCHEDD_NAME = integration_schedd
-PELICAN_MANAGER_SCHEDD_NAME = integration_schedd@$(FULL_HOSTNAME)
+# Deliberately the bare name, not integration_schedd@$(FULL_HOSTNAME): that is
+# how operators actually set SCHEDD_NAME, and the schedd advertises it qualified
+# with its own idea of the hostname (which here is "localhost", from
+# NETWORK_INTERFACE). Hardcoding the qualified form made every schedd lookup miss.
+PELICAN_MANAGER_SCHEDD_NAME = integration_schedd
 SCHEDD_INTERVAL = 5
 UPDATE_INTERVAL = 5
 CONDOR_HOST = 127.0.0.1
@@ -182,6 +186,9 @@ NETWORK_INTERFACE = 127.0.0.1
 BIND_ALL_INTERFACES = False
 USE_SHARED_PORT = True
 DAEMON_SOCKET_DIR = %s
+# sun_path is capped at 104 bytes on macOS; SPOOL under the test's temp dir
+# exceeds it, so the sandbox socket goes in the short socket dir instead.
+PELICAN_REGISTRATION_SOCKET = $(DAEMON_SOCKET_DIR)/pelican_manager.sock
 COLLECTOR_HOST = 127.0.0.1:0
 COLLECTOR_ADDRESS_FILE = $(LOG)/.collector_address
 SCHEDD_ADDRESS_FILE = $(LOG)/.schedd_address
@@ -444,8 +451,24 @@ func buildWebBinary(t *testing.T, workDir string) (string, error) {
 	return buildBinary(t, workDir, "pelican_web")
 }
 
+// buildBinary produces the named daemon under workDir.
+//
+// PELICAN_MANAGER_BINARY / PELICAN_WEB_BINARY short-circuit the build with an
+// already-compiled binary, which is what the root test needs: `go build` as root
+// would want a root-owned module cache, so CI compiles as the normal user and
+// runs only the test binary privileged. The binary is copied into workDir so it
+// sits inside the tree the test has made readable by the condor user.
 func buildBinary(t *testing.T, workDir, name string) (string, error) {
 	binPath := filepath.Join(workDir, name)
+
+	if prebuilt := os.Getenv(prebuiltEnvVar(name)); prebuilt != "" {
+		if err := copyExecutable(prebuilt, binPath); err != nil {
+			return "", fmt.Errorf("copying prebuilt %s from %s: %w", name, prebuilt, err)
+		}
+		t.Logf("using prebuilt %s from %s", name, prebuilt)
+		return binPath, nil
+	}
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", fmt.Errorf("getwd: %w", err)
@@ -459,6 +482,23 @@ func buildBinary(t *testing.T, workDir, name string) (string, error) {
 		return "", fmt.Errorf("go build %s: %v (%s)", name, err, string(out))
 	}
 	return binPath, nil
+}
+
+// prebuiltEnvVar names the override for a daemon binary: pelican_man ->
+// PELICAN_MANAGER_BINARY, pelican_web -> PELICAN_WEB_BINARY.
+func prebuiltEnvVar(name string) string {
+	if name == "pelican_man" {
+		return "PELICAN_MANAGER_BINARY"
+	}
+	return "PELICAN_WEB_BINARY"
+}
+
+func copyExecutable(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0o755)
 }
 
 func submitSleepJob(ctx context.Context, workDir, collectorAddr, scheddAddr string) (int64, error) {
