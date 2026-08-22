@@ -219,8 +219,22 @@ Every poll cycle, `pelican_man` reads recent history twice: the completed-job hi
 If the pool already runs [htcondordb](https://github.com/bbockelm/htcondordb) with `scheddsync` mirroring this schedd, point the manager at the mirror and both reads move off the access point entirely:
 
 ```
+PELICAN_MANAGER_EPOCH_DB_ADDRESS = auto
+```
+
+`auto` finds the local htcondordb the way its own clients do — `HTCONDORDB_ADDRESS_FILE` or `HTCONDORDB_HOST` from the environment, else the address file the daemon publishes. **Use it whenever htcondordb runs on this access point**, because a literal address cannot be written down there: under `condor_master` the command address carries a shared-port socket name derived from the daemon's pid, so it changes every time htcondordb restarts. An address file path works too, if it is somewhere non-default:
+
+```
+PELICAN_MANAGER_EPOCH_DB_ADDRESS = /var/log/condor/.htcondordb_address
+```
+
+A host and port is for a *remote* htcondordb, which is the only case where the address is stable:
+
+```
 PELICAN_MANAGER_EPOCH_DB_ADDRESS = htcondordb.example.org:9618
 ```
+
+Whichever form, it is re-resolved on every connection attempt, so an htcondordb that restarts is picked up rather than leaving a stale address behind.
 
 The address defaults to `PELICAN_MANAGER_RULE_DB_ADDRESS`, so a site already keeping its rules in htcondordb gets this by setting nothing. Set it to a different address to split the two; leave both unset to read everything from the schedd.
 
@@ -279,7 +293,7 @@ All settings come from HTCondor configuration macros, resolved the same way `con
 | `PELICAN_MANAGER_RATE_RULES` | — | Comma-separated list of static rule names. |
 | `PELICAN_MANAGER_RATE_RULE_<NAME>` | — | The body of one rule (see syntax above). |
 | `PELICAN_MANAGER_RULE_STORE_PATH` | `$(SPOOL)/pelican_rate_rules.json` | JSON rule store. |
-| `PELICAN_MANAGER_RULE_DB_ADDRESS` | — | htcondordb address; overrides the JSON store. |
+| `PELICAN_MANAGER_RULE_DB_ADDRESS` | — | htcondordb address (`auto`, an address-file path, or `host:port`); overrides the JSON store. |
 | `PELICAN_MANAGER_RULE_DB_TABLE` | `pelican_rate_rules` | Table name in htcondordb. |
 | `PELICAN_MANAGER_LIMIT_LEASE` | `60s` | How long an installed limit survives without renewal. Must exceed the poll interval; capped by the schedd's `STARTUP_LIMIT_MAX_EXPIRATION`. |
 
@@ -300,7 +314,7 @@ All settings come from HTCondor configuration macros, resolved the same way `con
 | `PELICAN_MANAGER_COLLECTOR_HOST` | `COLLECTOR_HOST`, else `localhost:9618` | Collector to advertise to and to locate the schedd through. |
 | `PELICAN_MANAGER_SCHEDD_NAME` | `SCHEDD_NAME` | Which schedd to manage. The bare name is fine — the schedd advertises it as `<name>@<fullhostname>` and both forms match. Empty means "the only schedd in the pool". |
 | `PELICAN_MANAGER_SITE_ATTRIBUTE` | `MachineAttrGLIDEIN_ResourceName0` | Machine attribute naming the execution site. **Set this to whatever your pool actually uses**, or `site=` selectors will never match. |
-| `PELICAN_MANAGER_EPOCH_DB_ADDRESS` | `PELICAN_MANAGER_RULE_DB_ADDRESS` | Read history from an htcondordb mirror instead of the schedd. Falls back to the schedd on any error. |
+| `PELICAN_MANAGER_EPOCH_DB_ADDRESS` | `PELICAN_MANAGER_RULE_DB_ADDRESS` | Read history from an htcondordb mirror instead of the schedd. `auto` for a local htcondordb, an address-file path, or `host:port` for a remote one. Falls back to the schedd on any error. |
 | `PELICAN_MANAGER_EPOCH_DB_JOB_TABLE` | `history` | Archive table `scheddsync` mirrors the schedd's `HISTORY` file to. |
 | `PELICAN_MANAGER_EPOCH_DB_TRANSFER_TABLE` | `epoch_history` | Archive table `scheddsync` mirrors `JOB_EPOCH_HISTORY` to; the transfer records are here. |
 | `PELICAN_MANAGER_STATE_DB_ADDRESS` | `PELICAN_MANAGER_RULE_DB_ADDRESS` | Keep the daemon's working state in htcondordb rather than the `SPOOL` JSON file. A load failure is fatal. |
