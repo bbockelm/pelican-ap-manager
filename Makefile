@@ -25,7 +25,7 @@ GOENV := GOFLAGS= GOPRIVATE=github.com/bbockelm,github.com/PelicanPlatform
 GO    ?= go
 
 .PHONY: all build manager web build-condor version test test-integration vet fmt tidy clean \
-        fetch-job-epochs
+        check-action-pins fetch-job-epochs
 
 all: build
 
@@ -59,6 +59,9 @@ fmt: ## Rewrite sources with gofmt
 
 tidy: ## Reconcile go.mod / go.sum
 	$(GOENV) $(GO) mod tidy
+
+check-action-pins: ## Verify every GitHub Actions reference is pinned to a commit SHA
+	./scripts/check-action-pins.sh
 
 clean: ## Remove built binaries
 	rm -rf $(BIN_DIR) pelican_man pelican_web

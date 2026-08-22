@@ -9,3 +9,15 @@ repos:
       - id: check-merge-conflict
       - id: check-case-conflict
       - id: mixed-line-ending
+
+  # A tag like @v4 is whatever its owner last pointed it at, so one hand-edited
+  # workflow would undo the pinning for the whole repository.
+  - repo: local
+    hooks:
+      - id: check-action-pins
+        name: GitHub Actions are pinned to commit SHAs
+        entry: scripts/check-action-pins.sh
+        language: script
+        # The script reads every workflow itself, so it needs no filenames.
+        files: ^\.github/workflows/.*\.ya?ml$
+        pass_filenames: false
