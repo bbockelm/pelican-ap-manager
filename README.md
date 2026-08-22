@@ -231,6 +231,34 @@ Two things to know before turning it on:
 
 A mirror is behind the schedd by however long the sync lags. That is fine here — the manager reacts to rolling windows measured in hours — but a mirror that has fallen far behind will make it react to stale data without saying so. If you run one, monitor the sync.
 
+### Where the daemon's own state lives
+
+Separate from the rules, `pelican_man` keeps working state: how far it has read into transfer and job history, the per-bucket transfer summaries, and the capacity the control loop has settled on for each (user, site) pair. Losing it is not fatal but it is not free either — the daemon comes back having forgotten every pair it had classified, and re-reads a whole lookback window of history to rebuild the summaries.
+
+By default it is a JSON document under `SPOOL`:
+
+```
+PELICAN_MANAGER_STATE_PATH = $(SPOOL)/pelican_state.json
+```
+
+It can go in htcondordb instead, which is what lets a replacement access point pick up where the last one left off:
+
+```
+PELICAN_MANAGER_STATE_DB_ADDRESS = htcondordb.example.org:9618
+```
+
+As with the history mirror, this defaults to `PELICAN_MANAGER_RULE_DB_ADDRESS`, so one setting covers both.
+
+The state is not stored as one document. It is written on every poll cycle and most of it does not change between cycles, so it is split across rows — one for the read cursors, one per (user, site) pair, one per summary bucket, and one each for the rolling working sets — and only the rows whose contents actually moved are written. That keeps a steady-state save proportional to what changed rather than to how much history the daemon is holding, and it makes the interesting part queryable:
+
+```sql
+SELECT PairKey, CapacityGBPerMin FROM pelican_manager_state WHERE Kind == "pair"
+```
+
+The rolling working sets stay as JSON payloads. They are the daemon's own scratch, nothing queries them, and giving them attributes would only add a way to drop a field silently.
+
+**A state load failure is fatal.** If the store is configured and cannot be read, `pelican_man` exits rather than starting with an empty state — coming up blank would silently reset the cursors and discard every classification, and it would look exactly like a healthy first start.
+
 ---
 
 ## Configuration reference
@@ -268,6 +296,8 @@ All settings come from HTCondor configuration macros, resolved the same way `con
 | `PELICAN_MANAGER_SITE_ATTRIBUTE` | `MachineAttrGLIDEIN_ResourceName0` | Machine attribute naming the execution site. **Set this to whatever your pool actually uses**, or `site=` selectors will never match. |
 | `PELICAN_MANAGER_EPOCH_DB_ADDRESS` | `PELICAN_MANAGER_RULE_DB_ADDRESS` | Read job history from an htcondordb mirror instead of the schedd. Falls back to the schedd on any error. |
 | `PELICAN_MANAGER_EPOCH_DB_TABLE` | `history` | Archive table `scheddsync` writes job history to. |
+| `PELICAN_MANAGER_STATE_DB_ADDRESS` | `PELICAN_MANAGER_RULE_DB_ADDRESS` | Keep the daemon's working state in htcondordb rather than the `SPOOL` JSON file. A load failure is fatal. |
+| `PELICAN_MANAGER_STATE_DB_TABLE` | `pelican_manager_state` | Table holding the state rows. |
 | `PELICAN_MANAGER_ADDRESS_FILE` | `$(LOG)/.pelican_manager_address` | Where the command address is published. |
 
 ### State and logging

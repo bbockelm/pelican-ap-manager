@@ -162,6 +162,11 @@ func run() error {
 		svc.SetRuleStore(ruleStore)
 		syncStaticRules(context.Background(), ruleStore, cfg, log)
 	}
+	// The state store was opened by buildService, which does not outlive this
+	// function; closing it here releases the htcondordb session on shutdown.
+	if st, _ := svc.StateStore(); st != nil {
+		defer func() { _ = st.Close() }()
+	}
 	svc.SetEnforcement(cfg.EnforcementMode)
 	svc.SetLimitLease(cfg.LimitLease)
 	if cfg.LimitLeaseWarning != "" {
@@ -277,10 +282,31 @@ func noteSuffix(note string) string {
 // buildService assembles the polling/advertising service and the state it
 // carries across restarts.
 func buildService(cfg *config.Config, log *htcondorlogging.Logger, oneshot bool) (*daemon.Service, error) {
-	log.Infof(htcondorlogging.DestinationGeneral, "loading state from %s", cfg.StatePath)
-	st, err := state.Load(cfg.StatePath)
+	// The daemon's working state -- epoch cursors, transfer summaries, the
+	// control loop's per-pair conclusions. A JSON document under SPOOL by
+	// default; an htcondordb table when one is configured, which is what lets a
+	// replacement AP pick up where this one left off.
+	stateStore, stateDesc, err := store.OpenState(store.StateOptions{
+		DBAddress: cfg.StateDBAddress,
+		DBTable:   cfg.StateDBTable,
+		FilePath:  cfg.StatePath,
+		Config:    cfg.HTCondorConfig(),
+	})
 	if err != nil {
-		return nil, fmt.Errorf("state load: %w", err)
+		return nil, fmt.Errorf("state store: %w", err)
+	}
+	log.Infof(htcondorlogging.DestinationGeneral, "loading state from %s", stateDesc)
+
+	loadCtx, cancelLoad := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancelLoad()
+	st, err := stateStore.Load(loadCtx)
+	if err != nil {
+		// Starting with an empty state would silently discard the epoch cursors
+		// and every pair the control loop had classified, then re-read a whole
+		// lookback window as if the daemon were new. Better to fail loudly and
+		// let the master retry.
+		_ = stateStore.Close()
+		return nil, fmt.Errorf("state load from %s: %w", stateDesc, err)
 	}
 
 	condorClient, err := condor.NewClient(cfg.CollectorHost, cfg.ScheddName, cfg.SiteAttribute)
@@ -347,9 +373,11 @@ func buildService(cfg *config.Config, log *htcondorlogging.Logger, oneshot bool)
 		log.Infof(htcondorlogging.DestinationGeneral, "job mirror initialization failed: %v; falling back to schedd polling", err)
 	}
 
-	return daemon.NewService(condorClient, st, cfg.StatePath, cfg.PollInterval, cfg.AdvertiseInterval,
+	svc := daemon.NewService(condorClient, st, cfg.StatePath, cfg.PollInterval, cfg.AdvertiseInterval,
 		cfg.EpochLookback, cfg.StatsWindow, tracker, jobMirror, cfg.JobMirrorPath,
-		director.New(cfg.DirectorCacheTTL), log, cfg.InfoPath, cfg.ScheddName, cfg.SiteAttribute, oneshot), nil
+		director.New(cfg.DirectorCacheTTL), log, cfg.InfoPath, cfg.ScheddName, cfg.SiteAttribute, oneshot)
+	svc.SetStateStore(stateStore, stateDesc)
+	return svc, nil
 }
 
 // writeAddressFile publishes the command address to PELICAN_MANAGER_ADDRESS_FILE

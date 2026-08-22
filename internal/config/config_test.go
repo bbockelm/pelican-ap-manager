@@ -245,3 +245,49 @@ func TestPollIntervalNoLongerAffectsTheLease(t *testing.T) {
 		t.Errorf("poll interval still drives the lease warning: %s", cfg.LimitLeaseWarning)
 	}
 }
+
+// TestStateDBFollowsTheRuleDB: one htcondordb is the common case, so a site
+// that already put its rules there should not have to name the same address
+// twice.
+func TestStateDBFollowsTheRuleDB(t *testing.T) {
+	cfg, err := LoadFrom(newCondorConfig(t, map[string]string{
+		"PELICAN_MANAGER_RULE_DB_ADDRESS": "db.example.org:9618",
+	}))
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	if cfg.StateDBAddress != "db.example.org:9618" {
+		t.Errorf("StateDBAddress = %q, want the rule DB address", cfg.StateDBAddress)
+	}
+}
+
+// TestStateDBIsOffByDefault: the JSON document under SPOOL is what every
+// existing deployment uses, and no configuration should quietly move it.
+func TestStateDBIsOffByDefault(t *testing.T) {
+	cfg, err := LoadFrom(newCondorConfig(t, nil))
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	if cfg.StateDBAddress != "" {
+		t.Errorf("StateDBAddress = %q, want empty (state stays in the SPOOL file)", cfg.StateDBAddress)
+	}
+	if cfg.StatePath == "" {
+		t.Error("no StatePath default; there would be nowhere to write state")
+	}
+}
+
+// TestStateDBCanBeSplitFromTheRuleDB: state is written every poll cycle and the
+// rules almost never, so a site may well want them in different places.
+func TestStateDBCanBeSplitFromTheRuleDB(t *testing.T) {
+	cfg, err := LoadFrom(newCondorConfig(t, map[string]string{
+		"PELICAN_MANAGER_RULE_DB_ADDRESS":  "rules.example.org:9618",
+		"PELICAN_MANAGER_STATE_DB_ADDRESS": "state.example.org:9618",
+		"PELICAN_MANAGER_STATE_DB_TABLE":   "ap40_state",
+	}))
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	if cfg.StateDBAddress != "state.example.org:9618" || cfg.StateDBTable != "ap40_state" {
+		t.Errorf("state DB = %q/%q", cfg.StateDBAddress, cfg.StateDBTable)
+	}
+}

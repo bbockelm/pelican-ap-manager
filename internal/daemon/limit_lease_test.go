@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	htcondorlogging "github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/pelican-ap-manager/internal/config"
 	"github.com/bbockelm/pelican-ap-manager/internal/ratelimit"
+	"github.com/bbockelm/pelican-ap-manager/internal/state"
 )
 
 // fakeSchedd records what the limit manager asks of the schedd and lets a test
@@ -439,5 +442,34 @@ func TestServiceAndManagerAgreeOnTheRenewalInterval(t *testing.T) {
 		if got, want := s.renewalInterval(), m.renewalInterval(); got != want {
 			t.Errorf("lease %v: service says %v, limit manager says %v", lease, got, want)
 		}
+	}
+}
+
+// TestNewServiceAlwaysHasAStateStore: a nil store makes saveState a silent
+// no-op, and nothing notices until a restart comes up with no state -- no epoch
+// cursors, no pairs, a fresh lookback window to re-read. NewService must
+// therefore default to the file backend rather than waiting to be handed one.
+func TestNewServiceAlwaysHasAStateStore(t *testing.T) {
+	logger, err := htcondorlogging.New(&htcondorlogging.Config{})
+	if err != nil {
+		t.Fatalf("logger: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "state.json")
+
+	svc := NewService(nil, state.New(), path, time.Second, time.Second, time.Hour, time.Hour,
+		nil, nil, "", nil, logger, "", "", "", true)
+
+	st, desc := svc.StateStore()
+	if st == nil {
+		t.Fatal("NewService left the state store nil; every save would be a silent no-op")
+	}
+	if desc != "file "+path {
+		t.Errorf("state store description = %q, want %q", desc, "file "+path)
+	}
+
+	// And it actually writes: a store that cannot save is no better than nil.
+	svc.saveState()
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("state was not written to %s: %v", path, err)
 	}
 }

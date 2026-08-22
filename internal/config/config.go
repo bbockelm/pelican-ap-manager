@@ -64,6 +64,16 @@ type Config struct {
 	EpochDBAddress string
 	EpochDBTable   string
 
+	// StateDBAddress, when set, keeps the daemon's working state -- the epoch
+	// cursors, transfer summaries and per-pair control conclusions -- in an
+	// htcondordb table instead of the JSON document at StatePath. Defaults to
+	// RuleDBAddress: a site already keeping its rules there is running the
+	// database this needs.
+	//
+	// StateDBTable names the table.
+	StateDBAddress string
+	StateDBTable   string
+
 	// RuleDBAddress, when set, points the rate-rule store at an htcondordb
 	// daemon instead of the local JSON document. RuleDBTable names the table.
 	RuleDBAddress string
@@ -126,6 +136,8 @@ const (
 
 	macroEpochDBAddress = "PELICAN_MANAGER_EPOCH_DB_ADDRESS"
 	macroEpochDBTable   = "PELICAN_MANAGER_EPOCH_DB_TABLE"
+	macroStateDBAddress = "PELICAN_MANAGER_STATE_DB_ADDRESS"
+	macroStateDBTable   = "PELICAN_MANAGER_STATE_DB_TABLE"
 	macroLimitLease     = "PELICAN_MANAGER_LIMIT_LEASE"
 )
 
@@ -286,6 +298,14 @@ func LoadFrom(condorCfg *condorconfig.Config) (*Config, error) {
 	}
 	if v := firstStringMacro(condorCfg, macroEpochDBTable); v != "" {
 		cfg.EpochDBTable = v
+	}
+	if v := firstStringMacro(condorCfg, macroStateDBAddress); v != "" {
+		cfg.StateDBAddress = v
+	} else {
+		cfg.StateDBAddress = cfg.RuleDBAddress
+	}
+	if v := firstStringMacro(condorCfg, macroStateDBTable); v != "" {
+		cfg.StateDBTable = v
 	}
 
 	if d, err := parseDurationMacro(condorCfg, macroLimitLease); err != nil {

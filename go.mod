@@ -10,6 +10,7 @@ require (
 	github.com/bbockelm/golang-htcondor/webapi v0.0.0-20260821164716-6b7cf547053d
 	github.com/bbockelm/htcondordb v0.17.2
 	github.com/glebarez/sqlite v1.11.0
+	github.com/google/go-cmp v0.7.0
 	github.com/jellydator/ttlcache/v3 v3.3.0
 	github.com/klauspost/compress v1.19.1
 	golang.org/x/crypto v0.54.0

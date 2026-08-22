@@ -75,6 +75,12 @@ type Service struct {
 	// restart beyond what the schedd itself still holds.
 	rules store.RuleStore
 
+	// stateStore persists the daemon's own working state -- the epoch cursors,
+	// the transfer summaries, the control loop's per-pair conclusions. Set by
+	// buildService; file-backed unless an htcondordb address is configured.
+	stateStore     store.StateStore
+	stateStoreDesc string
+
 	ruleMu sync.RWMutex
 }
 
@@ -105,10 +111,27 @@ func NewService(client condor.CondorClient, st *state.State, statePath string, p
 		}
 	}
 
+	// The default state backend is the JSON document at statePath, which is
+	// what this did before there was an interface here. buildService replaces it
+	// when an htcondordb address is configured. Defaulting rather than leaving
+	// it nil matters: a nil store makes saveState a silent no-op, and nothing
+	// notices until a restart comes up with no state.
+	var stateStore store.StateStore
+	stateDesc := "no state store"
+	if statePath != "" {
+		if fs, err := store.OpenFileStateStore(statePath); err != nil {
+			logger.Infof(htcondorlogging.DestinationGeneral, "warning: could not open state file %s: %v", statePath, err)
+		} else {
+			stateStore, stateDesc = fs, "file "+statePath
+		}
+	}
+
 	return &Service{
 		condor:            client,
 		state:             st,
 		statePath:         statePath,
+		stateStore:        stateStore,
+		stateStoreDesc:    stateDesc,
 		pollInterval:      poll,
 		advertiseInterval: advertise,
 		infoPath:          infoPath,
@@ -370,10 +393,32 @@ func (s *Service) saveState() {
 		}
 	}
 
-	s.Printf("saving state to %s", s.statePath)
-	if err := s.state.Save(s.statePath); err != nil {
-		s.Printf("state save error: %v", err)
+	store, desc := s.StateStore()
+	if store == nil {
+		// No store configured: nothing to save to, and saying so once per poll
+		// would be noise. buildService always sets one.
+		return
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := store.Save(ctx, s.state); err != nil {
+		s.Printf("state save error (%s): %v", desc, err)
+	}
+}
+
+// SetStateStore installs the backend the poll loop saves to. desc names it for
+// log lines. Safe to call while the loop is running, though nothing does.
+func (s *Service) SetStateStore(st store.StateStore, desc string) {
+	s.ruleMu.Lock()
+	defer s.ruleMu.Unlock()
+	s.stateStore, s.stateStoreDesc = st, desc
+}
+
+// StateStore returns the installed state backend and its description.
+func (s *Service) StateStore() (store.StateStore, string) {
+	s.ruleMu.RLock()
+	defer s.ruleMu.RUnlock()
+	return s.stateStore, s.stateStoreDesc
 }
 
 // persistJobMirror writes a JSON snapshot of the current job mirror for external inspection.
