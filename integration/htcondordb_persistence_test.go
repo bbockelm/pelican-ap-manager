@@ -18,7 +18,7 @@ import (
 	"github.com/bbockelm/pelican-ap-manager/internal/store"
 )
 
-// TestRulesAndStatePersistToHtcondordb runs pelican_man and a real htcondordb
+// TestRulesAndStatePersistToHtcondordb runs pelican-man and a real htcondordb
 // under one condor_master and checks that what the daemon says it stored is
 // actually in the database.
 //
@@ -26,13 +26,13 @@ import (
 // anything at all. Everything else covering the database backends either
 // exercised a pure function -- what a rule serializes to, which rows changed --
 // or the path where the connection fails. None of it could see that the server
-// rejected every write: pelican_man sent ads in the bracketed new-ClassAd form
+// rejected every write: pelican-man sent ads in the bracketed new-ClassAd form
 // while dbrpc parses written ads with classad.ParseOld, so every write came back
 // a syntax error, the rule store stayed empty, and the state was never saved.
 // The daemon otherwise looked healthy.
 //
 // So the assertions here are deliberately made from the database's side, with a
-// second client, rather than from anything pelican_man reports about itself.
+// second client, rather than from anything pelican-man reports about itself.
 func TestRulesAndStatePersistToHtcondordb(t *testing.T) {
 	// Before building anything: the plain integration job has no HTCondor, and
 	// every other test here skips in that case. Building first meant this one
@@ -52,7 +52,7 @@ func TestRulesAndStatePersistToHtcondordb(t *testing.T) {
 	configPath := filepath.Join(rootDir, "condor_config")
 	managerPath, err := buildPelicanBinary(t, rootDir)
 	if err != nil {
-		t.Fatalf("build pelican_man: %v", err)
+		t.Fatalf("build pelican-man: %v", err)
 	}
 
 	// Started as root, both daemons drop to the condor user before opening
@@ -99,7 +99,7 @@ func TestRulesAndStatePersistToHtcondordb(t *testing.T) {
 
 	// A named shared-port socket, so the published address is predictable and
 	// this test can assert -sock took effect.
-	// pelican_man is pointed at htcondordb's address file rather than a literal
+	// pelican-man is pointed at htcondordb's address file rather than a literal
 	// address, because the config is written before either daemon starts and the
 	// port is not known until then. It is also the form an AP would use, and it
 	// is resolved per connection attempt, so the daemon starting first does not
@@ -115,7 +115,7 @@ func TestRulesAndStatePersistToHtcondordb(t *testing.T) {
 
 		"HTCONDORDB":       dbBin,
 		"HTCONDORDB_DEBUG": "cedar:warn",
-		// Not syncing the schedd: this test is about pelican_man's own writes,
+		// Not syncing the schedd: this test is about pelican-man's own writes,
 		// and tailing the queue would only add moving parts.
 		"HTCONDORDB_SYNC_SCHEDD": "false",
 
@@ -174,7 +174,7 @@ func TestRulesAndStatePersistToHtcondordb(t *testing.T) {
 
 	// --- the rule reached the database -------------------------------------
 	//
-	// Asked of the database with a separate client, not of pelican_man: the
+	// Asked of the database with a separate client, not of pelican-man: the
 	// daemon's own view would be just as empty whether the write succeeded or
 	// was rejected.
 	rules := waitForRules(t, published, configPath, 90*time.Second)

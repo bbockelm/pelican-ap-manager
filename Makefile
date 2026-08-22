@@ -1,8 +1,8 @@
 # pelican-ap-manager build.
 #
-# Two binaries: pelican_man (the polling/control daemon) and pelican_web (the
+# Two binaries: pelican-man (the polling/control daemon) and pelican-web (the
 # HTTP surface -- sandbox API plus the golang-htcondor REST API). They share the
-# module and most of their configuration; pelican_web exists so the serving work
+# module and most of their configuration; pelican-web exists so the serving work
 # can be run, restarted and sized independently of the control loop.
 #
 # `go build` is itself incremental (build cache), so the phony targets just
@@ -31,15 +31,15 @@ all: build
 
 build: manager web ## Build both binaries into $(BIN_DIR)
 
-manager: ## Build the pelican_man polling/control daemon
-	$(GOENV) $(GO) build -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/pelican_man ./cmd/pelican_man
+manager: ## Build the pelican-man polling/control daemon
+	$(GOENV) $(GO) build -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/pelican-man ./cmd/pelican-man
 
-web: ## Build the pelican_web HTTP daemon
-	$(GOENV) $(GO) build -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/pelican_web ./cmd/pelican_web
+web: ## Build the pelican-web HTTP daemon
+	$(GOENV) $(GO) build -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/pelican-web ./cmd/pelican-web
 
 build-condor: ## Build both binaries with the `condor` build tag
-	$(GOENV) $(GO) build -tags condor -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/pelican_man ./cmd/pelican_man
-	$(GOENV) $(GO) build -tags condor -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/pelican_web ./cmd/pelican_web
+	$(GOENV) $(GO) build -tags condor -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/pelican-man ./cmd/pelican-man
+	$(GOENV) $(GO) build -tags condor -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/pelican-web ./cmd/pelican-web
 
 version: ## Print the version that would be stamped
 	@echo $(VERSION)
@@ -64,7 +64,7 @@ check-action-pins: ## Verify every GitHub Actions reference is pinned to a commi
 	./scripts/check-action-pins.sh
 
 clean: ## Remove built binaries
-	rm -rf $(BIN_DIR) pelican_man pelican_web
+	rm -rf $(BIN_DIR) pelican-man pelican-web
 
 fetch-job-epochs:
 	GOFLAGS= go run -tags condor ./tools/collect_job_epochs \
@@ -134,6 +134,6 @@ run-ap40:
 	_condor_PELICAN_MANAGER_ADVERTISE_INTERVAL=1m \
 	_condor_PELICAN_MANAGER_STATS_WINDOW=1h \
 	_condor_PELICAN_MANAGER_INFO_PATH=artifacts/ap40_run/pelican_summary.json \
-	GOFLAGS= go run -tags condor ./cmd/pelican_man \
+	GOFLAGS= go run -tags condor ./cmd/pelican-man \
 		-collector cm-1.ospool.osg-htc.org:9618 \
 		-schedd ap40.uw.osg-htc.org

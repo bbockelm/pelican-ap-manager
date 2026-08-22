@@ -59,7 +59,7 @@ type TransferAttempt struct {
 	DurationSec float64 // Time taken for this attempt (TransferTimeN)
 }
 
-// CondorClient abstracts the interactions with HTCondor needed by pelican_man.
+// CondorClient abstracts the interactions with HTCondor needed by pelican-man.
 type CondorClient interface {
 	FetchTransferEpochs(sinceEpoch state.EpochID, cutoff time.Time) ([]TransferRecord, state.EpochID, error)
 	FetchJobEpochs(sinceEpoch state.EpochID, cutoff time.Time) ([]JobEpochRecord, state.EpochID, error)

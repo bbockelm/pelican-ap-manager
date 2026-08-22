@@ -28,7 +28,7 @@ import (
 	"github.com/bbockelm/pelican-ap-manager/internal/webserver"
 )
 
-// TestPelicanManagedDaemon ensures pelican_man runs under condor_master, advertises,
+// TestPelicanManagedDaemon ensures pelican-man runs under condor_master, advertises,
 // serves sandboxes over HTTP, and respects privilege expectations for root vs unprivileged runs.
 func TestPelicanManagedDaemon(t *testing.T) {
 	if _, err := exec.LookPath("condor_master"); err != nil {
@@ -90,15 +90,15 @@ func runManagedDaemonScenario(t *testing.T, rootMode bool) {
 	}
 
 	// Build both daemons first so we can include their paths in config.
-	// pelican_man serves no HTTP: the sandbox API this test exercises belongs to
-	// pelican_web, so condor_master has to run both.
+	// pelican-man serves no HTTP: the sandbox API this test exercises belongs to
+	// pelican-web, so condor_master has to run both.
 	pelicanPath, err := buildPelicanBinary(t, rootDir)
 	if err != nil {
 		t.Fatalf("build pelican: %v", err)
 	}
 	pelicanWebPath, err := buildWebBinary(t, rootDir)
 	if err != nil {
-		t.Fatalf("build pelican_web: %v", err)
+		t.Fatalf("build pelican-web: %v", err)
 	}
 
 	// Prepare all daemon overrides upfront (only essential test-specific settings)
@@ -140,7 +140,7 @@ func runManagedDaemonScenario(t *testing.T, rootMode bool) {
 		t.Fatalf("collector address discovery: %v", err)
 	}
 
-	// Wait for pelican_man log file to appear and be written
+	// Wait for pelican-man log file to appear and be written
 	pelicanLog := filepath.Join(rootDir, "log", "PelicanManagerLog")
 	if err := waitForLogFile(pelicanLog, 45*time.Second); err != nil {
 		printHTCondorLogs(rootDir, t)
@@ -148,7 +148,7 @@ func runManagedDaemonScenario(t *testing.T, rootMode bool) {
 	}
 
 	if rootMode {
-		// Ensure condor_master started pelican_man with condor-owned logs.
+		// Ensure condor_master started pelican-man with condor-owned logs.
 		if uid, err := fileOwner(pelicanLog); err == nil {
 			if uid != condorUID {
 				t.Fatalf("pelican log owner uid=%d want condor uid=%d", uid, condorUID)
@@ -165,7 +165,7 @@ func runManagedDaemonScenario(t *testing.T, rootMode bool) {
 		t.Fatalf("pelican address file creation: %v", err)
 	}
 
-	// DEBUG: Print pelican_man log to see what's happening
+	// DEBUG: Print pelican-man log to see what's happening
 	if data, err := os.ReadFile(pelicanLog); err == nil {
 		t.Logf("=== PELICAN_MAN LOG (after address file creation) ===\n%s\n=== END LOG ===", string(data))
 	}
@@ -203,7 +203,7 @@ func runManagedDaemonScenario(t *testing.T, rootMode bool) {
 		t.Fatalf("mirror status: %v", err)
 	}
 
-	// DEBUG: Print pelican_man log after job processing to see ad generation/advertising
+	// DEBUG: Print pelican-man log after job processing to see ad generation/advertising
 	if data, err := os.ReadFile(pelicanLog); err == nil {
 		t.Logf("=== PELICAN_MAN LOG (after job processing) ===\n%s\n=== END LOG ===", string(data))
 	}
@@ -226,8 +226,8 @@ func runManagedDaemonScenario(t *testing.T, rootMode bool) {
 		t.Fatalf("fetch job ad: %v", err)
 	}
 
-	// The sandbox socket belongs to pelican_web, which comes up independently of
-	// pelican_man, so wait for it rather than assuming the earlier pelican_man
+	// The sandbox socket belongs to pelican-web, which comes up independently of
+	// pelican-man, so wait for it rather than assuming the earlier pelican-man
 	// readiness checks covered it.
 	socketPath := filepath.Join(socketDir, "pelican_manager.sock")
 	if err := waitForSocket(socketPath, 45*time.Second); err != nil {
@@ -235,7 +235,7 @@ func runManagedDaemonScenario(t *testing.T, rootMode bool) {
 		if data, rerr := os.ReadFile(filepath.Join(rootDir, "log", "PelicanWebLog")); rerr == nil {
 			t.Logf("=== PELICAN_WEB LOG ===\n%s\n=== END LOG ===", string(data))
 		}
-		t.Fatalf("pelican_web sandbox socket: %v", err)
+		t.Fatalf("pelican-web sandbox socket: %v", err)
 	}
 	client := socketHTTPClient(socketPath)
 

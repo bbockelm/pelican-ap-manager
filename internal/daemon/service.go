@@ -176,10 +176,10 @@ func (s *Service) ReloadConfig(cfg *config.Config) {
 // Run starts the main polling and advertisement loops until the context is canceled.
 func (s *Service) Run(ctx context.Context) error {
 	if s.oneshoot {
-		s.Printf("pelican_man oneshot: poll=%s advertise=%s stats_window=%s", s.pollInterval, s.advertiseInterval, s.statsWindow)
+		s.Printf("pelican-man oneshot: poll=%s advertise=%s stats_window=%s", s.pollInterval, s.advertiseInterval, s.statsWindow)
 		return s.runOnce(ctx)
 	}
-	s.Printf("pelican_man starting: poll=%s advertise=%s stats_window=%s", s.pollInterval, s.advertiseInterval, s.statsWindow)
+	s.Printf("pelican-man starting: poll=%s advertise=%s stats_window=%s", s.pollInterval, s.advertiseInterval, s.statsWindow)
 
 	pollTicker := time.NewTicker(s.pollInterval)
 	advTicker := time.NewTicker(s.advertiseInterval)
@@ -201,7 +201,7 @@ func (s *Service) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			s.Println("pelican_man shutting down")
+			s.Println("pelican-man shutting down")
 			return nil
 		case <-pollTicker.C:
 			s.pollOnce(ctx)
@@ -800,7 +800,7 @@ func (s *Service) ensureLimitManager() error {
 			if hostname, err := os.Hostname(); err == nil {
 				daemonName = hostname
 			} else {
-				daemonName = "pelican_man"
+				daemonName = "pelican-man"
 			}
 		}
 	}

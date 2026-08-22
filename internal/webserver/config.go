@@ -10,7 +10,7 @@ import (
 
 // Configuration macros for the web server. They keep the PELICAN_MANAGER_
 // prefix they have always had, so an existing configuration works unchanged
-// whether the server runs inside pelican_man or as the standalone pelican_web
+// whether the server runs inside pelican-man or as the standalone pelican-web
 // daemon.
 const (
 	macroListenAddress = "PELICAN_MANAGER_WEB_LISTEN_ADDRESS"
@@ -44,7 +44,7 @@ func LoadConfig(condorCfg *condorconfig.Config) (*ServerConfig, error) {
 		SocketPath:     fmt.Sprintf("%s/pelican_manager.sock", spoolDir),
 		TLSCert:        fmt.Sprintf("%s/pelican-certs/server.crt", spoolDir),
 		TLSKey:         fmt.Sprintf("%s/pelican-certs/server.key", spoolDir),
-		DBPath:         fmt.Sprintf("%s/pelican_web.db", spoolDir),
+		DBPath:         fmt.Sprintf("%s/pelican-web.db", spoolDir),
 		HTCondorConfig: condorCfg,
 	}
 

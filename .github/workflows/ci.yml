@@ -42,7 +42,7 @@ jobs:
       - name: Test
         run: go test -short ./...
 
-      # Both binaries must build. pelican_web is the standalone HTTP daemon;
+      # Both binaries must build. pelican-web is the standalone HTTP daemon;
       # nothing in the test suite links its main package, so without this a
       # break there would only surface at release time.
       - name: Build binaries

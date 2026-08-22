@@ -1,4 +1,4 @@
-// Package store persists the pelican_man state that must survive a restart.
+// Package store persists the pelican-man state that must survive a restart.
 //
 // Historically all of it lived in one JSON blob under SPOOL. That is fine for
 // a single daemon's private scratch, but rate rules are different: an operator

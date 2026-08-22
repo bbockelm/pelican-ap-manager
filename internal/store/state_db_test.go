@@ -217,7 +217,7 @@ func TestDiffRowsDeletesWhatWentAway(t *testing.T) {
 	}
 }
 
-// TestUnknownRowKindIsAnError: a table written by a newer pelican_man must not
+// TestUnknownRowKindIsAnError: a table written by a newer pelican-man must not
 // be read as a partial state. Dropping the rows it does not recognize would
 // present that partial state as complete, and the next save would delete the
 // rest.

@@ -1,7 +1,7 @@
 name: root integration
 
-# Runs the privileged end-to-end test: condor_master starts pelican_man and
-# pelican_web as root, both drop to the condor user, the manager installs the
+# Runs the privileged end-to-end test: condor_master starts pelican-man and
+# pelican-web as root, both drop to the condor user, the manager installs the
 # operator's static rate rules as schedd startup limits, and the web daemon
 # serves a sandbox registration.
 #
@@ -67,12 +67,21 @@ jobs:
           # a root-owned module cache.
           go build -o bin/htcondordb github.com/bbockelm/htcondordb/cmd/htcondordb
 
-      # Both tests that need a real condor_master run here, because this is the
-      # only job that has one: the plain `integration` job installs no HTCondor,
-      # so everything condor_master-based skips there. A test named in neither
-      # place runs nowhere, which is what happened to the persistence test when
-      # it was first added.
-      - name: Run the integration tests that need a real HTCondor
+      # The tests that can run as root, named explicitly.
+      #
+      # Running the suite unfiltered was tried and does not work: this job is
+      # root, and TestPelicanIntegration, TestPelicanManagedDaemon and
+      # TestFakeTransferPluginIntegration all fail there. They build their pool
+      # under t.TempDir() without widening it for the condor user, so
+      # condor_master cannot open its own log ("condor daemons did not become
+      # ready"), and TestPelicanIntegration additionally submits a job, which
+      # HTCondor will not run as root.
+      #
+      # So the pattern stays -- but it is a list that has to be maintained, and a
+      # test missing from it runs in no job at all, which is what happened to the
+      # persistence test. The real fix is an unprivileged job with a real
+      # HTCondor; see the note in integration.yml.
+      - name: Run the integration tests that can run as root
         env:
           PELICAN_REQUIRE_ROOT_TEST: '1'
           GOPRIVATE: github.com/bbockelm,github.com/PelicanPlatform
@@ -80,8 +89,8 @@ jobs:
           set -euxo pipefail
           test "$(id -u)" -eq 0 || { echo "this job must run as root"; exit 1; }
           export PATH="/usr/sbin:/usr/bin:$PATH"
-          export PELICAN_MANAGER_BINARY="$PWD/bin/pelican_man"
-          export PELICAN_WEB_BINARY="$PWD/bin/pelican_web"
+          export PELICAN_MANAGER_BINARY="$PWD/bin/pelican-man"
+          export PELICAN_WEB_BINARY="$PWD/bin/pelican-web"
           export HTCONDORDB_BINARY="$PWD/bin/htcondordb"
           go test -tags integration -v -timeout 25m \
             -run '^(TestRootStaticRuleEnforcement|TestRulesAndStatePersistToHtcondordb)$' ./integration/
