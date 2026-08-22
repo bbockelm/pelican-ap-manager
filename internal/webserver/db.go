@@ -2,9 +2,12 @@ package webserver
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	_ "github.com/glebarez/sqlite"
@@ -112,7 +115,70 @@ func initSchema(db *sql.DB) error {
 		return fmt.Errorf("failed to create schema: %w", err)
 	}
 
+	// lookup_hash is what makes token validation a lookup instead of a scan;
+	// see ValidateToken. Added after the fact, so an existing database needs the
+	// column bolted on -- sqlite has no ADD COLUMN IF NOT EXISTS, and a second
+	// run reports a duplicate column rather than succeeding quietly.
+	if !hasColumn(db, "job_tokens", "lookup_hash") {
+		if _, err := db.Exec(`ALTER TABLE job_tokens ADD COLUMN lookup_hash TEXT`); err != nil {
+			return fmt.Errorf("failed to add lookup_hash column: %w", err)
+		}
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_lookup_hash ON job_tokens(lookup_hash)`); err != nil {
+		return fmt.Errorf("failed to index lookup_hash: %w", err)
+	}
+
 	return nil
+}
+
+// hasColumn reports whether a table already has a column.
+func hasColumn(db *sql.DB, table, column string) bool {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var (
+			cid         int
+			name, ctype string
+			notNull, pk int
+			dflt        sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
+			return false
+		}
+		if name == column {
+			return true
+		}
+	}
+	return false
+}
+
+// bcryptComparisons counts token verifications. It exists so a test can assert
+// that validation examines one candidate row rather than every live token --
+// the property that was broken, and one that a timing assertion could only
+// guess at.
+var bcryptComparisons atomic.Int64
+
+// compareToken verifies a token against a stored bcrypt hash.
+func compareToken(hashedToken, token string) error {
+	bcryptComparisons.Add(1)
+	return bcrypt.CompareHashAndPassword([]byte(hashedToken), []byte(token))
+}
+
+// tokenLookupHash is the indexed handle on a token: a plain SHA-256 of it, so a
+// validation can find the one candidate row instead of comparing against every
+// live token.
+//
+// A fast hash is the right primitive for *finding* the row -- the token is 32
+// bytes from crypto/rand, so there is nothing to brute-force -- and it is not
+// what authorizes the request. The bcrypt hash still is: the row this locates
+// is then verified the same way it always was. That keeps the change to how a
+// token is found, not to what makes it valid.
+func tokenLookupHash(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
 
 func (d *DB) RegisterJob(jobID, jobAdJSON, owner string, uid, gid int) (string, int64, error) {
@@ -160,9 +226,9 @@ func (d *DB) createTokenForRegistration(tx *sql.Tx, registrationID int64) (strin
 	expiresAt := time.Now().Add(tokenExpiration)
 
 	_, err = tx.Exec(`
-		INSERT INTO job_tokens (job_registration_id, hashed_token, expires_at, created_at)
-		VALUES (?, ?, ?, ?)
-	`, registrationID, string(hashedToken), expiresAt, time.Now())
+		INSERT INTO job_tokens (job_registration_id, hashed_token, lookup_hash, expires_at, created_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, registrationID, string(hashedToken), tokenLookupHash(token), expiresAt, time.Now())
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("failed to insert token: %w", err)
 	}
@@ -170,12 +236,54 @@ func (d *DB) createTokenForRegistration(tx *sql.Tx, registrationID int64) (strin
 	return token, expiresAt, nil
 }
 
+// ValidateToken resolves a bearer token to the job it was issued for.
+//
+// This used to scan: it read every unexpired token and ran a bcrypt comparison
+// against each one until one matched. bcrypt is deliberately slow, so the cost
+// was the token count times ~60ms -- 12 seconds at 200 live tokens, measured,
+// and perfectly linear. Every sandbox GET and PUT paid it, which on a busy
+// access point is a denial of service the daemon inflicts on itself.
+//
+// Now the token's SHA-256 finds the row (indexed), and bcrypt verifies that one
+// row. Constant time in the number of live tokens, and a token that matches
+// nothing costs no bcrypt at all.
 func (d *DB) ValidateToken(token string) (string, int, int, string, error) {
-	rows, err := d.db.Query(`
-		SELECT jr.job_id, jr.owner_uid, jr.owner_gid, jr.job_ad_json, jt.hashed_token, jt.expires_at
+	var (
+		jobID, jobAdJSON, hashedToken string
+		uid, gid                      int
+	)
+	err := d.db.QueryRow(`
+		SELECT jr.job_id, jr.owner_uid, jr.owner_gid, jr.job_ad_json, jt.hashed_token
 		FROM job_tokens jt
 		JOIN job_registrations jr ON jt.job_registration_id = jr.id
-		WHERE jt.expires_at > ?
+		WHERE jt.lookup_hash = ? AND jt.expires_at > ?
+	`, tokenLookupHash(token), time.Now()).Scan(&jobID, &uid, &gid, &jobAdJSON, &hashedToken)
+	switch {
+	case err == sql.ErrNoRows:
+		// Either no such token, or one written before lookup_hash existed. The
+		// legacy scan is the only way to check the latter; it costs what it
+		// always did, and shrinks to nothing as those tokens expire.
+		return d.validateLegacyToken(token)
+	case err != nil:
+		return "", 0, 0, "", fmt.Errorf("failed to query token: %w", err)
+	}
+
+	// The row was found by a fast hash; bcrypt is still what authorizes it.
+	if err := compareToken(hashedToken, token); err != nil {
+		return "", 0, 0, "", fmt.Errorf("invalid or expired token")
+	}
+	return jobID, uid, gid, jobAdJSON, nil
+}
+
+// validateLegacyToken handles tokens issued before lookup_hash was added, by
+// scanning the rows that have none. Tokens live 24 hours, so this stops finding
+// anything a day after an upgrade.
+func (d *DB) validateLegacyToken(token string) (string, int, int, string, error) {
+	rows, err := d.db.Query(`
+		SELECT jr.job_id, jr.owner_uid, jr.owner_gid, jr.job_ad_json, jt.hashed_token
+		FROM job_tokens jt
+		JOIN job_registrations jr ON jt.job_registration_id = jr.id
+		WHERE jt.lookup_hash IS NULL AND jt.expires_at > ?
 	`, time.Now())
 	if err != nil {
 		return "", 0, 0, "", fmt.Errorf("failed to query tokens: %w", err)
@@ -185,14 +293,15 @@ func (d *DB) ValidateToken(token string) (string, int, int, string, error) {
 	for rows.Next() {
 		var jobID, hashedToken, jobAdJSON string
 		var uid, gid int
-		var expiresAt time.Time
-		if err := rows.Scan(&jobID, &uid, &gid, &jobAdJSON, &hashedToken, &expiresAt); err != nil {
+		if err := rows.Scan(&jobID, &uid, &gid, &jobAdJSON, &hashedToken); err != nil {
 			return "", 0, 0, "", fmt.Errorf("failed to scan token: %w", err)
 		}
-
-		if err := bcrypt.CompareHashAndPassword([]byte(hashedToken), []byte(token)); err == nil {
+		if err := compareToken(hashedToken, token); err == nil {
 			return jobID, uid, gid, jobAdJSON, nil
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", 0, 0, "", fmt.Errorf("failed to read tokens: %w", err)
 	}
 
 	return "", 0, 0, "", fmt.Errorf("invalid or expired token")
