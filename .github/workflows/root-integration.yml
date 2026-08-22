@@ -69,18 +69,18 @@ jobs:
 
       # The tests that can run as root, named explicitly.
       #
-      # Running the suite unfiltered was tried and does not work: this job is
-      # root, and TestPelicanIntegration, TestPelicanManagedDaemon and
-      # TestFakeTransferPluginIntegration all fail there. They build their pool
-      # under t.TempDir() without widening it for the condor user, so
-      # condor_master cannot open its own log ("condor daemons did not become
-      # ready"), and TestPelicanIntegration additionally submits a job, which
-      # HTCondor will not run as root.
+      # Running the suite unfiltered here does not work, and was tried: this job
+      # is root, and TestPelicanIntegration, TestPelicanManagedDaemon and
+      # TestFakeTransferPluginIntegration all fail. They build their pool under
+      # t.TempDir() without widening it for the condor user, so condor_master
+      # cannot open its own log ("condor daemons did not become ready"), and
+      # TestPelicanIntegration additionally submits a job, which HTCondor will
+      # not run as root.
       #
-      # So the pattern stays -- but it is a list that has to be maintained, and a
-      # test missing from it runs in no job at all, which is what happened to the
-      # persistence test. The real fix is an unprivileged job with a real
-      # HTCondor; see the note in integration.yml.
+      # Those tests are covered by integration.yml's integration-htcondor job,
+      # which has a real HTCondor and runs as an ordinary user -- the environment
+      # they were written for. So this pattern is a genuine root-only list, not a
+      # coverage bottleneck: a test left out of it still runs there.
       - name: Run the integration tests that can run as root
         env:
           PELICAN_REQUIRE_ROOT_TEST: '1'

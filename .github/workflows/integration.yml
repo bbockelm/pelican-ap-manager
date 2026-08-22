@@ -11,15 +11,11 @@ on:
 permissions:
   contents: read
 
-# NOTE: this job installs no HTCondor, so every test that needs a real
-# condor_master skips here -- TestPelicanIntegration, TestPelicanManagedDaemon,
-# TestFakeTransferPluginIntegration and the static-rule tests among them. What
-# actually runs is the handful that does not need a pool.
-#
-# The privileged path is covered by root-integration.yml, but that job is root and
-# those tests cannot run as root as written. Until this job has an unprivileged
-# HTCondor, they are exercised only by hand. Adding one here is the fix; it needs
-# HTCondor installed on a non-root runner and a personal-condor pool.
+# Two jobs. The first runs the tests that need no HTCondor at all, on a plain Go
+# image. The second installs a real HTCondor and runs the rest as an ordinary
+# user, which is the environment most of the integration suite was written for --
+# root-integration.yml covers the privileged path, but it is root, and the tests
+# that build a pool and submit a job cannot run that way.
 
 jobs:
   integration:
@@ -40,3 +36,67 @@ jobs:
 
       - name: Run integration tests
         run: gotestsum --format testname -- -v -tags integration ./integration/...
+
+  # The integration tests that need a real condor_master but must NOT be root.
+  #
+  # Without this job they ran nowhere: the job above installs no HTCondor so they
+  # skip, and root-integration.yml is root, where they fail -- they build a pool
+  # under t.TempDir() without widening it for the condor user, and
+  # TestPelicanIntegration submits a job, which HTCondor refuses to run as root.
+  #
+  # HTCondor comes from the same repository and version the privileged job uses,
+  # so the two agree on what they are testing against. A container job is root, so
+  # the work is handed to an ordinary account and every step runs as that account
+  # -- including the build, so Go's caches are its own.
+  integration-htcondor:
+    name: Integration tests with HTCondor
+    runs-on: ubuntu-latest
+    container:
+      image: almalinux:9
+      options: --hostname pelican-ci.localdomain
+
+    steps:
+      - name: Install HTCondor and Go
+        run: |
+          set -euxo pipefail
+          dnf install -y 'dnf-command(config-manager)'
+          dnf config-manager --set-enabled crb
+          dnf install -y epel-release
+          curl -fsSL -o /etc/yum.repos.d/htcondor-release-current.el9.noarch.rpm \
+            https://htcss-downloads.chtc.wisc.edu/repo/25.x/htcondor-release-current.el9.noarch.rpm
+          dnf install -y /etc/yum.repos.d/htcondor-release-current.el9.noarch.rpm
+          dnf install -y --allowerasing condor golang git tar which procps-ng
+          # An ordinary account to run the tests as. The whole point of this job
+          # is that it is not root.
+          useradd --create-home ciuser
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Hand the workspace to the test account
+        run: |
+          set -euxo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          chown -R ciuser:ciuser "$GITHUB_WORKSPACE"
+
+      - name: Run the integration suite as an ordinary user
+        env:
+          GOPRIVATE: github.com/bbockelm,github.com/PelicanPlatform
+        run: |
+          set -euxo pipefail
+          test "$(id -u)" -eq 0 || { echo "expected the container to start as root"; exit 1; }
+          runuser -u ciuser -- env \
+            HOME=/home/ciuser \
+            PATH="/usr/sbin:/usr/bin:$PATH" \
+            GOFLAGS=-mod=mod \
+            GOPRIVATE="$GOPRIVATE" \
+            go test -tags integration -v -timeout 25m ./integration/
+
+      - name: Upload daemon logs on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: integration-htcondor-logs
+          path: /tmp/**/log/*
+          if-no-files-found: ignore
+          retention-days: 7
