@@ -512,18 +512,23 @@ func (s *Service) advertiseOnce() {
 
 	ads := s.buildSummaryAds()
 	ads = append(ads, s.buildLimitAds()...)
-	if len(ads) == 0 {
-		return
-	}
 
-	// Write to info file if configured
+	// The info file is written even with nothing to say. It is a local snapshot
+	// of what the daemon currently believes, and "currently nothing" is an
+	// answer -- whereas an absent file is ambiguous between no data yet, a
+	// misconfigured path, and a daemon that never got this far. A freshly
+	// installed AP sees exactly that case until the first transfers land.
 	if s.infoPath != "" {
 		if err := s.writeInfoAds(ads); err != nil {
 			s.Printf("info file write error: %v", err)
 		}
 	}
 
-	// Always advertise to collector
+	// Nothing to advertise is different: the collector wants ads, not silence.
+	if len(ads) == 0 {
+		return
+	}
+
 	if err := s.condor.AdvertiseClassAds(ads); err != nil {
 		s.Printf("advertise error: %v", err)
 	}

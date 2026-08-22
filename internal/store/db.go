@@ -189,7 +189,11 @@ func (s *DBStore) PutRule(ctx context.Context, rule ratelimit.Rule) error {
 	}
 	// NewClassAd replaces any ad already under the key, which is exactly the
 	// upsert semantics PutRule promises.
-	if err := tx.NewClassAd(ctx, rule.Name, adFromRule(rule).String()); err != nil {
+	// MarshalOld, not String: dbrpc parses written ads with classad.ParseOld and
+	// renders query results with ad.String(). The asymmetry is the server's, and
+	// getting it backwards fails at the server with a parse error rather than
+	// anywhere near here.
+	if err := tx.NewClassAd(ctx, rule.Name, adFromRule(rule).MarshalOld()); err != nil {
 		_ = tx.Abort(ctx)
 		return fmt.Errorf("store: writing rule %q: %w", rule.Name, err)
 	}
