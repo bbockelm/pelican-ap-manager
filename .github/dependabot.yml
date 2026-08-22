@@ -1,0 +1,27 @@
+version: 2
+
+updates:
+  # Keep the SHA pins in .github/workflows current. Pinning stops a tag being
+  # moved under us; this is the other half, so a pinned action still picks up
+  # fixes -- Dependabot rewrites both the SHA and its `# vX.Y.Z` comment.
+  - package-ecosystem: github-actions
+    # "/" means .github/workflows, not a directory to search for manifests.
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # actions/checkout alone appears in every workflow, so ungrouped updates
+      # would open a pull request per action per week.
+      actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "ci"
+    labels:
+      - dependencies
+      - github-actions
+
+# Go modules are deliberately absent: this repo tracks several modules developed
+# alongside it (classad, htcondordb, golang-htcondor, cedar) which are bumped as
+# a set, by hand, when a matching change lands on both sides.
