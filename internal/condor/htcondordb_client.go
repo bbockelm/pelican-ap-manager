@@ -14,6 +14,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/htcondordb/command"
+	"github.com/bbockelm/pelican-ap-manager/internal/dbaddr"
 	"github.com/bbockelm/pelican-ap-manager/internal/state"
 )
 
@@ -353,10 +354,19 @@ func (m *mirrorClient) connectLocked(ctx context.Context) (*dbrpc.Client, error)
 	dialCtx, dialCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer dialCancel()
 
-	conn, err := cedarclient.ConnectAndAuthenticate(dialCtx, m.addr, sec)
+	// Resolved per dial, not once at startup: an htcondordb that restarts comes
+	// back under a different shared-port socket name, so a cached address would
+	// be stale exactly when reconnecting matters.
+	addr, err := dbaddr.Resolve(m.addr, m.cfg)
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("connecting to htcondordb at %s: %w", m.addr, err)
+		return nil, err
+	}
+
+	conn, err := cedarclient.ConnectAndAuthenticate(dialCtx, addr, sec)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("connecting to htcondordb at %s: %w", addr, err)
 	}
 
 	m.client = dbrpc.NewClient(dbrpc.NewCedarConn(sessCtx, conn.GetStream()))

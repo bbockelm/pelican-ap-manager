@@ -17,6 +17,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/htcondordb/command"
 	"github.com/bbockelm/pelican-ap-manager/internal/control"
+	"github.com/bbockelm/pelican-ap-manager/internal/dbaddr"
 	"github.com/bbockelm/pelican-ap-manager/internal/state"
 )
 
@@ -208,10 +209,17 @@ func (s *DBStateStore) connectLocked(ctx context.Context) (*dbrpc.Client, error)
 	dialCtx, dialCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer dialCancel()
 
-	conn, err := cedarclient.ConnectAndAuthenticate(dialCtx, s.addr, sec)
+	// Resolved per dial; see internal/dbaddr.
+	addr, err := dbaddr.Resolve(s.addr, s.cfg)
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("store: connecting to htcondordb at %s: %w", s.addr, err)
+		return nil, err
+	}
+
+	conn, err := cedarclient.ConnectAndAuthenticate(dialCtx, addr, sec)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("store: connecting to htcondordb at %s: %w", addr, err)
 	}
 
 	client := dbrpc.NewClient(dbrpc.NewCedarConn(sessCtx, conn.GetStream()))
