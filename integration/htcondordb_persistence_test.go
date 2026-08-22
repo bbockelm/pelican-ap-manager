@@ -4,10 +4,12 @@ package integration
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -53,6 +55,35 @@ func TestRulesAndStatePersistToHtcondordb(t *testing.T) {
 		t.Fatalf("build pelican_man: %v", err)
 	}
 
+	// Started as root, both daemons drop to the condor user before opening
+	// anything, so condor has to own the directories they write -- including the
+	// log directory the address file lands in. Without this the daemons come up
+	// and then cannot publish an address, which is not a failure mode worth
+	// re-deriving from a 90-second timeout.
+	//
+	// The only CI job with a real condor_master runs as root, so this is the
+	// path that matters there; unprivileged it is a no-op.
+	dropPrivileges := os.Geteuid() == 0
+	var condorUID, condorGID int
+	if dropPrivileges {
+		uid, gid, ok := lookupCondorUser(t)
+		if !ok {
+			t.Skip("running as root but no condor user to drop to")
+		}
+		condorUID, condorGID = uid, gid
+	}
+	for _, dir := range []string{rootDir, socketDir,
+		filepath.Join(rootDir, "log"), filepath.Join(rootDir, "spool"),
+		filepath.Join(rootDir, "execute"), filepath.Join(rootDir, "run"),
+		filepath.Join(rootDir, "lock")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+		if dropPrivileges {
+			chownRecursive(t, dir, condorUID, condorGID)
+		}
+	}
+
 	// A named shared-port socket, so the published address is predictable and
 	// this test can assert -sock took effect.
 	// pelican_man is pointed at htcondordb's address file rather than a literal
@@ -87,6 +118,10 @@ func TestRulesAndStatePersistToHtcondordb(t *testing.T) {
 		"PELICAN_MANAGER_STATE_DB_ADDRESS":    dbAddr,
 	}
 
+	if dropPrivileges {
+		overrides["CONDOR_IDS"] = fmt.Sprintf("%d.%d", condorUID, condorGID)
+	}
+
 	statePath := filepath.Join(rootDir, "pelican_state.json")
 	mirrorPath := filepath.Join(rootDir, "job_mirror.json")
 	if err := writeMiniCondorConfig(configPath, rootDir, socketDir, statePath, mirrorPath, t, overrides); err != nil {
@@ -111,7 +146,17 @@ func TestRulesAndStatePersistToHtcondordb(t *testing.T) {
 	// under a generated <subsys>_<pid>_<rand> name and -sock never reaches the
 	// naming decision at all. That is a property of the harness, not of the
 	// daemon, and asserting it here would test the wrong thing.
-	published := waitForAddressFile(t, filepath.Join(rootDir, "log", ".htcondordb_address"), 90*time.Second)
+	published, err := waitForAddressFile(filepath.Join(rootDir, "log", ".htcondordb_address"), 90*time.Second)
+	if err != nil {
+		// A bare timeout says nothing about why. Dump what the master and the
+		// daemon had to say, since the likely causes -- the daemon never
+		// starting, or starting and failing to write into a directory it does
+		// not own after dropping privileges -- look identical from here.
+		dumpLog(t, filepath.Join(rootDir, "log", "MasterLog"))
+		dumpLog(t, filepath.Join(rootDir, "log", "HtcondordbLog"))
+		listDir(t, filepath.Join(rootDir, "log"))
+		t.Fatalf("htcondordb never published an address: %v", err)
+	}
 	t.Logf("htcondordb published %s", published)
 
 	// --- the rule reached the database -------------------------------------
@@ -190,20 +235,44 @@ func buildHtcondordb(t *testing.T) string {
 	return out
 }
 
-// waitForAddressFile blocks until a daemon publishes its command address.
-func waitForAddressFile(t *testing.T, path string, within time.Duration) string {
-	t.Helper()
+// waitForAddressFile blocks until a daemon publishes its command address. It
+// returns an error rather than failing, so the caller can say what it looked at
+// before giving up.
+func waitForAddressFile(path string, within time.Duration) (string, error) {
 	deadline := time.Now().Add(within)
 	for time.Now().Before(deadline) {
 		if b, err := os.ReadFile(path); err == nil {
 			if addr := strings.TrimSpace(strings.SplitN(string(b), "\n", 2)[0]); addr != "" {
-				return addr
+				return addr, nil
 			}
 		}
 		time.Sleep(time.Second)
 	}
-	t.Fatalf("no address published at %s within %s", path, within)
-	return ""
+	return "", fmt.Errorf("nothing at %s within %s", path, within)
+}
+
+// listDir reports what a directory holds and who owns it, which is how a
+// privilege-drop problem shows itself.
+func listDir(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Logf("cannot list %s: %v", dir, err)
+		return
+	}
+	var b strings.Builder
+	for _, e := range entries {
+		info, ierr := e.Info()
+		if ierr != nil {
+			continue
+		}
+		uid, gid := -1, -1
+		if st, ok := info.Sys().(*syscall.Stat_t); ok {
+			uid, gid = int(st.Uid), int(st.Gid)
+		}
+		fmt.Fprintf(&b, "  %-28s %6d bytes  uid=%d gid=%d  %v\n", e.Name(), info.Size(), uid, gid, info.Mode())
+	}
+	t.Logf("=== %s ===\n%s", dir, b.String())
 }
 
 // waitForRules polls the rule table until the daemon has written to it.
