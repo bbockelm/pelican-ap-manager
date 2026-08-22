@@ -71,6 +71,19 @@ func TestRulesAndStatePersistToHtcondordb(t *testing.T) {
 			t.Skip("running as root but no condor user to drop to")
 		}
 		condorUID, condorGID = uid, gid
+
+		// t.TempDir() creates its directories 0700 owned by the invoking user
+		// (root here), including a parent above the one it returns. HTCondor
+		// writes its logs as condor even while the process is root, so condor
+		// has to be able to *traverse* every parent -- and chowning the inner
+		// directories cannot fix a parent it may not enter. Without this,
+		// condor_master dies at startup with "Cannot open log file" and every
+		// daemon under it, htcondordb included, never starts.
+		for _, dir := range []string{filepath.Dir(rootDir), rootDir} {
+			if err := os.Chmod(dir, 0o755); err != nil {
+				t.Fatalf("chmod %s: %v", dir, err)
+			}
+		}
 	}
 	for _, dir := range []string{rootDir, socketDir,
 		filepath.Join(rootDir, "log"), filepath.Join(rootDir, "spool"),
