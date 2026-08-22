@@ -53,6 +53,16 @@ type Config struct {
 	// alive. Non-empty means the daemon should say so at startup.
 	LimitLeaseWarning string
 
+	// EpochDBAddress, when set, reads job-epoch history from an htcondordb
+	// mirror of the schedd's history instead of from the schedd. Defaults to
+	// RuleDBAddress when that is set, since a site normally has one htcondordb.
+	// EpochDBTable names the archive table.
+	//
+	// Transfer epochs are unaffected: they come from TRANSFER_HISTORY, which
+	// nothing mirrors today, so they are always read from the schedd.
+	EpochDBAddress string
+	EpochDBTable   string
+
 	// RuleDBAddress, when set, points the rate-rule store at an htcondordb
 	// daemon instead of the local JSON document. RuleDBTable names the table.
 	RuleDBAddress string
@@ -103,6 +113,8 @@ const (
 	macroRuleStorePath           = "PELICAN_MANAGER_RULE_STORE_PATH"
 	macroRuleDBAddress           = "PELICAN_MANAGER_RULE_DB_ADDRESS"
 	macroRuleDBTable             = "PELICAN_MANAGER_RULE_DB_TABLE"
+	macroEpochDBAddress          = "PELICAN_MANAGER_EPOCH_DB_ADDRESS"
+	macroEpochDBTable            = "PELICAN_MANAGER_EPOCH_DB_TABLE"
 	macroLimitLease              = "PELICAN_MANAGER_LIMIT_LEASE"
 )
 
@@ -254,6 +266,17 @@ func LoadFrom(condorCfg *condorconfig.Config) (*Config, error) {
 	if v := firstStringMacro(condorCfg, macroRuleDBTable); v != "" {
 		cfg.RuleDBTable = v
 	}
+	if v := firstStringMacro(condorCfg, macroEpochDBAddress); v != "" {
+		cfg.EpochDBAddress = v
+	} else {
+		// One htcondordb is the common case, so the rule store's address is the
+		// natural default rather than making an operator repeat it.
+		cfg.EpochDBAddress = cfg.RuleDBAddress
+	}
+	if v := firstStringMacro(condorCfg, macroEpochDBTable); v != "" {
+		cfg.EpochDBTable = v
+	}
+
 	if d, err := parseDurationMacro(condorCfg, macroLimitLease); err != nil {
 		return nil, fmt.Errorf("invalid %s: %w", macroLimitLease, err)
 	} else if d > 0 {

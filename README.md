@@ -213,6 +213,25 @@ The store also holds the control loop's own conclusions (as `dynamic` rules), so
 
 Configuration-declared rules are reconciled on every startup and `condor_reconfig`: declared rules are written, and rules that disappear from the configuration are retired. Rules written directly into the store by other means are left alone.
 
+### Reading history from htcondordb instead of the schedd
+
+Every poll cycle, `pelican_man` reads recent job history to learn what transferred. By default it asks the schedd, and that read is not free: the schedd walks its history file backwards, in its own process, while it is also trying to run jobs. On a busy access point this is the most expensive thing the manager does.
+
+If the pool already runs [htcondordb](https://github.com/bbockelm/htcondordb) with `scheddsync` mirroring this schedd's history, point the manager at the mirror and the read moves off the access point entirely:
+
+```
+PELICAN_MANAGER_EPOCH_DB_ADDRESS = htcondordb.example.org:9618
+```
+
+The address defaults to `PELICAN_MANAGER_RULE_DB_ADDRESS`, so a site already keeping its rules in htcondordb gets this by setting nothing. Set it to a different address to split the two, and note there is no way to turn it off separately — leave both unset to read everything from the schedd.
+
+Two things to know before turning it on:
+
+- **It degrades, it does not fail.** If the database is unreachable or returns an error, that cycle falls back to the schedd and logs the failure. The consequence of an outage is the load you were trying to avoid, not a blind control loop.
+- **Only job history moves.** Transfer statistics come from `TRANSFER_HISTORY`, which `scheddsync` does not mirror, so those reads stay on the schedd either way.
+
+A mirror is behind the schedd by however long the sync lags. That is fine here — the manager reacts to rolling windows measured in hours — but a mirror that has fallen far behind will make it react to stale data without saying so. If you run one, monitor the sync.
+
 ---
 
 ## Configuration reference
@@ -248,6 +267,8 @@ All settings come from HTCondor configuration macros, resolved the same way `con
 | `PELICAN_MANAGER_COLLECTOR_HOST` | `COLLECTOR_HOST`, else `localhost:9618` | Collector to advertise to and to locate the schedd through. |
 | `PELICAN_MANAGER_SCHEDD_NAME` | `SCHEDD_NAME` | Which schedd to manage. The bare name is fine — the schedd advertises it as `<name>@<fullhostname>` and both forms match. Empty means "the only schedd in the pool". |
 | `PELICAN_MANAGER_SITE_ATTRIBUTE` | `MachineAttrGLIDEIN_ResourceName0` | Machine attribute naming the execution site. **Set this to whatever your pool actually uses**, or `site=` selectors will never match. |
+| `PELICAN_MANAGER_EPOCH_DB_ADDRESS` | `PELICAN_MANAGER_RULE_DB_ADDRESS` | Read job history from an htcondordb mirror instead of the schedd. Falls back to the schedd on any error. |
+| `PELICAN_MANAGER_EPOCH_DB_TABLE` | `history` | Archive table `scheddsync` writes job history to. |
 | `PELICAN_MANAGER_ADDRESS_FILE` | `$(LOG)/.pelican_manager_address` | Where the command address is published. |
 
 ### State and logging

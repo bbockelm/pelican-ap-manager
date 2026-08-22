@@ -126,3 +126,51 @@ func TestEnforcementModeDefaultsToEnforcing(t *testing.T) {
 		t.Errorf("%d static rules with none configured", len(cfg.StaticRules))
 	}
 }
+
+// TestEpochDBDefaultsToTheRuleDB: a site that already keeps its rules in
+// htcondordb is, by construction, running the database this would read from, so
+// making it opt in twice buys nothing.
+func TestEpochDBDefaultsToTheRuleDB(t *testing.T) {
+	cfg, err := LoadFrom(newCondorConfig(t, map[string]string{
+		"PELICAN_MANAGER_RULE_DB_ADDRESS": "db.example.org:9618",
+	}))
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	if cfg.EpochDBAddress != "db.example.org:9618" {
+		t.Errorf("EpochDBAddress = %q, want the rule DB address", cfg.EpochDBAddress)
+	}
+}
+
+// TestEpochDBCanBeSplitFromTheRuleDB: the rules are small and want to live
+// wherever the admin edits them; the history is large and wants to live
+// wherever it is already being mirrored. They need not be the same instance.
+func TestEpochDBCanBeSplitFromTheRuleDB(t *testing.T) {
+	cfg, err := LoadFrom(newCondorConfig(t, map[string]string{
+		"PELICAN_MANAGER_RULE_DB_ADDRESS":  "rules.example.org:9618",
+		"PELICAN_MANAGER_EPOCH_DB_ADDRESS": "history.example.org:9618",
+		"PELICAN_MANAGER_EPOCH_DB_TABLE":   "ap_history",
+	}))
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	if cfg.EpochDBAddress != "history.example.org:9618" {
+		t.Errorf("EpochDBAddress = %q, want history.example.org:9618", cfg.EpochDBAddress)
+	}
+	if cfg.EpochDBTable != "ap_history" {
+		t.Errorf("EpochDBTable = %q, want ap_history", cfg.EpochDBTable)
+	}
+}
+
+// TestEpochDBIsOffByDefault: reading from the schedd is what this has always
+// done, and no configuration should quietly change where the daemon's data
+// comes from.
+func TestEpochDBIsOffByDefault(t *testing.T) {
+	cfg, err := LoadFrom(newCondorConfig(t, nil))
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	if cfg.EpochDBAddress != "" {
+		t.Errorf("EpochDBAddress = %q, want empty (read from the schedd)", cfg.EpochDBAddress)
+	}
+}

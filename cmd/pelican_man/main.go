@@ -288,6 +288,31 @@ func buildService(cfg *config.Config, log *htcondorlogging.Logger, oneshot bool)
 		return nil, fmt.Errorf("condor client init: %w", err)
 	}
 
+	// Read job-epoch history from an htcondordb mirror when one is configured.
+	// This is the load that most wants moving off the access point: every poll
+	// otherwise walks the schedd's history file backwards inside the schedd
+	// itself. Failing to build the mirror client is not fatal -- the daemon
+	// falls back to the schedd, which is what it did before.
+	if cfg.EpochDBAddress != "" {
+		mirrored, merr := condor.NewMirrorClient(condorClient, condor.MirrorConfig{
+			Address: cfg.EpochDBAddress,
+			Table:   cfg.EpochDBTable,
+			Config:  cfg.HTCondorConfig(),
+		})
+		if merr != nil {
+			log.Errorf(htcondorlogging.DestinationGeneral,
+				"job-epoch mirror unavailable; reading history from the schedd instead: %v", merr)
+		} else {
+			condorClient = mirrored
+			table := cfg.EpochDBTable
+			if table == "" {
+				table = condor.DefaultJobEpochTable
+			}
+			log.Infof(htcondorlogging.DestinationGeneral,
+				"reading job-epoch history from htcondordb %s table %s", cfg.EpochDBAddress, table)
+		}
+	}
+
 	tracker := stats.NewTracker(cfg.StatsWindow)
 	if len(st.RecentTransfers) > 0 {
 		preload := make(map[string][]stats.ProcessedTransfer, len(st.RecentTransfers))
