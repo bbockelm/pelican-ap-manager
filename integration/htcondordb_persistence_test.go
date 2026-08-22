@@ -32,6 +32,12 @@ import (
 // So the assertions here are deliberately made from the database's side, with a
 // second client, rather than from anything pelican_man reports about itself.
 func TestRulesAndStatePersistToHtcondordb(t *testing.T) {
+	// Before building anything: the plain integration job has no HTCondor, and
+	// every other test here skips in that case. Building first meant this one
+	// failed instead -- and failed on the build, which is not even what it
+	// tests.
+	requireCondorMaster(t)
+
 	dbBin := buildHtcondordb(t)
 
 	rootDir := t.TempDir()
