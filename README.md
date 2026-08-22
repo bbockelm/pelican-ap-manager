@@ -366,6 +366,9 @@ All settings come from HTCondor configuration macros, resolved the same way `con
 
 ## Running under `condor_master`
 
+For one complete setup end to end — install, config, and the check to run after
+each step — see [docs/deployment-example.md](docs/deployment-example.md).
+
 Both daemons are DaemonCore-style HTCondor daemons. Started as root by `condor_master`, they **drop to the condor user** before opening any file they own, so nothing they write is root-owned. `DROP_PRIVILEGES = false` opts out; `CONDOR_IDS` / `CONDOR_USER` select the target identity.
 
 They also participate in the usual lifecycle:
@@ -427,7 +430,7 @@ Check `DC_DAEMON_LIST` includes it, and read the daemon's own account of how it 
 `pelican-web` must be in `DAEMON_LIST` and `DC_DAEMON_LIST`; `pelican-man` serves no HTTP. Check `PelicanWebLog` and that `PELICAN_REGISTRATION_SOCKET` is on a short path — a Unix socket path is capped at ~104 bytes.
 
 **Limits appear and disappear.**
-The lease is not being renewed often enough. `PELICAN_MANAGER_POLL_INTERVAL` must be shorter than `PELICAN_MANAGER_LIMIT_LEASE`; the daemon logs a warning at startup when it is not. A limit that lapses is reinstalled on the next cycle, so the symptom is intermittent enforcement rather than none.
+The lease is not being renewed. Renewal runs on its own timer at a third of `PELICAN_MANAGER_LIMIT_LEASE`, independent of the poll and advertise intervals, so on a healthy daemon this should not happen — look for what is stopping the renewal from reaching the schedd (`limit lease renewal error` in the log), or for `condor_master` killing and restarting the daemon. A limit that lapses is reinstalled on the next cycle, so the symptom is intermittent enforcement rather than none.
 
 **Limits exist but nothing is throttled.**
 A rule with `rate=0` counts without blocking, by design — `pelican-man -limits` shows those as `monitor only`. Otherwise check the `SKIPPED` column: if it is 0 and `LAST HIT` is `never`, the rule's expression is not matching the jobs you expect. The expression is printed alongside it.
