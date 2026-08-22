@@ -45,10 +45,11 @@ PELICAN_WEB     = /usr/sbin/pelican_web
 # Start them...
 DAEMON_LIST = $(DAEMON_LIST) PELICAN_MANAGER PELICAN_WEB
 
-# ...and mark them as DaemonCore daemons, which is what makes condor_master
-# manage their command socket. The built-in list covers only HTCondor's own
-# daemons, so a third-party one has to be added; the leading + appends rather
-# than replacing.
+# ...and mark them as DaemonCore daemons. This puts them under the master's
+# liveness supervision: it expects a DC_CHILDALIVE heartbeat and kills a daemon
+# that stops sending one (see NOT_RESPONDING_TIMEOUT). Both daemons send it.
+# The built-in list covers only HTCondor's own daemons, so a third-party one has
+# to be added; the leading + appends rather than replacing.
 DC_DAEMON_LIST = +PELICAN_MANAGER PELICAN_WEB
 
 # Watch, but do not act on the controller's own conclusions.
@@ -179,6 +180,8 @@ user=* rate=500 window=60s
 A rule you declare is permanent; the schedd limit derived from it is not. Every limit `pelican_man` installs carries a short lease — 60 seconds by default — and the daemon renews it on every poll cycle.
 
 That is deliberate. These limits exist only because `pelican_man` decided they should, and it is the only thing that can decide they should not. If it dies, a lease means whatever it was throttling returns to full rate within about a minute, rather than staying throttled until somebody notices an unexplained limit in the schedd.
+
+This pairs with `DC_DAEMON_LIST`. A daemon that *hangs* rather than crashes stops sending `DC_CHILDALIVE`, so `condor_master` kills it — and a killed daemon stops renewing, so its limits lapse on schedule. Without that supervision a wedged daemon would sit there indefinitely; with it, the two mechanisms together bound how long a stuck manager can keep throttling an access point.
 
 ```
 PELICAN_MANAGER_LIMIT_LEASE = 60s
@@ -312,6 +315,9 @@ Check `PelicanManagerLog` for `limit manager init error`. The manager locates th
 
 **`pelican_man` will not start.**
 A malformed rate rule is fatal by design. The log names the offending macro and what it could not parse.
+
+**A daemon is killed and restarted for no apparent reason.**
+`condor_master` kills a DaemonCore daemon that stops sending `DC_CHILDALIVE`, after `NOT_RESPONDING_TIMEOUT` (an hour by default; `PELICAN_MANAGER_NOT_RESPONDING_TIMEOUT` overrides it per daemon). That is the supervision `DC_DAEMON_LIST` buys, and it is working as intended — something wedged the daemon. Look for what blocked it just before the kill.
 
 **`condor_ping -type PELICAN_MANAGER` cannot reach the daemon.**
 Check `DC_DAEMON_LIST` includes it, and read the daemon's own account of how it got its command socket — it logs one of *"accepting shared-port forwarded connections"* (inherited from the master), *"self-registered shared-port endpoint"* (its own entry in `DAEMON_SOCKET_DIR`, which is still reachable), or a plain bind. The address file (`$(LOG)/.pelican_manager_address`) holds whichever address it settled on.
