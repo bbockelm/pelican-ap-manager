@@ -105,10 +105,15 @@ DAEMON_LIST = $(DAEMON_LIST) PELICAN_MANAGER HTCONDORDB
 # its limit leases, so they lapse within about a minute.
 DC_DAEMON_LIST = +PELICAN_MANAGER HTCONDORDB
 
-USE_SHARED_PORT = True
-
-PELICAN_MANAGER_LOG = $(LOG)/PelicanManagerLog
-HTCONDORDB_LOG      = $(LOG)/HTCondorDBLog
+# Log paths are not set here: both daemons already default to
+# $(LOG)/<CamelCase subsystem>Log -- PelicanManagerLog and HtcondordbLog. Set
+# PELICAN_MANAGER_LOG or HTCONDORDB_LOG only to put them somewhere else.
+#
+# USE_SHARED_PORT is not set here either. It has defaulted to true since HTCondor
+# 7.5.0, and asserting it in a 99- drop-in would override a site that turned it
+# off deliberately. If yours is off, both daemons still work -- they adopt the
+# command socket the master pre-creates -- but there is no ?sock= to name, so use
+# the address-file form noted below.
 
 # ---------------------------------------------------------------------------
 # Have the schedd write epoch history (step 2)
@@ -142,6 +147,10 @@ PELICAN_MANAGER_SITE_ATTRIBUTE = MachineAttrGLIDEIN_ResourceName0
 # Read history from htcondordb instead of the schedd, and keep the rules and the
 # daemon's working state there too. The named socket above is what makes this
 # address stable; confirm the exact string in step 5.
+#
+# No shared port? There is no ?sock= to name, so point these at the address file
+# htcondordb publishes, which is stable by definition:
+#   PELICAN_MANAGER_EPOCH_DB_ADDRESS = $(LOG)/.htcondordb_address
 PELICAN_MANAGER_EPOCH_DB_ADDRESS = <$(FULL_HOSTNAME):9618?sock=htcondordb>
 PELICAN_MANAGER_RULE_DB_ADDRESS  = $(PELICAN_MANAGER_EPOCH_DB_ADDRESS)
 PELICAN_MANAGER_STATE_DB_ADDRESS = $(PELICAN_MANAGER_EPOCH_DB_ADDRESS)
@@ -216,6 +225,9 @@ htcondordb-cli -e "SELECT COUNT(*) FROM jobs"
 htcondordb-cli -e "SELECT COUNT(*) FROM history"
 htcondordb-cli -e "SELECT COUNT(*) FROM epoch_history"
 ```
+
+If a query cannot find the daemon, read `$(LOG)/HtcondordbLog` — that is the
+default log name, derived from the subsystem `HTCONDORDB`.
 
 `epoch_history` stays at 0 until jobs finish transfers *after* you enabled
 `JOB_EPOCH_HISTORY` — it is not backfilled.
