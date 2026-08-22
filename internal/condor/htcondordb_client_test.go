@@ -56,24 +56,21 @@ func newTestMirror(t *testing.T, direct CondorClient) *mirrorClient {
 		t.Fatalf("NewMirrorClient: %v", err)
 	}
 	m := c.(*mirrorClient)
-	// The stub is not an *htcClient, so the mirror borrowed no converter and
-	// would fall back for that reason alone. Supply one, so a test that means to
+	// The stub is not an *htcClient, so the mirror borrowed no converters and
+	// would fall back for that reason alone. Supply them, so a test that means to
 	// exercise the unreachable-database path really does.
-	m.convert = func(*classad.ClassAd) (*JobEpochRecord, state.EpochID) { return nil, state.EpochID{} }
+	m.convertJob = func(*classad.ClassAd) (*JobEpochRecord, state.EpochID) { return nil, state.EpochID{} }
+	m.convertTransfer = func(*classad.ClassAd) ([]TransferRecord, state.EpochID) { return nil, state.EpochID{} }
 	return m
 }
 
-// TestMirrorDelegatesEverythingItDoesNotServe pins the boundary. The mirror
-// holds job history and nothing else -- transfer epochs come from
-// TRANSFER_HISTORY, which nothing mirrors, so sending them to the database
-// would silently return nothing.
-func TestMirrorDelegatesEverythingItDoesNotServe(t *testing.T) {
+// TestMirrorDelegatesWhatItDoesNotHold pins the boundary. The mirror holds
+// history; advertising and job queries are about what is happening now, which is
+// not something a history mirror can answer.
+func TestMirrorDelegatesWhatItDoesNotHold(t *testing.T) {
 	stub := &stubClient{}
 	m := newTestMirror(t, stub)
 
-	if _, _, err := m.FetchTransferEpochs(state.EpochID{}, time.Now()); err != nil {
-		t.Fatalf("FetchTransferEpochs: %v", err)
-	}
 	if err := m.AdvertiseClassAds(nil); err != nil {
 		t.Fatalf("AdvertiseClassAds: %v", err)
 	}
@@ -82,9 +79,6 @@ func TestMirrorDelegatesEverythingItDoesNotServe(t *testing.T) {
 	}
 	_, _ = m.LocateSchedd(context.Background())
 
-	if stub.transferCalls != 1 {
-		t.Errorf("transfer epochs went to the mirror; they must go to the schedd (%d delegated calls)", stub.transferCalls)
-	}
 	if stub.advertiseCalls != 1 || stub.queryJobsCalls != 1 || stub.locateScheddCalls != 1 {
 		t.Errorf("delegation missed: advertise=%d queryJobs=%d locateSchedd=%d",
 			stub.advertiseCalls, stub.queryJobsCalls, stub.locateScheddCalls)
@@ -151,18 +145,45 @@ func TestNewMirrorClientRejectsIncompleteConfig(t *testing.T) {
 	}
 }
 
-func TestMirrorDefaultsToTheHistoryTable(t *testing.T) {
+func TestMirrorDefaultsToTheRightTables(t *testing.T) {
 	c, err := NewMirrorClient(&stubClient{}, MirrorConfig{Address: "h:1", Config: testCondorConfig(t)})
 	if err != nil {
 		t.Fatalf("NewMirrorClient: %v", err)
 	}
-	// Named literally rather than compared to the constant, which would be a
-	// tautology. htcondordb's schedd-sync writes completed jobs to "history";
-	// "epoch_history" is a different table holding per-run-instance records, and
-	// FetchJobEpochs reads HISTORY on the schedd side, so "history" is the table
-	// that matches what the direct path returns.
-	if got := c.(*mirrorClient).table; got != "history" {
-		t.Errorf("table = %q, want \"history\"", got)
+	m := c.(*mirrorClient)
+
+	// Named literally rather than compared to the constants, which would be a
+	// tautology. The two reads come from two different schedd files, so they
+	// come from two different archive tables: FetchJobEpochs reads the schedd's
+	// HISTORY file, which scheddsync mirrors to "history", while transfer
+	// records are written to JOB_EPOCH_HISTORY, mirrored to "epoch_history".
+	// Pointing either at the other's table would silently return the wrong kind
+	// of record.
+	if m.jobTable != "history" {
+		t.Errorf("jobTable = %q, want \"history\"", m.jobTable)
+	}
+	if m.transferTable != "epoch_history" {
+		t.Errorf("transferTable = %q, want \"epoch_history\"", m.transferTable)
+	}
+	if m.jobTable == m.transferTable {
+		t.Error("both reads point at the same table")
+	}
+
+	// And both are overridable, independently.
+	c, err = NewMirrorClient(&stubClient{}, MirrorConfig{
+		Address: "h:1", JobTable: "ap_jobs", TransferTable: "ap_epochs", Config: testCondorConfig(t),
+	})
+	if err != nil {
+		t.Fatalf("NewMirrorClient: %v", err)
+	}
+	m = c.(*mirrorClient)
+	if m.jobTable != "ap_jobs" || m.transferTable != "ap_epochs" {
+		t.Errorf("tables = %q/%q, want ap_jobs/ap_epochs", m.jobTable, m.transferTable)
+	}
+
+	jt, tt := MirrorTables(MirrorConfig{Address: "h:1"})
+	if jt != "history" || tt != "epoch_history" {
+		t.Errorf("MirrorTables reported %q/%q, want history/epoch_history", jt, tt)
 	}
 }
 
@@ -174,7 +195,7 @@ func TestMirrorDefaultsToTheHistoryTable(t *testing.T) {
 func TestMirrorSkipsAlreadySeenEpochs(t *testing.T) {
 	m := newTestMirror(t, &stubClient{})
 	seen := map[state.EpochID]bool{}
-	m.convert = func(ad *classad.ClassAd) (*JobEpochRecord, state.EpochID) {
+	m.convertJob = func(ad *classad.ClassAd) (*JobEpochRecord, state.EpochID) {
 		id := epochFromAd(ad)
 		seen[id] = true
 		return &JobEpochRecord{User: "alice"}, id
@@ -225,7 +246,7 @@ func TestMirrorReportsAnUnparsableRow(t *testing.T) {
 func TestMirrorWithoutAConverterFallsBack(t *testing.T) {
 	stub := &stubClient{jobEpochs: []JobEpochRecord{{User: "alice"}}}
 	m := newTestMirror(t, stub)
-	m.convert = nil
+	m.convertJob = nil
 
 	got, _, err := m.FetchJobEpochs(state.EpochID{}, time.Now())
 	if err != nil {
@@ -233,5 +254,210 @@ func TestMirrorWithoutAConverterFallsBack(t *testing.T) {
 	}
 	if len(got) != 1 || stub.jobEpochCalls != 1 {
 		t.Errorf("got %d records after %d schedd calls; want 1 record from the schedd", len(got), stub.jobEpochCalls)
+	}
+}
+
+// TestTransferConstraintFiltersAdTypes is the load-bearing test for reading
+// transfers from the mirror.
+//
+// There is no TRANSFER_HISTORY file: a HistorySourceTransfer query is a
+// JOB_EPOCH query with HistoryAdTypeFilter=INPUT,OUTPUT,CHECKPOINT. The epoch
+// archive therefore holds every kind of run-instance record, and without the
+// same filter the daemon would hand SPAWN and EPOCH ads to the transfer
+// conversion -- which reads them happily, as transfers with no bytes and no
+// endpoint.
+func TestTransferConstraintFiltersAdTypes(t *testing.T) {
+	got := transferConstraint(time.Unix(1_700_000_000, 0), state.EpochID{ClusterID: 42})
+
+	// The set has to match what golang-htcondor sends the schedd, or the
+	// mirrored and direct reads see different records.
+	for _, adType := range []string{"INPUT", "OUTPUT", "CHECKPOINT"} {
+		if !strings.Contains(got, `EpochAdType == "`+adType+`"`) {
+			t.Errorf("constraint %q does not admit %s records", got, adType)
+		}
+	}
+	// And it must not admit the job-lifecycle records that share the file.
+	for _, adType := range []string{"SPAWN", "EPOCH"} {
+		if strings.Contains(got, adType) {
+			t.Errorf("constraint %q admits %s records, which are not transfers", got, adType)
+		}
+	}
+	// The ad-type clause is an alternation, so it has to be parenthesized or the
+	// && bounds would apply to the first branch only.
+	if !strings.Contains(got, "&& (") {
+		t.Errorf("constraint %q does not group the ad-type alternation; the cutoff and cursor bounds would apply to one branch", got)
+	}
+	// The bounds that make the read incremental still have to be there.
+	if !strings.Contains(got, "EpochWriteDate >= 1700000000") || !strings.Contains(got, "ClusterId >= 42") {
+		t.Errorf("constraint %q lost the cutoff or cursor bound", got)
+	}
+}
+
+// TestTransferAdTypesMatchTheScheddFilter states the coupling in one place. If
+// golang-htcondor's default transfer filter ever changes, this is the assertion
+// that should be updated alongside it -- not discovered by a mirrored read that
+// quietly returns a different set of records than the direct one.
+func TestTransferAdTypesMatchTheScheddFilter(t *testing.T) {
+	want := []string{"INPUT", "OUTPUT", "CHECKPOINT"}
+	if diff := len(transferAdTypes) - len(want); diff != 0 {
+		t.Fatalf("transferAdTypes = %v, want %v", transferAdTypes, want)
+	}
+	for i, w := range want {
+		if transferAdTypes[i] != w {
+			t.Errorf("transferAdTypes[%d] = %q, want %q", i, transferAdTypes[i], w)
+		}
+	}
+}
+
+// TestMirrorFallsBackForTransfersToo: a mirror that cannot be reached must not
+// leave the control loop without the transfer data it exists to react to.
+func TestMirrorFallsBackForTransfersToo(t *testing.T) {
+	stub := &stubClient{}
+	m := newTestMirror(t, stub)
+
+	if _, _, err := m.FetchTransferEpochs(state.EpochID{}, time.Now().Add(-time.Hour)); err != nil {
+		t.Fatalf("FetchTransferEpochs: %v", err)
+	}
+	if stub.transferCalls != 1 {
+		t.Errorf("the schedd was not consulted after the mirror failed (%d calls)", stub.transferCalls)
+	}
+}
+
+// TestMirrorWithoutATransferConverterFallsBack: as for job epochs, an empty
+// result is indistinguishable from a quiet pool, so the mirror must decline
+// rather than return nothing.
+func TestMirrorWithoutATransferConverterFallsBack(t *testing.T) {
+	stub := &stubClient{}
+	m := newTestMirror(t, stub)
+	m.convertTransfer = nil
+
+	if _, _, err := m.FetchTransferEpochs(state.EpochID{}, time.Now()); err != nil {
+		t.Fatalf("FetchTransferEpochs: %v", err)
+	}
+	if stub.transferCalls != 1 {
+		t.Errorf("%d schedd calls, want 1: the mirror returned an empty history instead of falling back", stub.transferCalls)
+	}
+}
+
+// TestTransferDecodeSkipsSeenEpochsAndFlattens covers what the transfer read
+// does with the rows it gets: one ad can carry several transfer legs, and
+// already-counted epochs must not be replayed.
+func TestTransferDecodeSkipsSeenEpochsAndFlattens(t *testing.T) {
+	m := newTestMirror(t, &stubClient{})
+
+	var seen []state.EpochID
+	m.convertTransfer = func(ad *classad.ClassAd) ([]TransferRecord, state.EpochID) {
+		id := epochFromAd(ad)
+		seen = append(seen, id)
+		// Two legs per ad, as an input plus an output would be.
+		return []TransferRecord{{User: "alice"}, {User: "alice"}}, id
+	}
+
+	row := func(cluster, proc, run int) string {
+		return fmt.Sprintf("ClusterId = %d\nProcId = %d\nRunInstanceID = %d\nEpochAdType = \"INPUT\"\n", cluster, proc, run)
+	}
+	since := state.EpochID{ClusterID: 42, ProcID: 3, RunInstanceID: 1}
+
+	records, newest, err := m.decodeTransferRows([]string{
+		row(42, 3, 1), // exactly the cursor: already counted
+		row(42, 4, 0), // new
+		row(43, 0, 0), // new
+	}, since)
+	if err != nil {
+		t.Fatalf("decodeTransferRows: %v", err)
+	}
+
+	if len(records) != 4 {
+		t.Errorf("%d records from 2 new ads of 2 legs each, want 4", len(records))
+	}
+	for _, id := range seen {
+		if !id.After(since) {
+			t.Errorf("epoch %v was converted again; its transfers would be counted twice", id)
+		}
+	}
+	if want := (state.EpochID{ClusterID: 43}); newest != want {
+		t.Errorf("newest = %v, want %v", newest, want)
+	}
+}
+
+// recordedQuery captures what a mirror read asks the database for.
+type recordedQuery struct {
+	table      string
+	constraint string
+}
+
+// TestEachReadUsesItsOwnTable is the guard on the wiring, and the reason
+// mirrorClient indirects its query at all.
+//
+// The two reads pull different kinds of record from different tables: completed
+// jobs from the mirrored HISTORY file, transfers from the mirrored
+// JOB_EPOCH_HISTORY. Crossing them returns records of the wrong kind, which the
+// conversions accept without complaint -- completed-job ads read as transfers
+// with no bytes, epoch ads read as jobs with no runtime. No error, just wrong
+// numbers, which is why this needs asserting rather than reviewing.
+func TestEachReadUsesItsOwnTable(t *testing.T) {
+	m := newTestMirror(t, &stubClient{})
+	var queries []recordedQuery
+	m.query = func(_ context.Context, table, constraint string) ([]string, error) {
+		queries = append(queries, recordedQuery{table, constraint})
+		return nil, nil
+	}
+
+	cutoff := time.Unix(1_700_000_000, 0)
+	if _, _, err := m.FetchJobEpochs(state.EpochID{}, cutoff); err != nil {
+		t.Fatalf("FetchJobEpochs: %v", err)
+	}
+	if _, _, err := m.FetchTransferEpochs(state.EpochID{}, cutoff); err != nil {
+		t.Fatalf("FetchTransferEpochs: %v", err)
+	}
+
+	if len(queries) != 2 {
+		t.Fatalf("%d queries, want 2 (one per read)", len(queries))
+	}
+	jobQ, xferQ := queries[0], queries[1]
+
+	if jobQ.table != m.jobTable {
+		t.Errorf("job history read from %q, want the job table %q", jobQ.table, m.jobTable)
+	}
+	if xferQ.table != m.transferTable {
+		t.Errorf("transfer history read from %q, want the transfer table %q", xferQ.table, m.transferTable)
+	}
+	if jobQ.table == xferQ.table {
+		t.Error("both reads went to the same table")
+	}
+
+	// And each carries its own constraint: only the transfer read filters ad
+	// types, and only it may -- the job table holds completed jobs, which have
+	// no EpochAdType at all.
+	if strings.Contains(jobQ.constraint, "EpochAdType") {
+		t.Errorf("the job read filters on EpochAdType (%q); completed-job records do not carry it, so this matches nothing", jobQ.constraint)
+	}
+	if !strings.Contains(xferQ.constraint, "EpochAdType") {
+		t.Errorf("the transfer read does not filter ad types (%q); it would treat SPAWN and EPOCH records as transfers", xferQ.constraint)
+	}
+}
+
+// TestBothReadsFallBackWhenTheQueryFails: the seam must not have introduced a
+// path where a database error propagates instead of deferring to the schedd.
+func TestBothReadsFallBackWhenTheQueryFails(t *testing.T) {
+	stub := &stubClient{jobEpochs: []JobEpochRecord{{User: "alice"}}}
+	m := newTestMirror(t, stub)
+	m.query = func(context.Context, string, string) ([]string, error) {
+		return nil, fmt.Errorf("archive unavailable")
+	}
+
+	jobs, _, err := m.FetchJobEpochs(state.EpochID{}, time.Now())
+	if err != nil {
+		t.Fatalf("FetchJobEpochs: %v", err)
+	}
+	if len(jobs) != 1 || stub.jobEpochCalls != 1 {
+		t.Errorf("job read did not fall back: %d records, %d schedd calls", len(jobs), stub.jobEpochCalls)
+	}
+
+	if _, _, err := m.FetchTransferEpochs(state.EpochID{}, time.Now()); err != nil {
+		t.Fatalf("FetchTransferEpochs: %v", err)
+	}
+	if stub.transferCalls != 1 {
+		t.Errorf("transfer read did not fall back: %d schedd calls", stub.transferCalls)
 	}
 }

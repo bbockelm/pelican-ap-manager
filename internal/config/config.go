@@ -62,7 +62,12 @@ type Config struct {
 	// Transfer epochs are unaffected: they come from TRANSFER_HISTORY, which
 	// nothing mirrors today, so they are always read from the schedd.
 	EpochDBAddress string
-	EpochDBTable   string
+	// EpochDBJobTable holds the mirrored completed-job history (the schedd's
+	// HISTORY file); EpochDBTransferTable holds the mirrored epoch history,
+	// which is where the transfer records are. They are different schedd files
+	// and so different archive tables.
+	EpochDBJobTable      string
+	EpochDBTransferTable string
 
 	// StateDBAddress, when set, keeps the daemon's working state -- the epoch
 	// cursors, transfer summaries and per-pair control conclusions -- in an
@@ -134,11 +139,12 @@ const (
 	// schedd would silently clamp.
 	macroScheddLimitMaxExpiration = "STARTUP_LIMIT_MAX_EXPIRATION"
 
-	macroEpochDBAddress = "PELICAN_MANAGER_EPOCH_DB_ADDRESS"
-	macroEpochDBTable   = "PELICAN_MANAGER_EPOCH_DB_TABLE"
-	macroStateDBAddress = "PELICAN_MANAGER_STATE_DB_ADDRESS"
-	macroStateDBTable   = "PELICAN_MANAGER_STATE_DB_TABLE"
-	macroLimitLease     = "PELICAN_MANAGER_LIMIT_LEASE"
+	macroEpochDBAddress       = "PELICAN_MANAGER_EPOCH_DB_ADDRESS"
+	macroEpochDBJobTable      = "PELICAN_MANAGER_EPOCH_DB_JOB_TABLE"
+	macroEpochDBTransferTable = "PELICAN_MANAGER_EPOCH_DB_TRANSFER_TABLE"
+	macroStateDBAddress       = "PELICAN_MANAGER_STATE_DB_ADDRESS"
+	macroStateDBTable         = "PELICAN_MANAGER_STATE_DB_TABLE"
+	macroLimitLease           = "PELICAN_MANAGER_LIMIT_LEASE"
 )
 
 // defaultEnforcementMode preserves the daemon's historical behavior: limits
@@ -296,8 +302,11 @@ func LoadFrom(condorCfg *condorconfig.Config) (*Config, error) {
 		// natural default rather than making an operator repeat it.
 		cfg.EpochDBAddress = cfg.RuleDBAddress
 	}
-	if v := firstStringMacro(condorCfg, macroEpochDBTable); v != "" {
-		cfg.EpochDBTable = v
+	if v := firstStringMacro(condorCfg, macroEpochDBJobTable); v != "" {
+		cfg.EpochDBJobTable = v
+	}
+	if v := firstStringMacro(condorCfg, macroEpochDBTransferTable); v != "" {
+		cfg.EpochDBTransferTable = v
 	}
 	if v := firstStringMacro(condorCfg, macroStateDBAddress); v != "" {
 		cfg.StateDBAddress = v

@@ -147,9 +147,10 @@ func TestEpochDBDefaultsToTheRuleDB(t *testing.T) {
 // wherever it is already being mirrored. They need not be the same instance.
 func TestEpochDBCanBeSplitFromTheRuleDB(t *testing.T) {
 	cfg, err := LoadFrom(newCondorConfig(t, map[string]string{
-		"PELICAN_MANAGER_RULE_DB_ADDRESS":  "rules.example.org:9618",
-		"PELICAN_MANAGER_EPOCH_DB_ADDRESS": "history.example.org:9618",
-		"PELICAN_MANAGER_EPOCH_DB_TABLE":   "ap_history",
+		"PELICAN_MANAGER_RULE_DB_ADDRESS":         "rules.example.org:9618",
+		"PELICAN_MANAGER_EPOCH_DB_ADDRESS":        "history.example.org:9618",
+		"PELICAN_MANAGER_EPOCH_DB_JOB_TABLE":      "ap_history",
+		"PELICAN_MANAGER_EPOCH_DB_TRANSFER_TABLE": "ap_epochs",
 	}))
 	if err != nil {
 		t.Fatalf("LoadFrom: %v", err)
@@ -157,8 +158,10 @@ func TestEpochDBCanBeSplitFromTheRuleDB(t *testing.T) {
 	if cfg.EpochDBAddress != "history.example.org:9618" {
 		t.Errorf("EpochDBAddress = %q, want history.example.org:9618", cfg.EpochDBAddress)
 	}
-	if cfg.EpochDBTable != "ap_history" {
-		t.Errorf("EpochDBTable = %q, want ap_history", cfg.EpochDBTable)
+	// The two reads come from two different schedd files, so the tables are
+	// configured independently.
+	if cfg.EpochDBJobTable != "ap_history" || cfg.EpochDBTransferTable != "ap_epochs" {
+		t.Errorf("epoch tables = %q/%q, want ap_history/ap_epochs", cfg.EpochDBJobTable, cfg.EpochDBTransferTable)
 	}
 }
 

@@ -214,20 +214,26 @@ Configuration-declared rules are reconciled on every startup and `condor_reconfi
 
 ### Reading history from htcondordb instead of the schedd
 
-Every poll cycle, `pelican_man` reads recent job history to learn what transferred. By default it asks the schedd, and that read is not free: the schedd walks its history file backwards, in its own process, while it is also trying to run jobs. On a busy access point this is the most expensive thing the manager does.
+Every poll cycle, `pelican_man` reads recent history twice: the completed-job history, and the transfer records. By default it asks the schedd, and neither read is free — the schedd walks its history files backwards, in its own process, while it is also trying to run jobs. On a busy access point this is the most expensive thing the manager does.
 
-If the pool already runs [htcondordb](https://github.com/bbockelm/htcondordb) with `scheddsync` mirroring this schedd's history, point the manager at the mirror and the read moves off the access point entirely:
+If the pool already runs [htcondordb](https://github.com/bbockelm/htcondordb) with `scheddsync` mirroring this schedd, point the manager at the mirror and both reads move off the access point entirely:
 
 ```
 PELICAN_MANAGER_EPOCH_DB_ADDRESS = htcondordb.example.org:9618
 ```
 
-The address defaults to `PELICAN_MANAGER_RULE_DB_ADDRESS`, so a site already keeping its rules in htcondordb gets this by setting nothing. Set it to a different address to split the two, and note there is no way to turn it off separately — leave both unset to read everything from the schedd.
+The address defaults to `PELICAN_MANAGER_RULE_DB_ADDRESS`, so a site already keeping its rules in htcondordb gets this by setting nothing. Set it to a different address to split the two; leave both unset to read everything from the schedd.
 
-Two things to know before turning it on:
+This needs `scheddsync` tailing **both** files — `HISTORY` and `JOB_EPOCH_HISTORY` — because the two reads come from two different places:
 
-- **It degrades, it does not fail.** If the database is unreachable or returns an error, that cycle falls back to the schedd and logs the failure. The consequence of an outage is the load you were trying to avoid, not a blind control loop.
-- **Only job history moves.** Transfer statistics come from `TRANSFER_HISTORY`, which `scheddsync` does not mirror, so those reads stay on the schedd either way.
+| Read | Schedd file | Archive table | Override |
+|---|---|---|---|
+| Completed jobs | `HISTORY` | `history` | `PELICAN_MANAGER_EPOCH_DB_JOB_TABLE` |
+| Transfers | `JOB_EPOCH_HISTORY` | `epoch_history` | `PELICAN_MANAGER_EPOCH_DB_TRANSFER_TABLE` |
+
+There is no separate transfer-history file. `condor_history -transfer-history` reads `JOB_EPOCH_HISTORY` and filters on `EpochAdType` — `INPUT`, `OUTPUT`, `CHECKPOINT` — so the mirrored read applies the same filter. The other record types in that file (`SPAWN`, `EPOCH`) are job-lifecycle records, not transfers, and are excluded.
+
+**It degrades, it does not fail.** If the database is unreachable or returns an error, that cycle falls back to the schedd for whichever read failed, and logs it. The consequence of an outage is the load you were trying to avoid, not a blind control loop.
 
 A mirror is behind the schedd by however long the sync lags. That is fine here — the manager reacts to rolling windows measured in hours — but a mirror that has fallen far behind will make it react to stale data without saying so. If you run one, monitor the sync.
 
@@ -294,8 +300,9 @@ All settings come from HTCondor configuration macros, resolved the same way `con
 | `PELICAN_MANAGER_COLLECTOR_HOST` | `COLLECTOR_HOST`, else `localhost:9618` | Collector to advertise to and to locate the schedd through. |
 | `PELICAN_MANAGER_SCHEDD_NAME` | `SCHEDD_NAME` | Which schedd to manage. The bare name is fine — the schedd advertises it as `<name>@<fullhostname>` and both forms match. Empty means "the only schedd in the pool". |
 | `PELICAN_MANAGER_SITE_ATTRIBUTE` | `MachineAttrGLIDEIN_ResourceName0` | Machine attribute naming the execution site. **Set this to whatever your pool actually uses**, or `site=` selectors will never match. |
-| `PELICAN_MANAGER_EPOCH_DB_ADDRESS` | `PELICAN_MANAGER_RULE_DB_ADDRESS` | Read job history from an htcondordb mirror instead of the schedd. Falls back to the schedd on any error. |
-| `PELICAN_MANAGER_EPOCH_DB_TABLE` | `history` | Archive table `scheddsync` writes job history to. |
+| `PELICAN_MANAGER_EPOCH_DB_ADDRESS` | `PELICAN_MANAGER_RULE_DB_ADDRESS` | Read history from an htcondordb mirror instead of the schedd. Falls back to the schedd on any error. |
+| `PELICAN_MANAGER_EPOCH_DB_JOB_TABLE` | `history` | Archive table `scheddsync` mirrors the schedd's `HISTORY` file to. |
+| `PELICAN_MANAGER_EPOCH_DB_TRANSFER_TABLE` | `epoch_history` | Archive table `scheddsync` mirrors `JOB_EPOCH_HISTORY` to; the transfer records are here. |
 | `PELICAN_MANAGER_STATE_DB_ADDRESS` | `PELICAN_MANAGER_RULE_DB_ADDRESS` | Keep the daemon's working state in htcondordb rather than the `SPOOL` JSON file. A load failure is fatal. |
 | `PELICAN_MANAGER_STATE_DB_TABLE` | `pelican_manager_state` | Table holding the state rows. |
 | `PELICAN_MANAGER_ADDRESS_FILE` | `$(LOG)/.pelican_manager_address` | Where the command address is published. |

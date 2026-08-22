@@ -314,28 +314,29 @@ func buildService(cfg *config.Config, log *htcondorlogging.Logger, oneshot bool)
 		return nil, fmt.Errorf("condor client init: %w", err)
 	}
 
-	// Read job-epoch history from an htcondordb mirror when one is configured.
-	// This is the load that most wants moving off the access point: every poll
-	// otherwise walks the schedd's history file backwards inside the schedd
-	// itself. Failing to build the mirror client is not fatal -- the daemon
-	// falls back to the schedd, which is what it did before.
+	// Read history from an htcondordb mirror when one is configured. This is the
+	// load that most wants moving off the access point: every poll otherwise
+	// walks the schedd's history files backwards -- twice, for completed jobs
+	// and for transfers -- inside the schedd itself. Failing to build the mirror
+	// client is not fatal: the daemon falls back to the schedd, which is what it
+	// did before.
 	if cfg.EpochDBAddress != "" {
-		mirrored, merr := condor.NewMirrorClient(condorClient, condor.MirrorConfig{
-			Address: cfg.EpochDBAddress,
-			Table:   cfg.EpochDBTable,
-			Config:  cfg.HTCondorConfig(),
-		})
+		mcfg := condor.MirrorConfig{
+			Address:       cfg.EpochDBAddress,
+			JobTable:      cfg.EpochDBJobTable,
+			TransferTable: cfg.EpochDBTransferTable,
+			Config:        cfg.HTCondorConfig(),
+		}
+		mirrored, merr := condor.NewMirrorClient(condorClient, mcfg)
 		if merr != nil {
 			log.Errorf(htcondorlogging.DestinationGeneral,
-				"job-epoch mirror unavailable; reading history from the schedd instead: %v", merr)
+				"history mirror unavailable; reading from the schedd instead: %v", merr)
 		} else {
 			condorClient = mirrored
-			table := cfg.EpochDBTable
-			if table == "" {
-				table = condor.DefaultJobEpochTable
-			}
+			jobTable, transferTable := condor.MirrorTables(mcfg)
 			log.Infof(htcondorlogging.DestinationGeneral,
-				"reading job-epoch history from htcondordb %s table %s", cfg.EpochDBAddress, table)
+				"reading history from htcondordb %s (jobs: %s, transfers: %s)",
+				cfg.EpochDBAddress, jobTable, transferTable)
 		}
 	}
 
