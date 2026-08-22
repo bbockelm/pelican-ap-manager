@@ -76,7 +76,8 @@ condor_history -transfer-history -limit 1
 
 ## 3. The configuration
 
-`/etc/condor/config.d/99-pelican-manager.conf`:
+`/etc/condor/config.d/99-pelican-manager.conf`. Nothing here restates a default —
+every line is either a path, a decision, or something this pool actually needs:
 
 ```conf
 # ---------------------------------------------------------------------------
@@ -86,85 +87,113 @@ condor_history -transfer-history -limit 1
 PELICAN_MANAGER = /usr/local/sbin/pelican_man
 HTCONDORDB      = /usr/local/sbin/htcondordb
 
-# Give htcondordb a NAMED shared-port socket, so its command address is
-# something you can write down. Without this, condor_master names the socket
-# <configname>_<masterpid>_<randtag>, which changes whenever the master
-# restarts. HTCondor does the same thing for the collector, whose socket is
-# just "collector".
-#
-# -sock rather than -local-name: -local-name would also scope every config
-# lookup to "htcondordb.<KNOB>", a side effect you do not want here.
-HTCONDORDB_ARGS = -sock htcondordb
-
-DAEMON_LIST = $(DAEMON_LIST) PELICAN_MANAGER HTCONDORDB
-
-# Register both as DaemonCore daemons. Without this the master starts them but
-# does not treat them as DaemonCore -- no address file, no readiness, no
-# heartbeat. It is also what bounds a hung pelican_man: the master kills a
-# daemon that stops sending DC_CHILDALIVE, and a killed daemon stops renewing
-# its limit leases, so they lapse within about a minute.
-DC_DAEMON_LIST = +PELICAN_MANAGER HTCONDORDB
-
-# Log paths are not set here: both daemons already default to
-# $(LOG)/<CamelCase subsystem>Log -- PelicanManagerLog and HtcondordbLog. Set
-# PELICAN_MANAGER_LOG or HTCONDORDB_LOG only to put them somewhere else.
-#
-# USE_SHARED_PORT is not set here either. It has defaulted to true since HTCondor
-# 7.5.0, and asserting it in a 99- drop-in would override a site that turned it
-# off deliberately. If yours is off, both daemons still work -- they adopt the
-# command socket the master pre-creates -- but there is no ?sock= to name, so use
-# the address-file form noted below.
+DAEMON_LIST    = $(DAEMON_LIST), HTCONDORDB, PELICAN_MANAGER
+DC_DAEMON_LIST = $(DC_DAEMON_LIST) +HTCONDORDB +PELICAN_MANAGER
 
 # ---------------------------------------------------------------------------
-# Have the schedd write epoch history (step 2)
+# Keep condor_preen from deleting what these daemons put in SPOOL
 # ---------------------------------------------------------------------------
-
-JOB_EPOCH_HISTORY = $(SPOOL)/epoch_history
+#
+# VALID_SPOOL_FILES is the list of files condor_preen leaves alone; anything in
+# SPOOL that is not named here is eventually removed. Three things land there:
+# htcondordb's database directory, the persisted session caches, and
+# pelican_man's info file. Omitting this looks fine for days and then quietly
+# destroys the database.
+VALID_SPOOL_FILES = $(VALID_SPOOL_FILES) htcondordb sessions_* pelican_info.json
 
 # ---------------------------------------------------------------------------
 # htcondordb: mirror this schedd into the database
 # ---------------------------------------------------------------------------
 
 # Tails job_queue.log -> "jobs", history -> "history", JOB_EPOCH_HISTORY ->
-# "epoch_history". The paths default to the schedd's own $(JOB_QUEUE_LOG),
-# $(HISTORY) and $(JOB_EPOCH_HISTORY), so on the schedd host this is all of it.
+# "epoch_history".
 HTCONDORDB_SYNC_SCHEDD = true
+
+# The file paths default to the schedd's own $(JOB_QUEUE_LOG), $(HISTORY) and
+# $(JOB_EPOCH_HISTORY), which is usually all you need. If yours are not where
+# HTCondor's defaults say -- a separate job_queue directory is common -- scope
+# the override to this daemon with the HTCONDORDB. prefix so the schedd's own
+# setting is untouched:
+#
+#   HTCONDORDB.JOB_QUEUE_LOG = /var/lib/condor/job_queue/job_queue.log
+
+# Transfer records live in JOB_EPOCH_HISTORY -- there is no separate
+# transfer-history file -- so this is what fills the epoch_history table that
+# pelican_man reads transfers from. See step 2 before enabling it.
+JOB_EPOCH_HISTORY = $(SPOOL)/epoch_history
 
 # ---------------------------------------------------------------------------
 # pelican_man
 # ---------------------------------------------------------------------------
 
-# Start in observing mode: run the control loop and publish what it concludes,
-# but install only the static rules below. Switch to enforcing (step 7) once you
-# believe what it is publishing.
+# The default is enforcing. Start by observing: run the control loop and publish
+# what it concludes, while installing only the static rules below.
 PELICAN_MANAGER_ENFORCEMENT_MODE = observing
 
-# Which machine attribute names the execution site in YOUR pool. Check it
-# (step 4) -- a site= selector naming the wrong attribute matches nothing, and
-# says nothing about it.
+# Read history from htcondordb instead of the schedd, and keep the rules and the
+# daemon's working state there too.
+#
+# One line covers all three: the epoch and state addresses default to the rule
+# address. "auto" locates the local htcondordb the way its own clients do -- via
+# the address file it publishes -- and is re-resolved on every connection, so
+# neither daemon restarting strands the other. Nothing to write down, and no
+# dependence on the port or the socket name.
+PELICAN_MANAGER_RULE_DB_ADDRESS = auto
+
+# Your static rules. These apply in BOTH modes, so this is how to throttle
+# something without handing the control loop the keys.
+PELICAN_MANAGER_RATE_RULES          = ligo_ucsd
+PELICAN_MANAGER_RATE_RULE_LIGO_UCSD = user=ligo site=UCSD rate=20 window=60s note="ticket 4471"
+
+# Which machine attribute names the execution site in YOUR pool. This is the
+# default, and it is here anyway because it is the setting most likely to be
+# wrong for a given pool -- and a site= selector naming the wrong attribute
+# matches nothing and says nothing about it. Check it (step 4).
 PELICAN_MANAGER_SITE_ATTRIBUTE = MachineAttrGLIDEIN_ResourceName0
 
-# Read history from htcondordb instead of the schedd, and keep the rules and the
-# daemon's working state there too. The named socket above is what makes this
-# address stable; confirm the exact string in step 5.
-#
-# No shared port? There is no ?sock= to name, so point these at the address file
-# htcondordb publishes, which is stable by definition:
-#   PELICAN_MANAGER_EPOCH_DB_ADDRESS = $(LOG)/.htcondordb_address
-PELICAN_MANAGER_EPOCH_DB_ADDRESS = <$(FULL_HOSTNAME):9618?sock=htcondordb>
-PELICAN_MANAGER_RULE_DB_ADDRESS  = $(PELICAN_MANAGER_EPOCH_DB_ADDRESS)
-PELICAN_MANAGER_STATE_DB_ADDRESS = $(PELICAN_MANAGER_EPOCH_DB_ADDRESS)
+# ---------------------------------------------------------------------------
+# Worth having
+# ---------------------------------------------------------------------------
+
+# Persist the CEDAR session cache so clients resume across a daemon restart
+# instead of all re-authenticating at once. Off by default. It needs SPOOL and
+# the pool signing keys (it encrypts the cache at rest), and it is fatal rather
+# than quietly skipped if either is missing -- which is why the sessions_* entry
+# above matters.
+SEC_PERSIST_SESSIONS = True
+
+# htcondordb can serve Prometheus metrics, and pprof for when it is the thing
+# misbehaving. Scoped to the daemon, and bound to localhost.
+# HTCONDORDB.HTCONDORDB_METRICS_ADDRESS = localhost:9721
+# HTCONDORDB.HTCONDORDB_ENABLE_PPROF    = true
+
+# Log paths are not set: each daemon defaults to $(LOG)/<CamelCase subsystem>Log
+# -- PelicanManagerLog and HtcondordbLog. Turn either up when needed:
+# PELICAN_MANAGER_DEBUG = D_FULLDEBUG
+# HTCONDORDB_DEBUG      = general:debug cedar:debug
+
+# USE_SHARED_PORT is not set either. It has defaulted to true since HTCondor
+# 7.5.0, and asserting it in a 99- drop-in would override a site that turned it
+# off deliberately. Both daemons work either way, and "auto" above does not care.
 ```
 
-**Check** — that the config parses and the values are what you meant, before
-restarting anything:
+**Check** — that it parses and the values are what you meant, before restarting
+anything:
 
 ```bash
-condor_config_val -verbose PELICAN_MANAGER_EPOCH_DB_ADDRESS
-condor_config_val DAEMON_LIST DC_DAEMON_LIST SHARED_PORT_PORT
+condor_config_val -verbose PELICAN_MANAGER_RULE_DB_ADDRESS
+condor_config_val DAEMON_LIST DC_DAEMON_LIST VALID_SPOOL_FILES
 ```
 
-If `SHARED_PORT_PORT` is not 9618, correct the port in the address above.
+Do not expect `condor_config_val PELICAN_MANAGER_EPOCH_DB_ADDRESS` to show
+anything — it will say *Not defined*, and that is correct. The epoch and state
+addresses fall back to the rule address inside `pelican_man`, not in the
+HTCondor macro table. The daemon's startup log is where you confirm all three
+resolved (step 6).
+
+Everything else has a default that fits: the poll and advertise intervals, the
+lookback and stats windows, the state and info paths, the limit lease. Setting
+them to their own values only makes the file longer.
 
 ---
 
@@ -192,8 +221,7 @@ daemons start:
 sudo condor_restart -master
 ```
 
-**Check** — both daemons are up, and htcondordb's socket got the name you asked
-for:
+**Check** — both daemons are up and htcondordb has published an address:
 
 ```bash
 # Both running, and as condor rather than root -- they drop privileges at startup.
@@ -205,10 +233,25 @@ grep -iE "pelican_manager|htcondordb" /var/log/condor/MasterLog | tail
 cat /var/log/condor/.htcondordb_address
 ```
 
-That last one should show `?sock=htcondordb`. If it shows
-`htcondordb_<digits>_<hex>` instead, `HTCONDORDB_ARGS` did not take effect and
-the address in your config will not survive a master restart — fix that before
-going further.
+The address file is what `auto` resolves through, so its contents matter but its
+*form* does not — whatever socket name is in there, `pelican_man` will use it,
+and will re-read it if htcondordb restarts under a different one.
+
+By default that name carries the *master's* pid — `htcondordb_<masterpid>_<hex>`
+— so it changes whenever `condor_master` restarts. That is why `auto` reads the
+file rather than a literal address.
+
+If you would rather write the address down, HTCondor will use a name you choose
+verbatim:
+
+```conf
+HTCONDORDB_ARGS = -sock htcondordb
+```
+
+which makes the socket exactly `htcondordb` and the address constructible as
+`<$(FULL_HOSTNAME):9618?sock=htcondordb>` — the same mechanism behind HTCondor's
+own collector socket being just `collector`. Both forms work; `auto` is one line
+and does not care about the port, so it is what this example uses.
 
 ```bash
 condor_ping -type PELICAN_MANAGER DC_NOP
@@ -236,16 +279,38 @@ default log name, derived from the subsystem `HTCONDORDB`.
 `/var/log/condor/PelicanManagerLog`, expect:
 
 ```
-reading history from htcondordb <...?sock=htcondordb> (jobs: history, transfers: epoch_history)
+reading history from htcondordb auto (jobs: history, transfers: epoch_history)
 rate rule store: htcondordb <...> table pelican_rate_rules
 loading state from htcondordb <...> table pelican_manager_state
 initialized limit manager for schedd <name>
 renewing schedd limit leases every 20s
 ```
 
-If instead you see *"history mirror unavailable"*, the address is wrong and it
-fell back to the schedd — which works, but is exactly the load you were trying
-to move off the AP.
+If instead you see *"history mirror unavailable"*, it fell back to the schedd —
+which works, but is exactly the load you were trying to move off the AP. That
+line is logged once per distinct cause rather than once per cycle, and recovery
+is logged too (*"mirror is answering again"*), so one line does not mean one
+transient blip: check whether a later recovery line follows it.
+
+**The rules and the state are really in the database.** Ask the database, not the
+daemon — this is the check that distinguishes "stored" from "the daemon thinks it
+stored":
+
+```bash
+htcondordb-cli -e 'SELECT RuleName, RuleUser, RateCount FROM pelican_rate_rules'
+htcondordb-cli -e 'SELECT Kind, COUNT(*) FROM pelican_manager_state GROUP BY Kind'
+
+# Once the control loop has classified anything, its conclusions are rows:
+htcondordb-cli -e 'SELECT PairKey, CapacityGBPerMin FROM pelican_manager_state WHERE Kind == "pair"'
+```
+
+**The daemon is writing its local snapshot.** `$(SPOOL)/pelican_info.json` is
+written every advertise cycle even when there is nothing to report, so its
+presence and mtime are a liveness signal independent of the collector:
+
+```bash
+ls -l /var/lib/condor/spool/pelican_info.json
+```
 
 **Summaries are being published**, once a poll cycle or two has run:
 
@@ -350,3 +415,16 @@ keeps working — the only symptom is the schedd load you meant to avoid.
 **`epoch_history` stays empty.** Either the schedd is not writing
 `JOB_EPOCH_HISTORY` (step 2), or no job has finished a transfer since you turned
 it on. Confirm with `condor_history -transfer-history -limit 1`.
+
+**The database disappeared, or sessions stop resuming.** `condor_preen` removes
+anything in `SPOOL` that `VALID_SPOOL_FILES` does not name, and it runs on a
+timer — so this presents as everything working for a day or more and then the
+database being gone. Check that `condor_config_val VALID_SPOOL_FILES` includes
+`htcondordb` and `sessions_*`.
+
+**`pelican_man` will not start, with a session-cache error.**
+`SEC_PERSIST_SESSIONS` is deliberately fatal rather than quietly skipped when its
+prerequisites are missing: it needs `SPOOL` set and the pool signing keys
+readable, because it encrypts the cache at rest and there is no plaintext
+fallback. Remove the setting or fix the prerequisite; it is an optimization, not
+a requirement.
