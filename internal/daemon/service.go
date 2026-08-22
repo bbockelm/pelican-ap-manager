@@ -164,6 +164,15 @@ func (s *Service) Run(ctx context.Context) error {
 	defer pollTicker.Stop()
 	defer advTicker.Stop()
 
+	// Lease renewal gets its own timer, derived from the lease rather than from
+	// the poll or advertise interval. It used to ride the advertise cycle, which
+	// at the default settings is exactly as long as the lease -- so limits
+	// lapsed and were reinstalled every minute, leaving gaps in enforcement that
+	// nothing reported. Whatever the operator sets the other intervals to, the
+	// lease is now refreshed three times over before it can run out.
+	renewTicker := s.startLimitRenewal(ctx)
+	defer renewTicker.Stop()
+
 	// Advertise immediately on startup
 	s.advertiseOnce()
 
@@ -176,8 +185,45 @@ func (s *Service) Run(ctx context.Context) error {
 			s.pollOnce(ctx)
 		case <-advTicker.C:
 			s.advertiseOnce()
+		case <-renewTicker.C:
+			s.renewLimitLeases(ctx)
 		}
 	}
+}
+
+// startLimitRenewal returns the ticker driving lease renewal. The interval comes
+// from the limit manager once it exists; before then -- the manager is built
+// lazily, on the first advertise -- the configured lease is the best available
+// answer and matches what the manager will choose.
+func (s *Service) startLimitRenewal(ctx context.Context) *time.Ticker {
+	interval := s.renewalInterval()
+	s.Printf("renewing schedd limit leases every %s", interval)
+	return time.NewTicker(interval)
+}
+
+// renewalInterval mirrors limitManager.renewalInterval for the configured lease.
+func (s *Service) renewalInterval() time.Duration {
+	lease := s.limitLease()
+	if lease <= 0 {
+		lease = defaultLimitLease
+	}
+	if iv := lease / 3; iv >= time.Second {
+		return iv
+	}
+	return time.Second
+}
+
+// renewLimitLeases refreshes the lease on the limits already installed. It does
+// not build the limit manager: until the first advertise cycle has run there is
+// no policy to keep alive, and connecting to the schedd from here would only
+// duplicate that work.
+func (s *Service) renewLimitLeases(ctx context.Context) {
+	if s.limitMgr == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	s.limitMgr.renewAll(ctx)
 }
 
 // runOnce executes a single poll/summary cycle in oneshot mode.

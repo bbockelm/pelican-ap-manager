@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -49,7 +50,7 @@ type Config struct {
 	// The daemon renews every poll cycle.
 	LimitLease time.Duration
 
-	// LimitLeaseWarning is set when the poll interval cannot keep the lease
+	// LimitLeaseWarning is set when the configured lease cannot be honored
 	// alive. Non-empty means the daemon should say so at startup.
 	LimitLeaseWarning string
 
@@ -78,11 +79,16 @@ const (
 	defaultStatsWindow       = 1 * time.Hour
 	defaultDirectorCacheTTL  = 15 * time.Minute
 	defaultLimitLease        = 60 * time.Second
-	defaultCollectorHost     = "localhost:9618"
-	defaultScheddName        = ""
-	defaultSiteAttribute     = "MachineAttrGLIDEIN_ResourceName0"
-	defaultJobMirrorPath     = ""
-	defaultJobQueueLogPath   = ""
+
+	// defaultScheddLimitMaxExpiration mirrors the schedd's built-in default for
+	// STARTUP_LIMIT_MAX_EXPIRATION, so an unset knob still yields the right
+	// warning.
+	defaultScheddLimitMaxExpiration = 300 * time.Second
+	defaultCollectorHost            = "localhost:9618"
+	defaultScheddName               = ""
+	defaultSiteAttribute            = "MachineAttrGLIDEIN_ResourceName0"
+	defaultJobMirrorPath            = ""
+	defaultJobQueueLogPath          = ""
 
 	macroPollInterval            = "PELICAN_MANAGER_POLL_INTERVAL"
 	macroPollIntervalLegacy      = "PEL_POLL_INTERVAL"
@@ -113,9 +119,14 @@ const (
 	macroRuleStorePath           = "PELICAN_MANAGER_RULE_STORE_PATH"
 	macroRuleDBAddress           = "PELICAN_MANAGER_RULE_DB_ADDRESS"
 	macroRuleDBTable             = "PELICAN_MANAGER_RULE_DB_TABLE"
-	macroEpochDBAddress          = "PELICAN_MANAGER_EPOCH_DB_ADDRESS"
-	macroEpochDBTable            = "PELICAN_MANAGER_EPOCH_DB_TABLE"
-	macroLimitLease              = "PELICAN_MANAGER_LIMIT_LEASE"
+	// macroScheddLimitMaxExpiration is the schedd's own ceiling on a startup
+	// limit's lease. Not one of ours -- read only to warn about a lease the
+	// schedd would silently clamp.
+	macroScheddLimitMaxExpiration = "STARTUP_LIMIT_MAX_EXPIRATION"
+
+	macroEpochDBAddress = "PELICAN_MANAGER_EPOCH_DB_ADDRESS"
+	macroEpochDBTable   = "PELICAN_MANAGER_EPOCH_DB_TABLE"
+	macroLimitLease     = "PELICAN_MANAGER_LIMIT_LEASE"
 )
 
 // defaultEnforcementMode preserves the daemon's historical behavior: limits
@@ -283,15 +294,19 @@ func LoadFrom(condorCfg *condorconfig.Config) (*Config, error) {
 		cfg.LimitLease = d
 	}
 
-	// Renewal happens once per poll cycle, so a poll interval at or beyond the
-	// lease cannot keep the limits alive: they would lapse and be reinstalled
-	// over and over, leaving gaps where nothing is throttled. This is a
-	// misconfiguration rather than a fatal error -- the daemon still observes
-	// and advertises correctly -- so it is reported and left to the operator.
-	if cfg.PollInterval >= cfg.LimitLease {
+	// The schedd silently clamps any lease longer than its own
+	// STARTUP_LIMIT_MAX_EXPIRATION, so a site that raises the lease without
+	// raising that knob gets the schedd's maximum instead of what it asked for
+	// -- a wrong value rather than an error, which is exactly the kind of thing
+	// nobody notices. That knob is a schedd setting, so it is readable here.
+	//
+	// This is a misconfiguration rather than a fatal error -- the daemon still
+	// observes, advertises, and enforces correctly, just on a different lease --
+	// so it is reported and left to the operator.
+	if maxExp := scheddMaxExpiration(condorCfg); maxExp > 0 && cfg.LimitLease > maxExp {
 		cfg.LimitLeaseWarning = fmt.Sprintf(
-			"%s (%s) is not shorter than %s (%s); limits are renewed once per poll and will lapse between cycles",
-			macroPollInterval, cfg.PollInterval, macroLimitLease, cfg.LimitLease)
+			"%s (%s) exceeds the schedd's %s (%s); the schedd will clamp it and limits will hold a %s lease",
+			macroLimitLease, cfg.LimitLease, macroScheddLimitMaxExpiration, maxExp, maxExp)
 	}
 
 	rules, err := loadStaticRules(condorCfg)
@@ -492,4 +507,24 @@ func readCollectorAddressFile(logDir string) string {
 	}
 
 	return ""
+}
+
+// scheddMaxExpiration reads the schedd's ceiling on a startup limit's lease.
+//
+// It is a plain integer count of seconds, unlike this daemon's own duration
+// macros, because it is HTCondor's setting and follows HTCondor's convention.
+// Unset means the schedd's built-in default, which is why this returns the
+// default rather than zero: an unset knob still clamps.
+func scheddMaxExpiration(cfg *condorconfig.Config) time.Duration {
+	v, ok := cfg.Get(macroScheddLimitMaxExpiration)
+	if !ok || strings.TrimSpace(v) == "" {
+		return defaultScheddLimitMaxExpiration
+	}
+	secs, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || secs <= 0 {
+		// A value we cannot read is the schedd's problem to complain about; from
+		// here the safe assumption is that its default applies.
+		return defaultScheddLimitMaxExpiration
+	}
+	return time.Duration(secs) * time.Second
 }

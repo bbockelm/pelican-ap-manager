@@ -190,9 +190,14 @@ func setupPool(t *testing.T, opts poolOptions) *rootPool {
 	}
 
 	overrides := map[string]string{
-		"PELICAN_MANAGER":                    managerPath,
-		"PELICAN_MANAGER_POLL_INTERVAL":      "1s",
-		"PELICAN_MANAGER_ADVERTISE_INTERVAL": "5s",
+		"PELICAN_MANAGER":               managerPath,
+		"PELICAN_MANAGER_POLL_INTERVAL": "1s",
+		// Deliberately far longer than the 5s lease. Renewal has its own timer
+		// derived from the lease, so this must not matter -- and if it ever
+		// starts mattering again, assertLimitLease's "survives one lease" check
+		// is what notices. When renewal rode this interval, the stock
+		// configuration had the two exactly equal and limits lapsed every cycle.
+		"PELICAN_MANAGER_ADVERTISE_INTERVAL": "30s",
 		"PELICAN_MANAGER_DEBUG":              "cedar:warn",
 		// A killed pelican_man must stay dead long enough for the lease test to
 		// watch its limits expire; without this the master restarts it within
@@ -663,6 +668,24 @@ func assertLimitLease(t *testing.T, env *rootPool) {
 		return ours
 	}
 
+	// Only the limits still in force. The distinction is the whole point:
+	// StartupLimitsAllowJob skips a limit the moment its expires_at passes,
+	// while the schedd reaps the entry lazily on a timer -- so a lapsed limit
+	// keeps showing up in the listing for a while. Counting the listing instead
+	// of the live entries makes "the daemon is renewing" indistinguishable from
+	// "the daemon stopped renewing and the reaper has not caught up", which is
+	// exactly the failure this is here to catch.
+	liveLimits := func(what string) []*htcondor.StartupLimit {
+		t.Helper()
+		var live []*htcondor.StartupLimit
+		for _, l := range pelicanLimits(what) {
+			if time.Until(time.Unix(l.ExpiresAt, 0)) > 0 {
+				live = append(live, l)
+			}
+		}
+		return live
+	}
+
 	// The lease the schedd actually granted. This is the direct check, and the
 	// one that would have caught sending Expiration as a Unix timestamp: the
 	// schedd clamps an over-long request to STARTUP_LIMIT_MAX_EXPIRATION, so the
@@ -680,12 +703,19 @@ func assertLimitLease(t *testing.T, env *rootPool) {
 		}
 	}
 
-	// Past a full lease, with the daemon running: renewal must have kept them.
-	time.Sleep(testLease + 3*time.Second)
-	if n := len(pelicanLimits("after one lease")); n < len(expectedLimits) {
-		dumpPelicanLogs(t, env)
-		t.Fatalf("%d pelican limits remain after one lease (%s); want %d -- the daemon is not renewing them",
-			n, testLease, len(expectedLimits))
+	// Past a full lease, with the daemon running: renewal must have kept them in
+	// force. Sampled repeatedly rather than once, because a limit that lapses
+	// and is reinstalled on the next policy cycle would look healthy at any
+	// single moment after the reinstall -- the gap is the defect, and only
+	// watching across a whole lease finds it.
+	deadline := time.Now().Add(2 * testLease)
+	for time.Now().Before(deadline) {
+		if n := len(liveLimits("during one lease")); n < len(expectedLimits) {
+			dumpPelicanLogs(t, env)
+			t.Fatalf("only %d of %d pelican limits are still in force %v into the run; the daemon is not renewing their leases",
+				n, len(expectedLimits), time.Until(deadline))
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
 
 	// Now stop renewing, the way a crash would.
@@ -695,25 +725,18 @@ func assertLimitLease(t *testing.T, env *rootPool) {
 	// property, not "disappear": StartupLimitsAllowJob skips a limit the moment
 	// its expires_at passes, while the schedd reaps the entry lazily on a timer.
 	// Asserting on the listing would be testing the reaper's schedule.
-	deadline := time.Now().Add(4 * testLease)
+	deadline = time.Now().Add(4 * testLease)
 	for time.Now().Before(deadline) {
-		live := 0
-		for _, l := range pelicanLimits("after the daemon died") {
-			if time.Until(time.Unix(l.ExpiresAt, 0)) > 0 {
-				live++
-			}
-		}
-		if live == 0 {
+		if len(liveLimits("after the daemon died")) == 0 {
 			return
 		}
 		time.Sleep(time.Second)
 	}
 
 	var still []string
-	for _, l := range pelicanLimits("at the end") {
-		if remaining := time.Until(time.Unix(l.ExpiresAt, 0)); remaining > 0 {
-			still = append(still, fmt.Sprintf("%s (%v left)", l.Name, remaining.Truncate(time.Second)))
-		}
+	for _, l := range liveLimits("at the end") {
+		remaining := time.Until(time.Unix(l.ExpiresAt, 0))
+		still = append(still, fmt.Sprintf("%s (%v left)", l.Name, remaining.Truncate(time.Second)))
 	}
 	t.Errorf("pelican limits were still in force %s after the daemon died: %v -- a crashed daemon must not leave the AP throttled",
 		4*testLease, still)

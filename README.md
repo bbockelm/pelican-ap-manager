@@ -187,12 +187,11 @@ This pairs with `DC_DAEMON_LIST`. A daemon that *hangs* rather than crashes stop
 PELICAN_MANAGER_LIMIT_LEASE = 60s
 ```
 
-Two constraints:
+Renewal runs on its own timer, at a third of the lease, so two consecutive failures — a schedd restart, a dropped connection — still leave a third of the lease to recover in. It is deliberately independent of the poll and advertise intervals: whatever you set those to, a healthy daemon's limits do not lapse.
 
-- The schedd clamps any requested lease to `STARTUP_LIMIT_MAX_EXPIRATION` (5 minutes by default), so raising this above that has no effect without raising the schedd's knob too.
-- Renewal happens once per poll cycle, so `PELICAN_MANAGER_POLL_INTERVAL` must be shorter than the lease. The daemon warns at startup if it is not, because limits would otherwise lapse between cycles and enforcement would come and go.
+One constraint: the schedd clamps any requested lease to `STARTUP_LIMIT_MAX_EXPIRATION` (5 minutes by default) and does so silently, so raising this above that gets you the schedd's maximum rather than what you asked for. The daemon reads that knob at startup and warns if the two disagree.
 
-A lapsed limit is not fatal: the next cycle reinstalls it. But the gap is real, so the two intervals are worth keeping well apart.
+A lapsed limit is not fatal — the next cycle reinstalls it — but the gap is real, and nothing reports it, which is why the renewal interval is derived from the lease rather than configured separately.
 
 ### Where rules live
 

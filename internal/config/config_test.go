@@ -174,3 +174,74 @@ func TestEpochDBIsOffByDefault(t *testing.T) {
 		t.Errorf("EpochDBAddress = %q, want empty (read from the schedd)", cfg.EpochDBAddress)
 	}
 }
+
+// TestLeaseWarningTracksTheScheddCeiling: the schedd silently clamps a lease
+// longer than STARTUP_LIMIT_MAX_EXPIRATION, so raising one without the other
+// gets a value nobody asked for and nothing reports.
+func TestLeaseWarningTracksTheScheddCeiling(t *testing.T) {
+	cfg, err := LoadFrom(newCondorConfig(t, map[string]string{
+		"PELICAN_MANAGER_LIMIT_LEASE":  "10m",
+		"STARTUP_LIMIT_MAX_EXPIRATION": "300",
+	}))
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	if cfg.LimitLeaseWarning == "" {
+		t.Error("no warning for a 10m lease against a 5m schedd ceiling")
+	}
+
+	// Raising the schedd's knob to match makes the lease honorable.
+	cfg, err = LoadFrom(newCondorConfig(t, map[string]string{
+		"PELICAN_MANAGER_LIMIT_LEASE":  "10m",
+		"STARTUP_LIMIT_MAX_EXPIRATION": "600",
+	}))
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	if cfg.LimitLeaseWarning != "" {
+		t.Errorf("unexpected warning with a matching ceiling: %s", cfg.LimitLeaseWarning)
+	}
+}
+
+// TestLeaseWarningAssumesTheScheddDefault: an unset knob still clamps, so the
+// warning has to be driven by the schedd's built-in default rather than by
+// silence.
+func TestLeaseWarningAssumesTheScheddDefault(t *testing.T) {
+	cfg, err := LoadFrom(newCondorConfig(t, map[string]string{
+		"PELICAN_MANAGER_LIMIT_LEASE": "10m",
+	}))
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	if cfg.LimitLeaseWarning == "" {
+		t.Error("no warning for a lease above the schedd's built-in 5m default")
+	}
+}
+
+// TestDefaultLeaseIsNotWarnedAbout: the stock configuration must be quiet, or
+// the warning is noise and gets ignored when it matters.
+func TestDefaultLeaseIsNotWarnedAbout(t *testing.T) {
+	cfg, err := LoadFrom(newCondorConfig(t, nil))
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	if cfg.LimitLeaseWarning != "" {
+		t.Errorf("stock configuration warns: %s", cfg.LimitLeaseWarning)
+	}
+}
+
+// TestPollIntervalNoLongerAffectsTheLease: renewal runs on its own timer now,
+// so a poll interval longer than the lease is no longer a problem and must not
+// be reported as one.
+func TestPollIntervalNoLongerAffectsTheLease(t *testing.T) {
+	cfg, err := LoadFrom(newCondorConfig(t, map[string]string{
+		"PELICAN_MANAGER_POLL_INTERVAL": "5m",
+		"PELICAN_MANAGER_LIMIT_LEASE":   "60s",
+	}))
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	if cfg.LimitLeaseWarning != "" {
+		t.Errorf("poll interval still drives the lease warning: %s", cfg.LimitLeaseWarning)
+	}
+}
