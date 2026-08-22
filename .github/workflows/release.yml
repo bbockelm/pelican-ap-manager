@@ -71,7 +71,8 @@ jobs:
               -o "${stage}/sbin/" ./cmd/pelican-man ./cmd/pelican-web
             cp README.md "${stage}/share/doc/pelican-ap-manager/"
             cp docs/example-config.conf "${stage}/share/doc/pelican-ap-manager/"
-            cp docs/WEBSERVER.md docs/control-algorithm.md "${stage}/share/doc/pelican-ap-manager/" 2>/dev/null || true
+            cp docs/WEBSERVER.md docs/control-algorithm.md docs/deployment-example.md \
+              "${stage}/share/doc/pelican-ap-manager/" 2>/dev/null || true
             cp packaging/99-pelican-manager.conf "${stage}/share/doc/pelican-ap-manager/"
 
             tar -czf "dist/${name}.tar.gz" -C dist "${name}"
