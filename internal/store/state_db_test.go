@@ -67,7 +67,7 @@ func decodeRowsToSections(t *testing.T, rows map[string]string) state.Sections {
 		LimitStates: map[string]control.PairState{},
 	}
 	for key, row := range rows {
-		ad, err := classad.Parse(row)
+		ad, err := classad.ParseOld(row)
 		if err != nil {
 			t.Fatalf("parsing row %q: %v", key, err)
 		}
@@ -133,7 +133,9 @@ func TestPairRowsAreQueryable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stateRows: %v", err)
 	}
-	ad, err := classad.Parse(rows["pair:alice|UCSD"])
+	// stateRows renders in the old form, because that is what dbrpc's writes
+	// parse; see DBStateStore.Save.
+	ad, err := classad.ParseOld(rows["pair:alice|UCSD"])
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}

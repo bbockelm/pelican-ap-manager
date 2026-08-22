@@ -109,21 +109,27 @@ func (s *DBStateStore) Load(ctx context.Context) (*state.State, error) {
 		PairStates:  map[string]control.PairState{},
 		LimitStates: map[string]control.PairState{},
 	}
-	// Rebuild the write cache from what is actually stored, so the first Save
-	// after a restart rewrites only what the daemon has since changed rather
-	// than every row.
-	written := make(map[string]string, len(rows))
-
 	for _, row := range rows {
+		// Query results come back in the bracketed new-ClassAd form; writes go
+		// out in the old form. The asymmetry is dbrpc's -- see Save.
 		ad, perr := classad.Parse(row)
 		if perr != nil {
 			return nil, fmt.Errorf("store: parsing a stored state row: %w", perr)
 		}
-		key, kerr := applyStateRow(&sec, ad)
-		if kerr != nil {
+		if _, kerr := applyStateRow(&sec, ad); kerr != nil {
 			return nil, fmt.Errorf("store: decoding a stored state row: %w", kerr)
 		}
-		written[key] = ad.String()
+	}
+
+	// Seed the write cache with what Save *would* write for the state just
+	// loaded, rather than with the server's rendering of it. The two are not
+	// byte-identical -- a whole-number real comes back as an integer literal,
+	// among other things -- and Save compares byte for byte, so seeding from the
+	// server would leave those rows dirty on every cycle forever, quietly
+	// undoing the reason the state is stored as rows at all.
+	written, werr := stateRows(sec)
+	if werr != nil {
+		return nil, werr
 	}
 
 	st := state.New()
@@ -330,13 +336,13 @@ func stateRows(sec state.Sections) (map[string]string, error) {
 	cursor.InsertAttr(attrLastJobCluster, sec.LastJobEpoch.ClusterID)
 	cursor.InsertAttr(attrLastJobProc, sec.LastJobEpoch.ProcID)
 	cursor.InsertAttr(attrLastJobRun, sec.LastJobEpoch.RunInstanceID)
-	rows[stateRowCursor] = cursor.String()
+	rows[stateRowCursor] = cursor.MarshalOld()
 
 	for key, ps := range sec.PairStates {
-		rows[pairRowPrefix+key] = pairAd(kindPair, key, ps).String()
+		rows[pairRowPrefix+key] = pairAd(kindPair, key, ps).MarshalOld()
 	}
 	for key, ps := range sec.LimitStates {
-		rows[limitRowPrefix+key] = pairAd(kindLimit, key, ps).String()
+		rows[limitRowPrefix+key] = pairAd(kindLimit, key, ps).MarshalOld()
 	}
 
 	for key, st := range sec.Buckets {
@@ -344,7 +350,7 @@ func stateRows(sec state.Sections) (map[string]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		rows[bucketPrefix+key] = ad.String()
+		rows[bucketPrefix+key] = ad.MarshalOld()
 	}
 
 	scratch := map[string]any{
@@ -364,7 +370,7 @@ func stateRows(sec state.Sections) (map[string]string, error) {
 		ad.InsertAttrString(attrKind, kindScratch)
 		ad.InsertAttrString(attrSection, name)
 		ad.InsertAttrString(attrPayload, string(payload))
-		rows[scratchPrefix+name] = ad.String()
+		rows[scratchPrefix+name] = ad.MarshalOld()
 	}
 
 	return rows, nil

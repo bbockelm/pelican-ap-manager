@@ -3,6 +3,7 @@ package condor
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -79,6 +80,11 @@ type mirrorClient struct {
 	// an error. Set to queryLocked; the caller holds m.mu.
 	query func(ctx context.Context, table, constraint string) ([]string, error)
 
+	// fbMu guards lastFallback, which remembers why each read last fell back so
+	// the log carries one line per distinct failure rather than one per poll.
+	fbMu         sync.Mutex
+	lastFallback map[string]string
+
 	mu     sync.Mutex
 	client *dbrpc.Client
 	conn   *cedarclient.HTCondorClient
@@ -119,6 +125,7 @@ func NewMirrorClient(direct CondorClient, cfg MirrorConfig) (CondorClient, error
 		jobTable:      orDefault(cfg.JobTable, DefaultJobEpochTable),
 		transferTable: orDefault(cfg.TransferTable, DefaultTransferTable),
 		cfg:           cfg.Config,
+		lastFallback:  map[string]string{},
 	}
 	// Reuse the schedd client's ad conversion, so the mirrored and direct paths
 	// cannot drift in how they read an ad. If the wrapped client is something
@@ -151,8 +158,10 @@ func (m *mirrorClient) FetchTransferEpochs(since state.EpochID, cutoff time.Time
 
 	records, newest, err := m.fetchTransfersFromMirror(ctx, since, cutoff)
 	if err == nil {
+		m.clearFallback("transfer")
 		return records, newest, nil
 	}
+	m.reportFallback("transfer", err)
 	return m.schedd.FetchTransferEpochs(since, cutoff)
 }
 
@@ -183,7 +192,7 @@ func (m *mirrorClient) decodeTransferRows(rows []string, since state.EpochID) ([
 		newest  = since
 	)
 	for _, row := range rows {
-		ad, err := classad.ParseOld(row)
+		ad, err := classad.Parse(row)
 		if err != nil {
 			return nil, since, fmt.Errorf("parsing a mirrored transfer ad: %w", err)
 		}
@@ -226,9 +235,41 @@ func (m *mirrorClient) FetchJobEpochs(since state.EpochID, cutoff time.Time) ([]
 
 	records, newest, err := m.fetchFromMirror(ctx, since, cutoff)
 	if err == nil {
+		m.clearFallback("job")
 		return records, newest, nil
 	}
+	m.reportFallback("job", err)
 	return m.schedd.FetchJobEpochs(since, cutoff)
+}
+
+// reportFallback logs that a mirror read fell back to the schedd, but only when
+// the reason changes -- once per distinct error, not once per poll.
+//
+// Falling back silently was worse than the outage it was meant to soften: a
+// mirror that fails every single cycle looks exactly like one that was never
+// configured, and the only visible symptom is schedd load that was supposed to
+// have moved. That is how a wire-format mismatch survived here.
+func (m *mirrorClient) reportFallback(kind string, err error) {
+	msg := err.Error()
+	m.fbMu.Lock()
+	first := m.lastFallback[kind] != msg
+	m.lastFallback[kind] = msg
+	m.fbMu.Unlock()
+	if first {
+		log.Printf("condor: %s-history mirror unavailable, reading from the schedd instead: %v", kind, err)
+	}
+}
+
+// clearFallback forgets the last failure so a recurrence is reported again.
+func (m *mirrorClient) clearFallback(kind string) {
+	m.fbMu.Lock()
+	if prev, ok := m.lastFallback[kind]; ok && prev != "" {
+		delete(m.lastFallback, kind)
+		m.fbMu.Unlock()
+		log.Printf("condor: %s-history mirror is answering again", kind)
+		return
+	}
+	m.fbMu.Unlock()
 }
 
 func (m *mirrorClient) fetchFromMirror(ctx context.Context, since state.EpochID, cutoff time.Time) ([]JobEpochRecord, state.EpochID, error) {
@@ -274,8 +315,9 @@ func (m *mirrorClient) decodeRows(rows []string, since state.EpochID) ([]JobEpoc
 		newest  = since
 	)
 	for _, row := range rows {
-		// The archive streams the old-ClassAd text form.
-		ad, err := classad.ParseOld(row)
+		// The archive streams the bracketed new-ClassAd form: dbrpc renders every
+		// query result with ad.String(), archive queries included.
+		ad, err := classad.Parse(row)
 		if err != nil {
 			return nil, since, fmt.Errorf("parsing a mirrored history ad: %w", err)
 		}

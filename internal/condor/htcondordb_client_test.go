@@ -1,14 +1,20 @@
 package condor
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log"
+	"net"
+	"os"
 	"testing"
 	"time"
 
 	"strings"
 
 	"github.com/PelicanPlatform/classad/classad"
+	"github.com/PelicanPlatform/classad/db"
+	"github.com/PelicanPlatform/classad/dbrpc"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/pelican-ap-manager/internal/state"
 )
@@ -201,8 +207,16 @@ func TestMirrorSkipsAlreadySeenEpochs(t *testing.T) {
 		return &JobEpochRecord{User: "alice"}, id
 	}
 
+	// Rendered the way dbrpc renders a query result (ad.String()), not hand-typed:
+	// a fixture in a format the server never sends is how the old-vs-new ClassAd
+	// mix-up survived here in the first place.
 	row := func(cluster, proc, run int) string {
-		return fmt.Sprintf("ClusterId = %d\nProcId = %d\nRunInstanceID = %d\nOwner = \"alice\"\n", cluster, proc, run)
+		ad := classad.New()
+		ad.InsertAttr("ClusterId", int64(cluster))
+		ad.InsertAttr("ProcId", int64(proc))
+		ad.InsertAttr("RunInstanceID", int64(run))
+		ad.InsertAttrString("Owner", "alice")
+		return ad.String()
 	}
 	since := state.EpochID{ClusterID: 42, ProcID: 3, RunInstanceID: 1}
 
@@ -234,7 +248,7 @@ func TestMirrorSkipsAlreadySeenEpochs(t *testing.T) {
 // the schedd; skipping the row would quietly lose history instead.
 func TestMirrorReportsAnUnparsableRow(t *testing.T) {
 	m := newTestMirror(t, &stubClient{})
-	if _, _, err := m.decodeRows([]string{"ClusterId = = ="}, state.EpochID{}); err == nil {
+	if _, _, err := m.decodeRows([]string{"[ClusterId = = =]"}, state.EpochID{}); err == nil {
 		t.Error("decodeRows accepted a row that is not a ClassAd")
 	}
 }
@@ -353,8 +367,14 @@ func TestTransferDecodeSkipsSeenEpochsAndFlattens(t *testing.T) {
 		return []TransferRecord{{User: "alice"}, {User: "alice"}}, id
 	}
 
+	// As above: rendered the way the server renders it.
 	row := func(cluster, proc, run int) string {
-		return fmt.Sprintf("ClusterId = %d\nProcId = %d\nRunInstanceID = %d\nEpochAdType = \"INPUT\"\n", cluster, proc, run)
+		ad := classad.New()
+		ad.InsertAttr("ClusterId", int64(cluster))
+		ad.InsertAttr("ProcId", int64(proc))
+		ad.InsertAttr("RunInstanceID", int64(run))
+		ad.InsertAttrString("EpochAdType", "INPUT")
+		return ad.String()
 	}
 	since := state.EpochID{ClusterID: 42, ProcID: 3, RunInstanceID: 1}
 
@@ -459,5 +479,120 @@ func TestBothReadsFallBackWhenTheQueryFails(t *testing.T) {
 	}
 	if stub.transferCalls != 1 {
 		t.Errorf("transfer read did not fall back: %d schedd calls", stub.transferCalls)
+	}
+}
+
+// TestMirrorDecodesWhatARealServerSends closes the same gap the store had: every
+// other test here feeds decodeRows text this file wrote, so it could not see
+// that the server sends something else. dbrpc renders every query result --
+// archive queries included -- with ad.String(), the bracketed new-ClassAd form,
+// while this code was parsing rows with classad.ParseOld. The mirror therefore
+// failed on every row and fell back to the schedd, forever, silently.
+func TestMirrorDecodesWhatARealServerSends(t *testing.T) {
+	d, err := db.Open("")
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	srv := dbrpc.NewServer(d)
+	c1, c2 := net.Pipe()
+	go func() { _ = srv.ServeConn(dbrpc.NewStreamConn(c2)) }()
+	client := dbrpc.NewClient(dbrpc.NewStreamConn(c1))
+	defer func() { _ = client.Close(); srv.Close(); _ = d.Close() }()
+
+	ctx := context.Background()
+	table := dbrpc.DefaultTable
+
+	// Write an epoch record the way scheddsync would: old form in, since that is
+	// what dbrpc parses.
+	ad := classad.New()
+	ad.InsertAttr("ClusterId", 42)
+	ad.InsertAttr("ProcId", 3)
+	ad.InsertAttr("RunInstanceID", 1)
+	ad.InsertAttrString("Owner", "alice")
+	tx, err := client.BeginTable(ctx, table)
+	if err != nil {
+		t.Fatalf("BeginTable: %v", err)
+	}
+	if err := tx.NewClassAd(ctx, "42.3.1", ad.MarshalOld()); err != nil {
+		t.Fatalf("NewClassAd: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	rows, err := client.QueryTable(ctx, table, "true", 0)
+	if err != nil {
+		t.Fatalf("QueryTable: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("%d rows, want 1", len(rows))
+	}
+
+	// The decode the mirror actually uses must handle that text.
+	m := newTestMirror(t, &stubClient{})
+	m.convertJob = func(ad *classad.ClassAd) (*JobEpochRecord, state.EpochID) {
+		owner, _ := ad.EvaluateAttrString("Owner")
+		return &JobEpochRecord{User: owner}, epochFromAd(ad)
+	}
+
+	records, newest, err := m.decodeRows(rows, state.EpochID{})
+	if err != nil {
+		t.Fatalf("decodeRows on a real server's output: %v", err)
+	}
+	if len(records) != 1 || records[0].User != "alice" {
+		t.Fatalf("decoded %+v, want one record for alice", records)
+	}
+	if want := (state.EpochID{ClusterID: 42, ProcID: 3, RunInstanceID: 1}); newest != want {
+		t.Errorf("newest = %v, want %v", newest, want)
+	}
+}
+
+// TestFallbackIsReportedOncePerCause: a mirror that fails every cycle used to be
+// indistinguishable from one that was never configured -- the only symptom was
+// the schedd load you were trying to move. It must say so, but once per cause
+// rather than once per poll, or a database outage floods the log.
+func TestFallbackIsReportedOncePerCause(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	stub := &stubClient{}
+	m := newTestMirror(t, stub)
+	m.query = func(context.Context, string, string) ([]string, error) {
+		return nil, fmt.Errorf("archive unavailable")
+	}
+
+	for i := 0; i < 4; i++ {
+		if _, _, err := m.FetchJobEpochs(state.EpochID{}, time.Now()); err != nil {
+			t.Fatalf("FetchJobEpochs: %v", err)
+		}
+	}
+	if stub.jobEpochCalls != 4 {
+		t.Fatalf("%d schedd calls, want 4 -- every cycle must still fall back", stub.jobEpochCalls)
+	}
+	if n := strings.Count(buf.String(), "mirror unavailable"); n != 1 {
+		t.Errorf("logged the same failure %d times across 4 polls, want 1", n)
+	}
+
+	// Recovery is worth a line too, so a log reader can see the outage end.
+	buf.Reset()
+	m.query = func(context.Context, string, string) ([]string, error) { return nil, nil }
+	if _, _, err := m.FetchJobEpochs(state.EpochID{}, time.Now()); err != nil {
+		t.Fatalf("FetchJobEpochs: %v", err)
+	}
+	if !strings.Contains(buf.String(), "answering again") {
+		t.Errorf("recovery was not reported: %q", buf.String())
+	}
+
+	// A different cause is a different line.
+	buf.Reset()
+	m.query = func(context.Context, string, string) ([]string, error) {
+		return nil, fmt.Errorf("permission denied")
+	}
+	if _, _, err := m.FetchJobEpochs(state.EpochID{}, time.Now()); err != nil {
+		t.Fatalf("FetchJobEpochs: %v", err)
+	}
+	if !strings.Contains(buf.String(), "permission denied") {
+		t.Errorf("a new cause was not reported: %q", buf.String())
 	}
 }

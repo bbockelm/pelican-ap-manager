@@ -8,9 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PelicanPlatform/classad/classad"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	condorconfig "github.com/bbockelm/golang-htcondor/config"
 	htcondorlogging "github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/pelican-ap-manager/internal/condor"
 	"github.com/bbockelm/pelican-ap-manager/internal/config"
 	"github.com/bbockelm/pelican-ap-manager/internal/ratelimit"
 	"github.com/bbockelm/pelican-ap-manager/internal/state"
@@ -472,4 +474,46 @@ func TestNewServiceAlwaysHasAStateStore(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("state was not written to %s: %v", path, err)
 	}
+}
+
+// TestInfoFileIsWrittenEvenWithNothingToSay: the info file is a local snapshot
+// of what the daemon believes, and a freshly installed AP believes nothing until
+// the first transfers land. An absent file cannot be told apart from a bad path
+// or a daemon that never started, so "nothing" has to be written down.
+func TestInfoFileIsWrittenEvenWithNothingToSay(t *testing.T) {
+	logger, err := htcondorlogging.New(&htcondorlogging.Config{})
+	if err != nil {
+		t.Fatalf("logger: %v", err)
+	}
+	dir := t.TempDir()
+	infoPath := filepath.Join(dir, "pelican_info.json")
+
+	svc := NewService(noAdsClient{}, state.New(), filepath.Join(dir, "state.json"),
+		time.Second, time.Second, time.Hour, time.Hour,
+		nil, nil, "", nil, logger, infoPath, "", "", true)
+
+	svc.advertiseOnce()
+
+	if _, err := os.Stat(infoPath); err != nil {
+		t.Fatalf("no info file at %s with nothing to report: %v", infoPath, err)
+	}
+}
+
+// noAdsClient is a pool with nothing in it: no history, no schedd. It stands in
+// for a freshly installed access point, which is exactly when the info file was
+// missing.
+type noAdsClient struct{}
+
+func (noAdsClient) FetchTransferEpochs(since state.EpochID, _ time.Time) ([]condor.TransferRecord, state.EpochID, error) {
+	return nil, since, nil
+}
+func (noAdsClient) FetchJobEpochs(since state.EpochID, _ time.Time) ([]condor.JobEpochRecord, state.EpochID, error) {
+	return nil, since, nil
+}
+func (noAdsClient) AdvertiseClassAds([]map[string]any) error { return nil }
+func (noAdsClient) QueryJobs(context.Context, string, []string) ([]*classad.ClassAd, error) {
+	return nil, nil
+}
+func (noAdsClient) LocateSchedd(context.Context) (*htcondor.Schedd, error) {
+	return nil, fmt.Errorf("no schedd in this pool")
 }
