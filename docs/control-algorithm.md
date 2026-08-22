@@ -1,6 +1,6 @@
 # Control Algorithm Documentation
 
-This document describes the control algorithm parameters used by `pelican_man` to manage data transfer rates and schedd startup limits.
+This document describes the control algorithm parameters used by `pelican-man` to manage data transfer rates and schedd startup limits.
 
 ## Overview
 

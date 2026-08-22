@@ -264,7 +264,7 @@ func limitTagFor(cfg *config.Config) string {
 	if hostname, err := os.Hostname(); err == nil {
 		return hostname
 	}
-	return "pelican_man"
+	return "pelican-man"
 }
 
 func nameOrUUID(name, uuid string) string {

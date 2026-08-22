@@ -11,7 +11,7 @@ import (
 	"github.com/bbockelm/pelican-ap-manager/internal/ratelimit"
 )
 
-// Config holds runtime options for the pelican_man daemon.
+// Config holds runtime options for the pelican-man daemon.
 type Config struct {
 	PollInterval      time.Duration
 	AdvertiseInterval time.Duration

@@ -11,6 +11,16 @@ on:
 permissions:
   contents: read
 
+# NOTE: this job installs no HTCondor, so every test that needs a real
+# condor_master skips here -- TestPelicanIntegration, TestPelicanManagedDaemon,
+# TestFakeTransferPluginIntegration and the static-rule tests among them. What
+# actually runs is the handful that does not need a pool.
+#
+# The privileged path is covered by root-integration.yml, but that job is root and
+# those tests cannot run as root as written. Until this job has an unprivileged
+# HTCondor, they are exercised only by hand. Adding one here is the fix; it needs
+# HTCondor installed on a non-root runner and a personal-condor pool.
+
 jobs:
   integration:
     runs-on: ubuntu-latest
