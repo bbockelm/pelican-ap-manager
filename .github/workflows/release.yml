@@ -1,9 +1,14 @@
 name: release
 
-# Builds pelican_man and pelican_web for linux/darwin (amd64 + arm64) and attaches the
-# archives to the GitHub release when a v* tag is pushed. The module consumes its sibling
-# modules (classad, cedar, golang-htcondor, htcondordb) from published tags, so no sibling
-# checkout is needed -- GOPRIVATE makes `go build` fetch them directly from GitHub.
+# Builds pelican_man and pelican_web for the platforms an access point is actually
+# deployed on -- linux/amd64 and linux/arm64 -- plus darwin/arm64, which is where this
+# gets developed and hand-tested. No darwin/amd64: condor_master does not run on an
+# Intel Mac in any deployment, and it was 18 MB of release assets nobody downloads.
+#
+# The archives are attached to the GitHub release when a v* tag is pushed. The module
+# consumes its sibling modules (classad, cedar, golang-htcondor, htcondordb) from
+# published tags, so no sibling checkout is needed -- GOPRIVATE makes `go build` fetch
+# them directly from GitHub.
 #
 # A manual run (workflow_dispatch) builds and uploads the archives as workflow artifacts
 # WITHOUT publishing a release, so the build can be exercised without cutting a tag.
@@ -29,7 +34,7 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build release archives (linux/darwin, amd64/arm64)
+      - name: Build release archives (linux/amd64, linux/arm64, darwin/arm64)
         env:
           CGO_ENABLED: '0'
           GOFLAGS: -mod=mod
@@ -45,7 +50,7 @@ jobs:
             *) version="$(git describe --tags --always --dirty 2>/dev/null || echo dev)" ;;
           esac
           mkdir -p dist
-          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+          for target in linux/amd64 linux/arm64 darwin/arm64; do
             os="${target%/*}"; arch="${target#*/}"
             name="pelican-ap-manager_${version}_${os}_${arch}"
             echo "==> building ${name}"
