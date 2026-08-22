@@ -134,6 +134,7 @@ type EpochCounts struct {
 // State persists progress through the transfer epoch history.
 type State struct {
 	LastEpoch       EpochID                           `json:"last_epoch"`
+	LastJobEpoch    EpochID                           `json:"last_job_epoch"`
 	Buckets         map[string]SummaryStats           `json:"buckets"`
 	RecentTransfers map[string][]TransferHistoryEntry `json:"recent_transfers"`
 	EpochBuckets    map[string][]TransferEpochRef     `json:"epoch_buckets,omitempty"`
@@ -279,6 +280,27 @@ func (s *State) SetLastEpoch(epoch EpochID) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.LastEpoch = epoch
+}
+
+// LastJobEpochID returns the cursor into job-epoch history.
+func (s *State) LastJobEpochID() EpochID {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.LastJobEpoch
+}
+
+// SetLastJobEpoch records the latest processed job-epoch identifier.
+//
+// This is persisted, unlike the in-memory field it replaces: without it every
+// restart re-read the whole lookback window of job history -- work the schedd
+// (or the htcondordb mirror) had already done, discarded a moment later because
+// the records were already summarized.
+func (s *State) SetLastJobEpoch(epoch EpochID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if epoch.After(s.LastJobEpoch) {
+		s.LastJobEpoch = epoch
+	}
 }
 
 // Snapshot returns a copy of the current state suitable for reporting.
@@ -948,4 +970,99 @@ func (s *State) SnapshotLimitStates() map[string]control.PairState {
 		out[k] = v
 	}
 	return out
+}
+
+// Sections is the state decomposed into independently persistable parts.
+//
+// It exists so a store can write only what changed instead of rewriting one
+// large document, and so the copying and locking stay here, in the package that
+// owns the mutex, rather than being reinvented by each backend.
+//
+// Every exported field of State appears here exactly once. That is load-bearing:
+// a field that gets added to State and not to Sections would be silently
+// dropped on every save, and the daemon would look fine until a restart lost it.
+// TestSectionsCoverEveryField enforces it.
+type Sections struct {
+	LastEpoch       EpochID
+	LastJobEpoch    EpochID
+	Buckets         map[string]SummaryStats
+	RecentTransfers map[string][]TransferHistoryEntry
+	EpochBuckets    map[string][]TransferEpochRef
+	EpochIndex      map[string]string
+	JobEpochs       map[string]JobEpochSample
+	EpochUsers      map[string]string
+	BucketRuntimes  map[string][]BucketRuntimeSample
+	PairStates      map[string]control.PairState
+	LimitStates     map[string]control.PairState
+}
+
+// Sections returns a deep copy of the state, split into its parts.
+func (s *State) Sections() Sections {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return Sections{
+		LastEpoch:       s.LastEpoch,
+		LastJobEpoch:    s.LastJobEpoch,
+		Buckets:         copyMap(s.Buckets),
+		RecentTransfers: copySliceMap(s.RecentTransfers),
+		EpochBuckets:    copySliceMap(s.EpochBuckets),
+		EpochIndex:      copyMap(s.EpochIndex),
+		JobEpochs:       copyMap(s.JobEpochs),
+		EpochUsers:      copyMap(s.EpochUsers),
+		BucketRuntimes:  copySliceMap(s.BucketRuntimes),
+		PairStates:      copyMap(s.PairStates),
+		LimitStates:     copyMap(s.LimitStates),
+	}
+}
+
+// RestoreSections replaces the state with the given sections. A nil map becomes
+// an empty one, so the result is usable whether it came from a full store or an
+// empty one.
+func (s *State) RestoreSections(sec Sections) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.LastEpoch = sec.LastEpoch
+	s.LastJobEpoch = sec.LastJobEpoch
+	s.Buckets = orEmpty(copyMap(sec.Buckets))
+	s.RecentTransfers = orEmpty(copySliceMap(sec.RecentTransfers))
+	s.EpochBuckets = orEmpty(copySliceMap(sec.EpochBuckets))
+	s.EpochIndex = orEmpty(copyMap(sec.EpochIndex))
+	s.JobEpochs = orEmpty(copyMap(sec.JobEpochs))
+	s.EpochUsers = orEmpty(copyMap(sec.EpochUsers))
+	s.BucketRuntimes = orEmpty(copySliceMap(sec.BucketRuntimes))
+	s.PairStates = orEmpty(copyMap(sec.PairStates))
+	s.LimitStates = orEmpty(copyMap(sec.LimitStates))
+}
+
+func copyMap[K comparable, V any](in map[K]V) map[K]V {
+	if in == nil {
+		return nil
+	}
+	out := make(map[K]V, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func copySliceMap[K comparable, V any](in map[K][]V) map[K][]V {
+	if in == nil {
+		return nil
+	}
+	out := make(map[K][]V, len(in))
+	for k, v := range in {
+		cpy := make([]V, len(v))
+		copy(cpy, v)
+		out[k] = cpy
+	}
+	return out
+}
+
+func orEmpty[K comparable, V any](in map[K]V) map[K]V {
+	if in == nil {
+		return make(map[K]V)
+	}
+	return in
 }

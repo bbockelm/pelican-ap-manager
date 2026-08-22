@@ -187,12 +187,11 @@ This pairs with `DC_DAEMON_LIST`. A daemon that *hangs* rather than crashes stop
 PELICAN_MANAGER_LIMIT_LEASE = 60s
 ```
 
-Two constraints:
+Renewal runs on its own timer, at a third of the lease, so two consecutive failures — a schedd restart, a dropped connection — still leave a third of the lease to recover in. It is deliberately independent of the poll and advertise intervals: whatever you set those to, a healthy daemon's limits do not lapse.
 
-- The schedd clamps any requested lease to `STARTUP_LIMIT_MAX_EXPIRATION` (5 minutes by default), so raising this above that has no effect without raising the schedd's knob too.
-- Renewal happens once per poll cycle, so `PELICAN_MANAGER_POLL_INTERVAL` must be shorter than the lease. The daemon warns at startup if it is not, because limits would otherwise lapse between cycles and enforcement would come and go.
+One constraint: the schedd clamps any requested lease to `STARTUP_LIMIT_MAX_EXPIRATION` (5 minutes by default) and does so silently, so raising this above that gets you the schedd's maximum rather than what you asked for. The daemon reads that knob at startup and warns if the two disagree.
 
-A lapsed limit is not fatal: the next cycle reinstalls it. But the gap is real, so the two intervals are worth keeping well apart.
+A lapsed limit is not fatal — the next cycle reinstalls it — but the gap is real, and nothing reports it, which is why the renewal interval is derived from the lease rather than configured separately.
 
 ### Where rules live
 
@@ -212,6 +211,59 @@ PELICAN_MANAGER_RULE_DB_TABLE   = pelican_rate_rules
 The store also holds the control loop's own conclusions (as `dynamic` rules), so you can see what it decided even in `observing` mode, and a restart re-adopts them instead of starting cold.
 
 Configuration-declared rules are reconciled on every startup and `condor_reconfig`: declared rules are written, and rules that disappear from the configuration are retired. Rules written directly into the store by other means are left alone.
+
+### Reading history from htcondordb instead of the schedd
+
+Every poll cycle, `pelican_man` reads recent history twice: the completed-job history, and the transfer records. By default it asks the schedd, and neither read is free — the schedd walks its history files backwards, in its own process, while it is also trying to run jobs. On a busy access point this is the most expensive thing the manager does.
+
+If the pool already runs [htcondordb](https://github.com/bbockelm/htcondordb) with `scheddsync` mirroring this schedd, point the manager at the mirror and both reads move off the access point entirely:
+
+```
+PELICAN_MANAGER_EPOCH_DB_ADDRESS = htcondordb.example.org:9618
+```
+
+The address defaults to `PELICAN_MANAGER_RULE_DB_ADDRESS`, so a site already keeping its rules in htcondordb gets this by setting nothing. Set it to a different address to split the two; leave both unset to read everything from the schedd.
+
+This needs `scheddsync` tailing **both** files — `HISTORY` and `JOB_EPOCH_HISTORY` — because the two reads come from two different places:
+
+| Read | Schedd file | Archive table | Override |
+|---|---|---|---|
+| Completed jobs | `HISTORY` | `history` | `PELICAN_MANAGER_EPOCH_DB_JOB_TABLE` |
+| Transfers | `JOB_EPOCH_HISTORY` | `epoch_history` | `PELICAN_MANAGER_EPOCH_DB_TRANSFER_TABLE` |
+
+There is no separate transfer-history file. `condor_history -transfer-history` reads `JOB_EPOCH_HISTORY` and filters on `EpochAdType` — `INPUT`, `OUTPUT`, `CHECKPOINT` — so the mirrored read applies the same filter. The other record types in that file (`SPAWN`, `EPOCH`) are job-lifecycle records, not transfers, and are excluded.
+
+**It degrades, it does not fail.** If the database is unreachable or returns an error, that cycle falls back to the schedd for whichever read failed, and logs it. The consequence of an outage is the load you were trying to avoid, not a blind control loop.
+
+A mirror is behind the schedd by however long the sync lags. That is fine here — the manager reacts to rolling windows measured in hours — but a mirror that has fallen far behind will make it react to stale data without saying so. If you run one, monitor the sync.
+
+### Where the daemon's own state lives
+
+Separate from the rules, `pelican_man` keeps working state: how far it has read into transfer and job history, the per-bucket transfer summaries, and the capacity the control loop has settled on for each (user, site) pair. Losing it is not fatal but it is not free either — the daemon comes back having forgotten every pair it had classified, and re-reads a whole lookback window of history to rebuild the summaries.
+
+By default it is a JSON document under `SPOOL`:
+
+```
+PELICAN_MANAGER_STATE_PATH = $(SPOOL)/pelican_state.json
+```
+
+It can go in htcondordb instead, which is what lets a replacement access point pick up where the last one left off:
+
+```
+PELICAN_MANAGER_STATE_DB_ADDRESS = htcondordb.example.org:9618
+```
+
+As with the history mirror, this defaults to `PELICAN_MANAGER_RULE_DB_ADDRESS`, so one setting covers both.
+
+The state is not stored as one document. It is written on every poll cycle and most of it does not change between cycles, so it is split across rows — one for the read cursors, one per (user, site) pair, one per summary bucket, and one each for the rolling working sets — and only the rows whose contents actually moved are written. That keeps a steady-state save proportional to what changed rather than to how much history the daemon is holding, and it makes the interesting part queryable:
+
+```sql
+SELECT PairKey, CapacityGBPerMin FROM pelican_manager_state WHERE Kind == "pair"
+```
+
+The rolling working sets stay as JSON payloads. They are the daemon's own scratch, nothing queries them, and giving them attributes would only add a way to drop a field silently.
+
+**A state load failure is fatal.** If the store is configured and cannot be read, `pelican_man` exits rather than starting with an empty state — coming up blank would silently reset the cursors and discard every classification, and it would look exactly like a healthy first start.
 
 ---
 
@@ -248,6 +300,11 @@ All settings come from HTCondor configuration macros, resolved the same way `con
 | `PELICAN_MANAGER_COLLECTOR_HOST` | `COLLECTOR_HOST`, else `localhost:9618` | Collector to advertise to and to locate the schedd through. |
 | `PELICAN_MANAGER_SCHEDD_NAME` | `SCHEDD_NAME` | Which schedd to manage. The bare name is fine — the schedd advertises it as `<name>@<fullhostname>` and both forms match. Empty means "the only schedd in the pool". |
 | `PELICAN_MANAGER_SITE_ATTRIBUTE` | `MachineAttrGLIDEIN_ResourceName0` | Machine attribute naming the execution site. **Set this to whatever your pool actually uses**, or `site=` selectors will never match. |
+| `PELICAN_MANAGER_EPOCH_DB_ADDRESS` | `PELICAN_MANAGER_RULE_DB_ADDRESS` | Read history from an htcondordb mirror instead of the schedd. Falls back to the schedd on any error. |
+| `PELICAN_MANAGER_EPOCH_DB_JOB_TABLE` | `history` | Archive table `scheddsync` mirrors the schedd's `HISTORY` file to. |
+| `PELICAN_MANAGER_EPOCH_DB_TRANSFER_TABLE` | `epoch_history` | Archive table `scheddsync` mirrors `JOB_EPOCH_HISTORY` to; the transfer records are here. |
+| `PELICAN_MANAGER_STATE_DB_ADDRESS` | `PELICAN_MANAGER_RULE_DB_ADDRESS` | Keep the daemon's working state in htcondordb rather than the `SPOOL` JSON file. A load failure is fatal. |
+| `PELICAN_MANAGER_STATE_DB_TABLE` | `pelican_manager_state` | Table holding the state rows. |
 | `PELICAN_MANAGER_ADDRESS_FILE` | `$(LOG)/.pelican_manager_address` | Where the command address is published. |
 
 ### State and logging

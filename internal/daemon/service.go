@@ -53,7 +53,6 @@ type Service struct {
 	logger            *htcondorlogging.Logger
 	oneshoot          bool
 	startTime         time.Time
-	lastJobEpoch      state.EpochID
 	controlCfg        control.Config
 	limitMgr          *limitManager
 	schedd            *htcondor.Schedd
@@ -75,6 +74,12 @@ type Service struct {
 	// case only in-memory dynamic rules are used and nothing survives a
 	// restart beyond what the schedd itself still holds.
 	rules store.RuleStore
+
+	// stateStore persists the daemon's own working state -- the epoch cursors,
+	// the transfer summaries, the control loop's per-pair conclusions. Set by
+	// buildService; file-backed unless an htcondordb address is configured.
+	stateStore     store.StateStore
+	stateStoreDesc string
 
 	ruleMu sync.RWMutex
 }
@@ -106,10 +111,27 @@ func NewService(client condor.CondorClient, st *state.State, statePath string, p
 		}
 	}
 
+	// The default state backend is the JSON document at statePath, which is
+	// what this did before there was an interface here. buildService replaces it
+	// when an htcondordb address is configured. Defaulting rather than leaving
+	// it nil matters: a nil store makes saveState a silent no-op, and nothing
+	// notices until a restart comes up with no state.
+	var stateStore store.StateStore
+	stateDesc := "no state store"
+	if statePath != "" {
+		if fs, err := store.OpenFileStateStore(statePath); err != nil {
+			logger.Infof(htcondorlogging.DestinationGeneral, "warning: could not open state file %s: %v", statePath, err)
+		} else {
+			stateStore, stateDesc = fs, "file "+statePath
+		}
+	}
+
 	return &Service{
 		condor:            client,
 		state:             st,
 		statePath:         statePath,
+		stateStore:        stateStore,
+		stateStoreDesc:    stateDesc,
 		pollInterval:      poll,
 		advertiseInterval: advertise,
 		infoPath:          infoPath,
@@ -164,6 +186,15 @@ func (s *Service) Run(ctx context.Context) error {
 	defer pollTicker.Stop()
 	defer advTicker.Stop()
 
+	// Lease renewal gets its own timer, derived from the lease rather than from
+	// the poll or advertise interval. It used to ride the advertise cycle, which
+	// at the default settings is exactly as long as the lease -- so limits
+	// lapsed and were reinstalled every minute, leaving gaps in enforcement that
+	// nothing reported. Whatever the operator sets the other intervals to, the
+	// lease is now refreshed three times over before it can run out.
+	renewTicker := s.startLimitRenewal(ctx)
+	defer renewTicker.Stop()
+
 	// Advertise immediately on startup
 	s.advertiseOnce()
 
@@ -176,8 +207,45 @@ func (s *Service) Run(ctx context.Context) error {
 			s.pollOnce(ctx)
 		case <-advTicker.C:
 			s.advertiseOnce()
+		case <-renewTicker.C:
+			s.renewLimitLeases(ctx)
 		}
 	}
+}
+
+// startLimitRenewal returns the ticker driving lease renewal. The interval comes
+// from the limit manager once it exists; before then -- the manager is built
+// lazily, on the first advertise -- the configured lease is the best available
+// answer and matches what the manager will choose.
+func (s *Service) startLimitRenewal(ctx context.Context) *time.Ticker {
+	interval := s.renewalInterval()
+	s.Printf("renewing schedd limit leases every %s", interval)
+	return time.NewTicker(interval)
+}
+
+// renewalInterval mirrors limitManager.renewalInterval for the configured lease.
+func (s *Service) renewalInterval() time.Duration {
+	lease := s.limitLease()
+	if lease <= 0 {
+		lease = defaultLimitLease
+	}
+	if iv := lease / 3; iv >= time.Second {
+		return iv
+	}
+	return time.Second
+}
+
+// renewLimitLeases refreshes the lease on the limits already installed. It does
+// not build the limit manager: until the first advertise cycle has run there is
+// no policy to keep alive, and connecting to the schedd from here would only
+// duplicate that work.
+func (s *Service) renewLimitLeases(ctx context.Context) {
+	if s.limitMgr == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	s.limitMgr.renewAll(ctx)
 }
 
 // runOnce executes a single poll/summary cycle in oneshot mode.
@@ -211,7 +279,7 @@ func (s *Service) pollOnce(ctx context.Context) int {
 		return 0
 	}
 
-	jobRecords, newestJobEpoch, err := s.condor.FetchJobEpochs(s.lastJobEpoch, cutoff)
+	jobRecords, newestJobEpoch, err := s.condor.FetchJobEpochs(s.state.LastJobEpochID(), cutoff)
 	if err != nil {
 		s.Printf("job epoch poll error: %v", err)
 	}
@@ -302,9 +370,7 @@ func (s *Service) pollOnce(ctx context.Context) int {
 	if newestEpoch.After(lastEpoch) {
 		s.state.SetLastEpoch(newestEpoch)
 	}
-	if newestJobEpoch.After(s.lastJobEpoch) {
-		s.lastJobEpoch = newestJobEpoch
-	}
+	s.state.SetLastJobEpoch(newestJobEpoch)
 
 	if !s.oneshoot {
 		s.saveState()
@@ -327,10 +393,32 @@ func (s *Service) saveState() {
 		}
 	}
 
-	s.Printf("saving state to %s", s.statePath)
-	if err := s.state.Save(s.statePath); err != nil {
-		s.Printf("state save error: %v", err)
+	store, desc := s.StateStore()
+	if store == nil {
+		// No store configured: nothing to save to, and saying so once per poll
+		// would be noise. buildService always sets one.
+		return
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := store.Save(ctx, s.state); err != nil {
+		s.Printf("state save error (%s): %v", desc, err)
+	}
+}
+
+// SetStateStore installs the backend the poll loop saves to. desc names it for
+// log lines. Safe to call while the loop is running, though nothing does.
+func (s *Service) SetStateStore(st store.StateStore, desc string) {
+	s.ruleMu.Lock()
+	defer s.ruleMu.Unlock()
+	s.stateStore, s.stateStoreDesc = st, desc
+}
+
+// StateStore returns the installed state backend and its description.
+func (s *Service) StateStore() (store.StateStore, string) {
+	s.ruleMu.RLock()
+	defer s.ruleMu.RUnlock()
+	return s.stateStore, s.stateStoreDesc
 }
 
 // persistJobMirror writes a JSON snapshot of the current job mirror for external inspection.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/PelicanPlatform/classad/ast"
@@ -24,8 +25,8 @@ const (
 	// The point of a short lease is that this daemon is the only thing keeping
 	// its limits in force: if it crashes, whatever it was throttling must go
 	// back to running at full rate within about a minute rather than staying
-	// throttled until someone notices. The daemon renews on every poll cycle,
-	// so the lease only ever runs out when the daemon is gone.
+	// throttled until someone notices. The daemon renews at a third of this
+	// interval, so the lease only ever runs out when the daemon is gone.
 	//
 	// The schedd caps this at STARTUP_LIMIT_MAX_EXPIRATION (5 minutes by
 	// default) and silently clamps anything larger, so asking for more than
@@ -63,10 +64,16 @@ type scheddLimits interface {
 }
 
 type limitManager struct {
-	schedd        scheddLimits
-	logger        *htcondorlogging.Logger
-	activeLimits  map[string]*limitState // keyed by the schedd limit name (rule.LimitName())
-	cfg           limitConfig
+	schedd scheddLimits
+	logger *htcondorlogging.Logger
+
+	// mu guards activeLimits and cfg. Lease renewal runs on its own timer,
+	// independent of the advertise cycle that reconciles policy, so the two can
+	// reach this map at once.
+	mu           sync.Mutex
+	activeLimits map[string]*limitState // keyed by the schedd limit name (rule.LimitName())
+	cfg          limitConfig
+
 	daemonName    string
 	siteAttribute string
 }
@@ -172,6 +179,9 @@ func newLimitManager(schedd scheddLimits, daemonName string, siteAttribute strin
 // The rules passed in are already filtered for the enforcement mode -- an
 // observing daemon simply hands over fewer of them.
 func (m *limitManager) reconcile(ctx context.Context, rules []ratelimit.Rule) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if !m.cfg.enabled {
 		return nil
 	}
@@ -191,11 +201,10 @@ func (m *limitManager) reconcile(ctx context.Context, rules []ratelimit.Rule) er
 			continue
 		}
 
-		// Renew on every cycle, whether or not the rate moved. The limit holds
-		// a short lease precisely so it dies with the daemon; not renewing it
-		// meant enforcement quietly stopped after one lease on a perfectly
-		// healthy daemon, and never resumed, because activeLimits still
-		// believed the limit was installed.
+		// Rewrite on every cycle, whether or not the rate moved. This also
+		// renews the lease, but it is not what keeps the limits alive -- see
+		// renewAll, which runs on its own timer. Rewriting here is what applies
+		// a rate the controller has just changed.
 		//
 		// shouldUpdateLimit no longer decides whether to talk to the schedd --
 		// only whether the rate has moved enough to be worth reporting.
@@ -337,6 +346,50 @@ func (m *limitManager) renewLimit(ctx context.Context, existing *limitState, rul
 			rule.Origin, uuid, rule.Name, rule.RateCount, rule.Window())
 	}
 	return nil
+}
+
+// renewalInterval is how often renewAll has to run.
+//
+// A third of the lease, so two consecutive failures -- a schedd restart, a
+// dropped connection -- still leave a third of the lease to recover in. Tying
+// renewal to the lease rather than to a poll or advertise interval is what keeps
+// the two independent: shortening the lease shortens the renewal to match, and
+// no combination of the other intervals can produce a limit that lapses on a
+// healthy daemon.
+func (m *limitManager) renewalInterval() time.Duration {
+	lease := m.cfg.lease
+	if lease <= 0 {
+		lease = defaultLimitLease
+	}
+	if iv := lease / 3; iv >= time.Second {
+		return iv
+	}
+	return time.Second
+}
+
+// renewAll refreshes the lease on every limit currently installed, without
+// reconsidering policy.
+//
+// Renewal is a liveness signal, not a decision: it says "this daemon is still
+// here", and the limits it has already decided on stay in force until a
+// reconcile decides otherwise. Keeping it separate is what lets it run on a
+// timer derived from the lease instead of from whatever interval the policy
+// cycle happens to use -- which is how limits at the default settings used to
+// lapse, the advertise interval and the lease both being one minute.
+func (m *limitManager) renewAll(ctx context.Context) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if !m.cfg.enabled {
+		return
+	}
+	for _, limit := range m.activeLimits {
+		// changed=false: nothing about the rule moved, so this is silent.
+		if err := m.renewLimit(ctx, limit, limit.rule, false); err != nil {
+			m.logger.Infof(htcondorlogging.DestinationGeneral,
+				"limit lease renewal error for rule %s: %v", limit.rule.Name, err)
+		}
+	}
 }
 
 // pushLimit sends one create-or-update to the schedd. uuid empty means create.
@@ -599,6 +652,9 @@ func sanitizeLimitLabel(s string) string {
 // reported here: these accessors feed the per-pair fields of the summary ads,
 // which describe what the controller decided, not the whole policy in force.
 func (m *limitManager) getLimitInfo(pair UserSitePair) (rateCount int, rateWindow int, active bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if !m.cfg.enabled {
 		return 0, 0, false
 	}
@@ -611,6 +667,9 @@ func (m *limitManager) getLimitInfo(pair UserSitePair) (rateCount int, rateWindo
 
 // getLimitStats returns statistics for a user+site pair limit
 func (m *limitManager) getLimitStats(pair UserSitePair) (hitCount int64, jobsSkipped int64, lastHit time.Time, exists bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if !m.cfg.enabled {
 		return 0, 0, time.Time{}, false
 	}
@@ -623,6 +682,9 @@ func (m *limitManager) getLimitStats(pair UserSitePair) (hitCount int64, jobsSki
 
 // getLimitUUID returns the UUID of the active limit for a user+site pair
 func (m *limitManager) getLimitUUID(pair UserSitePair) (uuid string, exists bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if !m.cfg.enabled {
 		return "", false
 	}

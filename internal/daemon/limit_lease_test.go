@@ -3,12 +3,17 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	condorconfig "github.com/bbockelm/golang-htcondor/config"
 	htcondorlogging "github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/pelican-ap-manager/internal/config"
 	"github.com/bbockelm/pelican-ap-manager/internal/ratelimit"
+	"github.com/bbockelm/pelican-ap-manager/internal/state"
 )
 
 // fakeSchedd records what the limit manager asks of the schedd and lets a test
@@ -275,5 +280,196 @@ func TestConfiguredLeaseIsHonored(t *testing.T) {
 	}
 	if got := f.pushes[0].Expiration; got != 5 {
 		t.Errorf("Expiration = %d, want 5", got)
+	}
+}
+
+// TestRenewalIntervalLeavesRoomToFail: renewal at a third of the lease means
+// two consecutive failures -- a schedd restart, a dropped connection -- still
+// leave a third of the lease to recover in.
+func TestRenewalIntervalLeavesRoomToFail(t *testing.T) {
+	m := newTestLimitManager(t, newFakeSchedd())
+
+	m.cfg.lease = 60 * time.Second
+	if got, want := m.renewalInterval(), 20*time.Second; got != want {
+		t.Errorf("renewalInterval = %v, want %v", got, want)
+	}
+
+	// The interval must follow the lease, not any other configured interval:
+	// that coupling is what makes the poll and advertise intervals irrelevant to
+	// whether a limit survives.
+	m.cfg.lease = 15 * time.Second
+	if got, want := m.renewalInterval(), 5*time.Second; got != want {
+		t.Errorf("renewalInterval = %v, want %v", got, want)
+	}
+
+	// A lease so short that a third of it rounds toward zero would otherwise
+	// produce a ticker that never usefully fires.
+	m.cfg.lease = time.Second
+	if got := m.renewalInterval(); got < time.Second {
+		t.Errorf("renewalInterval = %v, want at least 1s", got)
+	}
+}
+
+// TestRenewAllRefreshesWithoutReconsideringPolicy: renewal is a liveness
+// signal. It must reach the schedd on its own, so that a limit survives however
+// long it is between policy cycles.
+func TestRenewAllRefreshesWithoutReconsideringPolicy(t *testing.T) {
+	f := newFakeSchedd()
+	m := newTestLimitManager(t, f)
+
+	if err := m.reconcile(context.Background(), []ratelimit.Rule{testRule(5)}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	pushesAfterReconcile := len(f.pushes)
+
+	m.renewAll(context.Background())
+	m.renewAll(context.Background())
+
+	if got := len(f.pushes) - pushesAfterReconcile; got != 2 {
+		t.Fatalf("%d pushes from 2 renewals, want 2: the lease is not being refreshed off the policy cycle", got)
+	}
+	// Renewal extends what is there; it must not create a second limit.
+	if len(f.installed) != 1 {
+		t.Errorf("%d limits installed after renewals, want 1", len(f.installed))
+	}
+	last := f.pushes[len(f.pushes)-1]
+	if last.UUID != "uuid-1" {
+		t.Errorf("renewal pushed UUID %q, want uuid-1", last.UUID)
+	}
+	if want := int(defaultLimitLease.Seconds()); last.Expiration != want {
+		t.Errorf("renewal Expiration = %d, want %d", last.Expiration, want)
+	}
+}
+
+// TestRenewAllSurvivesAFailedRenewal: a renewal that cannot reach the schedd is
+// logged and dropped. The limit stays in activeLimits, because the next renewal
+// is due well before the lease runs out and re-pushing the same UUID is what
+// puts it back.
+func TestRenewAllSurvivesAFailedRenewal(t *testing.T) {
+	f := newFakeSchedd()
+	m := newTestLimitManager(t, f)
+
+	if err := m.reconcile(context.Background(), []ratelimit.Rule{testRule(5)}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	f.pushErr = fmt.Errorf("schedd unreachable")
+	m.renewAll(context.Background()) // must not panic or wipe state
+	f.pushErr = nil
+	m.renewAll(context.Background())
+
+	if len(m.activeLimits) != 1 {
+		t.Fatalf("%d tracked limits after a failed renewal, want 1", len(m.activeLimits))
+	}
+	if len(f.installed) != 1 {
+		t.Errorf("%d limits in the schedd after recovery, want 1", len(f.installed))
+	}
+}
+
+// TestRenewAllIsQuietWhenDisabled: against a schedd too old to support startup
+// limits the manager disables itself, and the renewal timer keeps ticking
+// regardless.
+func TestRenewAllIsQuietWhenDisabled(t *testing.T) {
+	f := newFakeSchedd()
+	m := newTestLimitManager(t, f)
+	m.cfg.enabled = false
+
+	m.renewAll(context.Background())
+
+	if len(f.pushes) != 0 {
+		t.Errorf("%d pushes from a disabled manager, want 0", len(f.pushes))
+	}
+}
+
+// TestDefaultsDoNotLapse is the regression test for the bug the dedicated
+// renewal timer fixes.
+//
+// Renewal used to ride the advertise cycle, and the default advertise interval
+// is exactly the default lease -- one minute. So at stock settings every limit
+// reached its expiry at the same moment its renewal was due, lapsed, and was
+// reinstalled on the next cycle, with a gap in between where nothing was
+// throttled. Nothing errored; nothing logged; the daemon looked healthy.
+//
+// The renewal interval must be strictly, comfortably shorter than the lease,
+// and it must not depend on either of the other intervals.
+func TestDefaultsDoNotLapse(t *testing.T) {
+	// The real defaults, loaded rather than restated, so this cannot pass
+	// against numbers that have since moved.
+	t.Setenv("CONDOR_CONFIG", "ONLY_ENV")
+	condorCfg, err := condorconfig.New()
+	if err != nil {
+		t.Fatalf("condor config: %v", err)
+	}
+	cfg, err := config.LoadFrom(condorCfg)
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+
+	s := &Service{
+		pollInterval:       cfg.PollInterval,
+		advertiseInterval:  cfg.AdvertiseInterval,
+		limitLeaseDuration: cfg.LimitLease,
+	}
+
+	renew := s.renewalInterval()
+	if renew >= cfg.LimitLease {
+		t.Fatalf("renewal every %v against a %v lease: limits lapse between renewals", renew, cfg.LimitLease)
+	}
+	if renew >= s.advertiseInterval {
+		t.Errorf("renewal interval %v is not shorter than the advertise interval %v; it is still coupled to the policy cycle",
+			renew, s.advertiseInterval)
+	}
+
+	// Changing the intervals that have nothing to do with the lease must not
+	// change how often the lease is renewed.
+	s.advertiseInterval = 17 * time.Minute
+	s.pollInterval = 11 * time.Minute
+	if got := s.renewalInterval(); got != renew {
+		t.Errorf("renewal interval moved to %v when the poll/advertise intervals changed; want %v", got, renew)
+	}
+}
+
+// TestServiceAndManagerAgreeOnTheRenewalInterval: the ticker is created from
+// the service's view of the lease before the limit manager exists, and the
+// manager is what actually honors it. If the two ever disagree, the ticker
+// fires at the wrong rate for the lease being installed.
+func TestServiceAndManagerAgreeOnTheRenewalInterval(t *testing.T) {
+	for _, lease := range []time.Duration{0, time.Second, 15 * time.Second, defaultLimitLease, 5 * time.Minute} {
+		s := &Service{limitLeaseDuration: lease}
+		m := newTestLimitManager(t, newFakeSchedd())
+		m.cfg.lease = lease
+
+		if got, want := s.renewalInterval(), m.renewalInterval(); got != want {
+			t.Errorf("lease %v: service says %v, limit manager says %v", lease, got, want)
+		}
+	}
+}
+
+// TestNewServiceAlwaysHasAStateStore: a nil store makes saveState a silent
+// no-op, and nothing notices until a restart comes up with no state -- no epoch
+// cursors, no pairs, a fresh lookback window to re-read. NewService must
+// therefore default to the file backend rather than waiting to be handed one.
+func TestNewServiceAlwaysHasAStateStore(t *testing.T) {
+	logger, err := htcondorlogging.New(&htcondorlogging.Config{})
+	if err != nil {
+		t.Fatalf("logger: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "state.json")
+
+	svc := NewService(nil, state.New(), path, time.Second, time.Second, time.Hour, time.Hour,
+		nil, nil, "", nil, logger, "", "", "", true)
+
+	st, desc := svc.StateStore()
+	if st == nil {
+		t.Fatal("NewService left the state store nil; every save would be a silent no-op")
+	}
+	if desc != "file "+path {
+		t.Errorf("state store description = %q, want %q", desc, "file "+path)
+	}
+
+	// And it actually writes: a store that cannot save is no better than nil.
+	svc.saveState()
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("state was not written to %s: %v", path, err)
 	}
 }
