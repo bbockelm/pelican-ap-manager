@@ -3,12 +3,12 @@ module github.com/bbockelm/pelican-ap-manager
 go 1.25.7
 
 require (
-	github.com/PelicanPlatform/classad v0.25.2
-	github.com/PelicanPlatform/classad/dbrpc v0.25.2
-	github.com/bbockelm/cedar v0.6.10
-	github.com/bbockelm/golang-htcondor v0.12.4
-	github.com/bbockelm/golang-htcondor/webapi v0.0.0-20260801134142-2811bc1355cc
-	github.com/bbockelm/htcondordb v0.13.1
+	github.com/PelicanPlatform/classad v0.28.1
+	github.com/PelicanPlatform/classad/dbrpc v0.28.1
+	github.com/bbockelm/cedar v0.6.11
+	github.com/bbockelm/golang-htcondor v0.12.5
+	github.com/bbockelm/golang-htcondor/webapi v0.0.0-20260821164716-6b7cf547053d
+	github.com/bbockelm/htcondordb v0.17.2
 	github.com/glebarez/sqlite v1.11.0
 	github.com/jellydator/ttlcache/v3 v3.3.0
 	github.com/klauspost/compress v1.19.1
@@ -17,8 +17,8 @@ require (
 )
 
 require (
-	github.com/PelicanPlatform/classad/collections v0.25.2 // indirect
-	github.com/PelicanPlatform/classad/db v0.25.2 // indirect
+	github.com/PelicanPlatform/classad/collections v0.28.1 // indirect
+	github.com/PelicanPlatform/classad/db v0.28.1 // indirect
 	github.com/RoaringBitmap/roaring/v2 v2.19.0 // indirect
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
 	github.com/bbockelm/gosssd v0.0.1 // indirect
