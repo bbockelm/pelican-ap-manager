@@ -134,6 +134,7 @@ type EpochCounts struct {
 // State persists progress through the transfer epoch history.
 type State struct {
 	LastEpoch       EpochID                           `json:"last_epoch"`
+	LastJobEpoch    EpochID                           `json:"last_job_epoch"`
 	Buckets         map[string]SummaryStats           `json:"buckets"`
 	RecentTransfers map[string][]TransferHistoryEntry `json:"recent_transfers"`
 	EpochBuckets    map[string][]TransferEpochRef     `json:"epoch_buckets,omitempty"`
@@ -279,6 +280,27 @@ func (s *State) SetLastEpoch(epoch EpochID) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.LastEpoch = epoch
+}
+
+// LastJobEpochID returns the cursor into job-epoch history.
+func (s *State) LastJobEpochID() EpochID {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.LastJobEpoch
+}
+
+// SetLastJobEpoch records the latest processed job-epoch identifier.
+//
+// This is persisted, unlike the in-memory field it replaces: without it every
+// restart re-read the whole lookback window of job history -- work the schedd
+// (or the htcondordb mirror) had already done, discarded a moment later because
+// the records were already summarized.
+func (s *State) SetLastJobEpoch(epoch EpochID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if epoch.After(s.LastJobEpoch) {
+		s.LastJobEpoch = epoch
+	}
 }
 
 // Snapshot returns a copy of the current state suitable for reporting.

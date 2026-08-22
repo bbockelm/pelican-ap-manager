@@ -53,7 +53,6 @@ type Service struct {
 	logger            *htcondorlogging.Logger
 	oneshoot          bool
 	startTime         time.Time
-	lastJobEpoch      state.EpochID
 	controlCfg        control.Config
 	limitMgr          *limitManager
 	schedd            *htcondor.Schedd
@@ -257,7 +256,7 @@ func (s *Service) pollOnce(ctx context.Context) int {
 		return 0
 	}
 
-	jobRecords, newestJobEpoch, err := s.condor.FetchJobEpochs(s.lastJobEpoch, cutoff)
+	jobRecords, newestJobEpoch, err := s.condor.FetchJobEpochs(s.state.LastJobEpochID(), cutoff)
 	if err != nil {
 		s.Printf("job epoch poll error: %v", err)
 	}
@@ -348,9 +347,7 @@ func (s *Service) pollOnce(ctx context.Context) int {
 	if newestEpoch.After(lastEpoch) {
 		s.state.SetLastEpoch(newestEpoch)
 	}
-	if newestJobEpoch.After(s.lastJobEpoch) {
-		s.lastJobEpoch = newestJobEpoch
-	}
+	s.state.SetLastJobEpoch(newestJobEpoch)
 
 	if !s.oneshoot {
 		s.saveState()
