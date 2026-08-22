@@ -34,13 +34,13 @@ cp /usr/share/doc/pelican-ap-manager/99-pelican-manager.conf /etc/condor/config.
 
 ## Upgrading from v0.1.0
 
-**The binaries were renamed** — `pelican_man` and `pelican_web` became
+**The binaries were renamed** — `pelican-man` and `pelican-web` became
 `pelican-man` and `pelican-web`, to match Pelican's hyphenated style. v0.1.0
 shipped the underscored names.
 
 Extracting a newer tarball over an existing install does **not** remove the old
 files, so the old paths keep working and keep pointing at the *old* binary. If
-your configuration still says `PELICAN_MANAGER = /usr/local/sbin/pelican_man`,
+your configuration still says `PELICAN_MANAGER = /usr/local/sbin/pelican-man`,
 `condor_master` will go on starting the v0.1.0 daemon and nothing will look
 wrong. Update both paths and delete the old files:
 
@@ -50,7 +50,7 @@ PELICAN_WEB     = /usr/local/sbin/pelican-web
 ```
 
 ```bash
-sudo rm -f /usr/local/sbin/pelican_man /usr/local/sbin/pelican_web
+sudo rm -f /usr/local/sbin/pelican-man /usr/local/sbin/pelican-web
 sudo condor_restart -master
 # Confirm which binary is actually running:
 pelican-man -version
