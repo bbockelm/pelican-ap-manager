@@ -1,8 +1,15 @@
 package condor
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	htcondor "github.com/bbockelm/golang-htcondor"
+	condorconfig "github.com/bbockelm/golang-htcondor/config"
 )
 
 // TestSameHostMatching covers the comparison that decides whether a schedd is
@@ -193,5 +200,107 @@ func TestPickLocalScheddMatchesOnEitherAttribute(t *testing.T) {
 	got, err := pickLocalSchedd(byName, "ap1.example.org")
 	if err != nil || got.name != "mine@ap1.example.org" {
 		t.Errorf("did not match on the Name host part: %q, %v", got.name, err)
+	}
+}
+
+// TestScheddAddressFileIsPreferred: with no schedd name configured, the local
+// schedd's own address file is the authoritative answer -- no collector, no
+// hostname inference. The collector search exists only for when that file is
+// absent.
+func TestScheddAddressFileIsPreferred(t *testing.T) {
+	dir := t.TempDir()
+	want := "<10.0.0.1:9618?addrs=10.0.0.1-9618&noUDP&sock=schedd_777_ab>"
+	if err := os.WriteFile(filepath.Join(dir, ".schedd_address"), []byte(want+"\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	t.Setenv("CONDOR_CONFIG", "ONLY_ENV")
+	cfg, err := condorconfig.New()
+	if err != nil {
+		t.Fatalf("condor config: %v", err)
+	}
+	// SCHEDD_ADDRESS_FILE, not LOG: HTCondor defaults the schedd's address file
+	// to $(SPOOL)/.schedd_address, so this is the knob that decides where it is.
+	cfg.Set("SCHEDD_ADDRESS_FILE", filepath.Join(dir, ".schedd_address"))
+
+	// A collector address that could never be reached: if the address file is
+	// used, nothing dials it, and the test passes fast.
+	c := &htcClient{collector: htcondor.NewCollector("127.0.0.1:1"), localHost: "ap1.example.org", cfg: cfg}
+
+	schedd, err := c.LocateSchedd(context.Background())
+	if err != nil {
+		t.Fatalf("LocateSchedd: %v", err)
+	}
+	if schedd.Address() != want {
+		t.Errorf("address = %q, want %q", schedd.Address(), want)
+	}
+	// Labelled by host, since the file carries no name.
+	if schedd.Name() != "ap1.example.org" {
+		t.Errorf("name = %q, want the local host", schedd.Name())
+	}
+}
+
+// TestScheddAddressFileIsRereadEachTime: the schedd's shared-port socket name
+// changes when it restarts, so a cached address goes stale exactly when
+// reconnecting matters.
+func TestScheddAddressFileIsRereadEachTime(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".schedd_address")
+	t.Setenv("CONDOR_CONFIG", "ONLY_ENV")
+	cfg, err := condorconfig.New()
+	if err != nil {
+		t.Fatalf("condor config: %v", err)
+	}
+	// SCHEDD_ADDRESS_FILE, not LOG: HTCondor defaults the schedd's address file
+	// to $(SPOOL)/.schedd_address, so this is the knob that decides where it is.
+	cfg.Set("SCHEDD_ADDRESS_FILE", filepath.Join(dir, ".schedd_address"))
+	c := &htcClient{collector: htcondor.NewCollector("127.0.0.1:1"), localHost: "ap1", cfg: cfg}
+
+	first := "<10.0.0.1:9618?sock=schedd_100_aa>"
+	if err := os.WriteFile(path, []byte(first), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := c.LocateSchedd(context.Background())
+	if err != nil || got.Address() != first {
+		t.Fatalf("first locate: %q, %v", got.Address(), err)
+	}
+
+	second := "<10.0.0.1:9618?sock=schedd_222_bb>"
+	if err := os.WriteFile(path, []byte(second), 0o644); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	got, err = c.LocateSchedd(context.Background())
+	if err != nil {
+		t.Fatalf("second locate: %v", err)
+	}
+	if got.Address() != second {
+		t.Errorf("address = %q, want %q -- a restarted schedd would be unreachable", got.Address(), second)
+	}
+}
+
+// TestConfiguredNameSkipsTheAddressFile: naming a schedd is a deliberate
+// instruction to manage that one, which may not be the local one at all. The
+// address file must not override it.
+func TestConfiguredNameSkipsTheAddressFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".schedd_address"), []byte("<10.0.0.1:9618?sock=local>"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	t.Setenv("CONDOR_CONFIG", "ONLY_ENV")
+	cfg, err := condorconfig.New()
+	if err != nil {
+		t.Fatalf("condor config: %v", err)
+	}
+	// SCHEDD_ADDRESS_FILE, not LOG: HTCondor defaults the schedd's address file
+	// to $(SPOOL)/.schedd_address, so this is the knob that decides where it is.
+	cfg.Set("SCHEDD_ADDRESS_FILE", filepath.Join(dir, ".schedd_address"))
+
+	// Unreachable collector, so a configured name fails rather than silently
+	// resolving to the local address file.
+	c := &htcClient{collector: htcondor.NewCollector("127.0.0.1:1"), scheddName: "elsewhere", localHost: "ap1", cfg: cfg}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if got, err := c.LocateSchedd(ctx); err == nil {
+		t.Errorf("a configured name resolved to %q via the local address file", got.Address())
 	}
 }
