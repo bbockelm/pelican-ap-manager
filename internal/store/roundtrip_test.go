@@ -184,3 +184,60 @@ func TestPairStatesAreQueryableOnTheServer(t *testing.T) {
 		t.Errorf("%d rows over 3 GB/min, want 1 -- CapacityGBPerMin is not queryable as a number", len(rows))
 	}
 }
+
+// TestRowsCarryTheirKey: htcondordb's REPL takes "a row's primary key lives in
+// the Key attribute" as its convention. Rows written without one show up as
+// `Key | undefined` in SELECT *, and UPDATE/DELETE by constraint has to resolve
+// keys server-side instead of reading them off the matched rows. Since managing
+// rules by hand in SQL is the supported path, the rows have to be addressable
+// that way.
+func TestRowsCarryTheirKey(t *testing.T) {
+	client, table := serveDB(t)
+	ctx := context.Background()
+
+	// Rules.
+	rs := &DBStore{table: table, client: client}
+	if err := rs.PutRule(ctx, ratelimit.Rule{
+		Name: "bbockelm", Origin: ratelimit.OriginStatic,
+		User: "bbockelm", RateCount: 1, RateWindow: time.Minute,
+	}); err != nil {
+		t.Fatalf("PutRule: %v", err)
+	}
+	rows, err := client.QueryTable(ctx, table, `Key == "bbockelm"`, 0)
+	if err != nil {
+		t.Fatalf("QueryTable: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Errorf("%d rules matched Key == \"bbockelm\", want 1 -- the rule row carries no Key", len(rows))
+	}
+
+	// State rows, whose keys are structured (cursor, pair:..., scratch:...).
+	client2, table2 := serveDB(t)
+	ss := &DBStateStore{table: table2, client: client2, written: map[string]string{}}
+	st := state.New()
+	st.RestoreSections(populatedSections())
+	if err := ss.Save(ctx, st); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	for _, key := range []string{"cursor", "pair:alice|UCSD", "scratch:recent_transfers"} {
+		got, qerr := client2.QueryTable(ctx, table2, `Key == "`+key+`"`, 0)
+		if qerr != nil {
+			t.Fatalf("QueryTable %s: %v", key, qerr)
+		}
+		if len(got) != 1 {
+			t.Errorf("%d rows matched Key == %q, want 1", len(got), key)
+		}
+	}
+
+	// And the key is still what Load reads rows back by, so stamping it did not
+	// change which row is which.
+	reader := &DBStateStore{table: table2, client: client2, written: map[string]string{}}
+	loaded, err := reader.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if diff := cmp.Diff(st.Sections(), loaded.Sections()); diff != "" {
+		t.Errorf("state changed once rows carried a Key:\n%s", diff)
+	}
+}
