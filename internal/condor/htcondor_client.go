@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -29,11 +30,14 @@ func NewClient(collectorAddress, scheddName, siteAttr string) (CondorClient, err
 // is what identifies "this access point's schedd" when no schedd name is
 // configured; see LocateSchedd.
 func NewClientForHost(collectorAddress, scheddName, siteAttr, localHost string) (CondorClient, error) {
+	// Best effort: a client with no configuration falls back to the collector.
+	cfg, _ := condorconfig.New()
 	return &htcClient{
 		collector:  htcondor.NewCollector(collectorAddress),
 		scheddName: scheddName,
 		siteAttr:   siteAttr,
 		localHost:  strings.ToLower(strings.TrimSpace(localHost)),
+		cfg:        cfg,
 	}, nil
 }
 
@@ -61,6 +65,10 @@ type htcClient struct {
 	// localHost identifies this access point among the schedds a collector
 	// knows about. Only used when no schedd name is configured.
 	localHost string
+
+	// cfg is the HTCondor configuration, for locating the local schedd's
+	// address file. Nil is tolerated: the collector search still works.
+	cfg *condorconfig.Config
 }
 
 // LocateSchedd finds the schedd this manager is responsible for and returns a
@@ -86,6 +94,18 @@ func (c *htcClient) LocateSchedd(ctx context.Context) (*htcondor.Schedd, error) 
 	// has no business touching. It does not get that far, because it cannot
 	// authenticate to it, but the error it reports is about the wrong host.
 	if c.scheddName == "" {
+		// The local schedd publishes its command address to
+		// $(LOG)/.schedd_address. That file IS the answer to "which schedd is
+		// this access point's" -- no collector round trip, and nothing to infer
+		// from hostnames. Prefer it.
+		if schedd, err := c.locateScheddFromAddressFile(); err == nil {
+			return schedd, nil
+		} else if !errors.Is(err, errNoAddressFile) {
+			// The file is named but unreadable: worth saying so before falling
+			// back, because a stale or unreadable address file is a different
+			// problem from not having one.
+			log.Printf("condor: local schedd address file unusable (%v); asking the collector instead", err)
+		}
 		return c.locateLocalSchedd(ctx)
 	}
 
@@ -104,6 +124,46 @@ func (c *htcClient) LocateSchedd(ctx context.Context) (*htcondor.Schedd, error) 
 		return nil, fmt.Errorf("locate schedd %q: %w (also tried %s@...: %v)", c.scheddName, err, c.scheddName, qerr)
 	}
 	return qualified, nil
+}
+
+// errNoAddressFile means nothing names a local schedd address file, which is not
+// a failure -- it is the case where asking the collector is right.
+var errNoAddressFile = errors.New("no schedd address file is configured")
+
+// locateScheddFromAddressFile reads the local schedd's command address from the
+// file it publishes.
+//
+// This is the authoritative answer for an unnamed schedd, and it is the same
+// mechanism htcondordb's clients use to find htcondordb. The collector search
+// below is a backstop for when the file is missing -- pelican-man running
+// somewhere other than the submit host, say.
+func (c *htcClient) locateScheddFromAddressFile() (*htcondor.Schedd, error) {
+	if c.cfg == nil {
+		return nil, errNoAddressFile
+	}
+	resolve, source, err := htcondor.LocalDaemonAddress(c.cfg, "SCHEDD")
+	if err != nil {
+		return nil, errNoAddressFile
+	}
+	addr, err := resolve()
+	if err != nil {
+		return nil, fmt.Errorf("reading the local schedd address from %s: %w", source, err)
+	}
+	if strings.TrimSpace(addr) == "" {
+		return nil, fmt.Errorf("%s named no address", source)
+	}
+	// The file carries an address, not a name. The name is only a label here --
+	// the limit tag is separate (see limitManager.limitTag) -- so this reports
+	// the host it belongs to rather than inventing a schedd name.
+	return htcondor.NewSchedd(c.scheddLabel(), addr), nil
+}
+
+// scheddLabel names the local schedd for log lines when nothing else does.
+func (c *htcClient) scheddLabel() string {
+	if c.localHost != "" {
+		return c.localHost
+	}
+	return "local schedd"
 }
 
 // locateLocalSchedd finds the schedd running on this host.
