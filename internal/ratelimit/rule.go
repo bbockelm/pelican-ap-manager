@@ -1,4 +1,4 @@
-// Package ratelimit models the rate rules pelican_man installs as HTCondor
+// Package ratelimit models the rate rules pelican-man installs as HTCondor
 // schedd startup limits.
 //
 // A rule is a persisted, named limit on how fast jobs matching a (user, site,

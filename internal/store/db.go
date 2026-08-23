@@ -18,7 +18,7 @@ import (
 	"github.com/bbockelm/pelican-ap-manager/internal/ratelimit"
 )
 
-// DefaultRuleTable is the htcondordb table holding pelican_man's rate rules.
+// DefaultRuleTable is the htcondordb table holding pelican-man's rate rules.
 const DefaultRuleTable = "pelican_rate_rules"
 
 // DBStore keeps the rule set in an htcondordb table, reached over an
@@ -32,7 +32,7 @@ const DefaultRuleTable = "pelican_rate_rules"
 // independently of this daemon's spool.
 //
 // The connection is opened lazily and re-opened on failure, so an htcondordb
-// that is down at pelican_man's start (or restarts under it) costs a poll
+// that is down at pelican-man's start (or restarts under it) costs a poll
 // cycle's worth of rules, not the daemon.
 type DBStore struct {
 	addr  string
@@ -90,7 +90,7 @@ func (s *DBStore) connectLocked(ctx context.Context) (*dbrpc.Client, error) {
 	// Prefer, rather than require, authentication: PREFERRED maps us to our
 	// user (so the server grants WRITE) whenever a mutually-supported method
 	// exists, and still connects -- read-only -- when none does. This mirrors
-	// htcondordb-cli, so pelican_man and the CLI see the same access level.
+	// htcondordb-cli, so pelican-man and the CLI see the same access level.
 	if sec.Authentication == security.SecurityOptional {
 		sec.Authentication = security.SecurityPreferred
 	}

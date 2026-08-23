@@ -1,6 +1,6 @@
 name: release
 
-# Builds pelican_man and pelican_web for the platforms an access point is actually
+# Builds pelican-man and pelican-web for the platforms an access point is actually
 # deployed on -- linux/amd64 and linux/arm64 -- plus darwin/arm64, which is where this
 # gets developed and hand-tested. No darwin/amd64: condor_master does not run on an
 # Intel Mac in any deployment, and it was 18 MB of release assets nobody downloads.
@@ -68,7 +68,7 @@ jobs:
             # is the admin's decision, not the tarball's.
             mkdir -p "${stage}/sbin" "${stage}/share/doc/pelican-ap-manager"
             GOOS="${os}" GOARCH="${arch}" go build -trimpath -ldflags "-s -w -X main.version=${version}" \
-              -o "${stage}/sbin/" ./cmd/pelican_man ./cmd/pelican_web
+              -o "${stage}/sbin/" ./cmd/pelican-man ./cmd/pelican-web
             cp README.md "${stage}/share/doc/pelican-ap-manager/"
             cp docs/example-config.conf "${stage}/share/doc/pelican-ap-manager/"
             cp docs/WEBSERVER.md docs/control-algorithm.md docs/deployment-example.md \

@@ -19,7 +19,7 @@ import (
 	condorconfig "github.com/bbockelm/golang-htcondor/config"
 )
 
-// TestPelicanIntegration boots a minimal local HTCondor, runs pelican_man, submits
+// TestPelicanIntegration boots a minimal local HTCondor, runs pelican-man, submits
 // a trivial job, waits for completion, and verifies the pelican job mirror sees it.
 func TestPelicanIntegration(t *testing.T) {
 	if _, err := exec.LookPath("condor_master"); err != nil {
@@ -43,7 +43,7 @@ func TestPelicanIntegration(t *testing.T) {
 
 	seedEpochHistory(t, projectRoot, filepath.Join(rootDir, "spool"))
 
-	// Sanity-check that the config surfaces key macros that pelican_man depends on.
+	// Sanity-check that the config surfaces key macros that pelican-man depends on.
 	if cfg, err := condorconfig.New(); err == nil {
 		if v, ok := cfg.Get("PELICAN_MANAGER_JOB_MIRROR_PATH"); ok {
 			t.Logf("condor macro PELICAN_MANAGER_JOB_MIRROR_PATH=%s", v)
@@ -90,7 +90,7 @@ func TestPelicanIntegration(t *testing.T) {
 	}
 
 	// Persist the discovered collector host:port back into the config so downstream
-	// consumers that rely on HTCondor macros (including pelican_man itself) see a
+	// consumers that rely on HTCondor macros (including pelican-man itself) see a
 	// concrete port instead of the initial 0 placeholder.
 	if err := appendConfigOverride(configPath, "PELICAN_MANAGER_COLLECTOR_HOST", collectorHostPort); err != nil {
 		t.Fatalf("write collector override: %v", err)
@@ -165,7 +165,7 @@ func writeMiniCondorConfig(configFile, localDir, socketDir, statePath, mirrorPat
 		return err
 	}
 
-	config := fmt.Sprintf(`# Mini HTCondor config for pelican_man integration
+	config := fmt.Sprintf(`# Mini HTCondor config for pelican-man integration
 LOCAL_DIR = %s
 LOG = $(LOCAL_DIR)/log
 SPOOL = $(LOCAL_DIR)/spool
@@ -455,13 +455,13 @@ func stripHostPort(sinful string) string {
 }
 
 func buildPelicanBinary(t *testing.T, workDir string) (string, error) {
-	return buildBinary(t, workDir, "pelican_man")
+	return buildBinary(t, workDir, "pelican-man")
 }
 
-// buildWebBinary builds the standalone HTTP daemon. pelican_man serves no HTTP,
-// so any test that touches the sandbox API has to run pelican_web too.
+// buildWebBinary builds the standalone HTTP daemon. pelican-man serves no HTTP,
+// so any test that touches the sandbox API has to run pelican-web too.
 func buildWebBinary(t *testing.T, workDir string) (string, error) {
-	return buildBinary(t, workDir, "pelican_web")
+	return buildBinary(t, workDir, "pelican-web")
 }
 
 // buildBinary produces the named daemon under workDir.
@@ -497,10 +497,10 @@ func buildBinary(t *testing.T, workDir, name string) (string, error) {
 	return binPath, nil
 }
 
-// prebuiltEnvVar names the override for a daemon binary: pelican_man ->
-// PELICAN_MANAGER_BINARY, pelican_web -> PELICAN_WEB_BINARY.
+// prebuiltEnvVar names the override for a daemon binary: pelican-man ->
+// PELICAN_MANAGER_BINARY, pelican-web -> PELICAN_WEB_BINARY.
 func prebuiltEnvVar(name string) string {
-	if name == "pelican_man" {
+	if name == "pelican-man" {
 		return "PELICAN_MANAGER_BINARY"
 	}
 	return "PELICAN_WEB_BINARY"

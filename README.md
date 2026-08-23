@@ -2,10 +2,10 @@
 
 Two HTCondor daemons that watch Pelican data movement on an access point and keep it from overwhelming itself.
 
-- **`pelican_man`** reads the schedd's transfer and job history, aggregates it per user / endpoint / site / direction, advertises the result to the collector, and installs **schedd startup limits** so jobs do not start faster than the data can be staged.
-- **`pelican_web`** serves the HTTP surface: the sandbox API the Pelican transfer plugin calls, plus the golang-htcondor REST API at `/api/`.
+- **`pelican-man`** reads the schedd's transfer and job history, aggregates it per user / endpoint / site / direction, advertises the result to the collector, and installs **schedd startup limits** so jobs do not start faster than the data can be staged.
+- **`pelican-web`** serves the HTTP surface: the sandbox API the Pelican transfer plugin calls, plus the golang-htcondor REST API at `/api/`.
 
-They are separate binaries so `pelican_man` does not link the web stack (OAuth2/OIDC, OpenTelemetry, sqlite) — roughly half its size. Run one or both.
+They are separate binaries so `pelican-man` does not link the web stack (OAuth2/OIDC, OpenTelemetry, sqlite) — roughly half its size. Run one or both.
 
 ---
 
@@ -17,13 +17,13 @@ Download the archive for your platform from the [releases page](https://github.c
 tar -xzf pelican-ap-manager_<version>_linux_amd64.tar.gz --strip-components=1 -C /usr
 ```
 
-That puts `pelican_man` and `pelican_web` in `/usr/sbin` — where `condor_master` expects to find daemons — and the docs plus a ready-made drop-in configuration under `/usr/share/doc/pelican-ap-manager/`.
+That puts `pelican-man` and `pelican-web` in `/usr/sbin` — where `condor_master` expects to find daemons — and the docs plus a ready-made drop-in configuration under `/usr/share/doc/pelican-ap-manager/`.
 
 Verify, and check the checksums against `SHA256SUMS.txt` from the same release:
 
 ```bash
-pelican_man -version
-pelican_web -version
+pelican-man -version
+pelican-web -version
 ```
 
 The archive deliberately does **not** install anything into `/etc/condor/config.d`: dropping a file there would start both daemons on your next `condor_reconfig`, which is your decision rather than the tarball's. Copy the example when you are ready:
@@ -32,6 +32,36 @@ The archive deliberately does **not** install anything into `/etc/condor/config.
 cp /usr/share/doc/pelican-ap-manager/99-pelican-manager.conf /etc/condor/config.d/
 ```
 
+## Upgrading from v0.1.0
+
+**The binaries were renamed** — `pelican-man` and `pelican-web` became
+`pelican-man` and `pelican-web`, to match Pelican's hyphenated style. v0.1.0
+shipped the underscored names.
+
+Extracting a newer tarball over an existing install does **not** remove the old
+files, so the old paths keep working and keep pointing at the *old* binary. If
+your configuration still says `PELICAN_MANAGER = /usr/local/sbin/pelican-man`,
+`condor_master` will go on starting the v0.1.0 daemon and nothing will look
+wrong. Update both paths and delete the old files:
+
+```conf
+PELICAN_MANAGER = /usr/local/sbin/pelican-man
+PELICAN_WEB     = /usr/local/sbin/pelican-web
+```
+
+```bash
+sudo rm -f /usr/local/sbin/pelican-man /usr/local/sbin/pelican-web
+sudo condor_restart -master
+# Confirm which binary is actually running:
+pelican-man -version
+```
+
+Nothing else changed: the HTCondor subsystem names (`PELICAN_MANAGER`,
+`PELICAN_WEB`), every configuration macro, the log file names, and the htcondordb
+table names are all unaffected.
+
+---
+
 ## Quick start: observe everything, enforce only what you wrote
 
 This is the configuration most sites should start from. The control loop runs, classifies every (user, site) pair, and publishes what it *would* do — but the only limits actually installed are the ones you wrote by hand.
@@ -39,8 +69,8 @@ This is the configuration most sites should start from. The control loop runs, c
 ```
 # /etc/condor/config.d/99-pelican-manager.conf
 
-PELICAN_MANAGER = /usr/sbin/pelican_man
-PELICAN_WEB     = /usr/sbin/pelican_web
+PELICAN_MANAGER = /usr/sbin/pelican-man
+PELICAN_WEB     = /usr/sbin/pelican-web
 
 # Start them...
 DAEMON_LIST = $(DAEMON_LIST) PELICAN_MANAGER PELICAN_WEB
@@ -79,14 +109,14 @@ condor_ping -type PELICAN_MANAGER DC_NOP
 condor_ping -type PELICAN_WEB     DC_NOP
 
 # What the daemon has decided, and whether each rule is being enforced.
-pelican_man -rules
+pelican-man -rules
 
 # What is actually installed in the schedd right now.
-pelican_man -limits
+pelican-man -limits
 ```
 
 ```
-$ pelican_man -limits
+$ pelican-man -limits
 Startup limits in schedd submit-1@ap.example.org:
 
 NAME                       RATE     ALLOWED  SKIPPED  LAST HIT   EXPRESSION
@@ -98,7 +128,7 @@ SKIPPED counts jobs this limit held back. LAST HIT is when it last did so.
 
 You should see one limit per static rule. If you see limits named `pelican_dynamic_*`, you are in `enforcing` mode, not `observing`.
 
-HTCondor itself has no command for this — startup limits live inside the schedd and no `condor_q` or `condor_status` option lists them — which is why `pelican_man` provides it.
+HTCondor itself has no command for this — startup limits live inside the schedd and no `condor_q` or `condor_status` option lists them — which is why `pelican-man` provides it.
 
 When you are ready to let the controller act:
 
@@ -147,7 +177,7 @@ One macro per rule rather than one macro holding all of them, so a rule can be d
 
 Values with spaces must be quoted: `note="incident 4471"`.
 
-**A malformed rule stops the daemon.** That is deliberate: an admin who believes a limit is in force when a typo silently dropped it is worse off than one whose daemon refuses to start. Check the log if `pelican_man` will not come up.
+**A malformed rule stops the daemon.** That is deliberate: an admin who believes a limit is in force when a typo silently dropped it is worse off than one whose daemon refuses to start. Check the log if `pelican-man` will not come up.
 
 ### Examples
 
@@ -177,9 +207,9 @@ user=* rate=500 window=60s
 
 ### Limits are leases, not settings
 
-A rule you declare is permanent; the schedd limit derived from it is not. Every limit `pelican_man` installs carries a short lease — 60 seconds by default — and the daemon renews it on every poll cycle.
+A rule you declare is permanent; the schedd limit derived from it is not. Every limit `pelican-man` installs carries a short lease — 60 seconds by default — and the daemon renews it on every poll cycle.
 
-That is deliberate. These limits exist only because `pelican_man` decided they should, and it is the only thing that can decide they should not. If it dies, a lease means whatever it was throttling returns to full rate within about a minute, rather than staying throttled until somebody notices an unexplained limit in the schedd.
+That is deliberate. These limits exist only because `pelican-man` decided they should, and it is the only thing that can decide they should not. If it dies, a lease means whatever it was throttling returns to full rate within about a minute, rather than staying throttled until somebody notices an unexplained limit in the schedd.
 
 This pairs with `DC_DAEMON_LIST`. A daemon that *hangs* rather than crashes stops sending `DC_CHILDALIVE`, so `condor_master` kills it — and a killed daemon stops renewing, so its limits lapse on schedule. Without that supervision a wedged daemon would sit there indefinitely; with it, the two mechanisms together bound how long a stuck manager can keep throttling an access point.
 
@@ -214,7 +244,7 @@ Configuration-declared rules are reconciled on every startup and `condor_reconfi
 
 ### Reading history from htcondordb instead of the schedd
 
-Every poll cycle, `pelican_man` reads recent history twice: the completed-job history, and the transfer records. By default it asks the schedd, and neither read is free — the schedd walks its history files backwards, in its own process, while it is also trying to run jobs. On a busy access point this is the most expensive thing the manager does.
+Every poll cycle, `pelican-man` reads recent history twice: the completed-job history, and the transfer records. By default it asks the schedd, and neither read is free — the schedd walks its history files backwards, in its own process, while it is also trying to run jobs. On a busy access point this is the most expensive thing the manager does.
 
 If the pool already runs [htcondordb](https://github.com/bbockelm/htcondordb) with `scheddsync` mirroring this schedd, point the manager at the mirror and both reads move off the access point entirely:
 
@@ -253,7 +283,7 @@ A mirror is behind the schedd by however long the sync lags. That is fine here �
 
 ### Where the daemon's own state lives
 
-Separate from the rules, `pelican_man` keeps working state: how far it has read into transfer and job history, the per-bucket transfer summaries, and the capacity the control loop has settled on for each (user, site) pair. Losing it is not fatal but it is not free either — the daemon comes back having forgotten every pair it had classified, and re-reads a whole lookback window of history to rebuild the summaries.
+Separate from the rules, `pelican-man` keeps working state: how far it has read into transfer and job history, the per-bucket transfer summaries, and the capacity the control loop has settled on for each (user, site) pair. Losing it is not fatal but it is not free either — the daemon comes back having forgotten every pair it had classified, and re-reads a whole lookback window of history to rebuild the summaries.
 
 By default it is a JSON document under `SPOOL`:
 
@@ -277,7 +307,7 @@ SELECT PairKey, CapacityGBPerMin FROM pelican_manager_state WHERE Kind == "pair"
 
 The rolling working sets stay as JSON payloads. They are the daemon's own scratch, nothing queries them, and giving them attributes would only add a way to drop a field silently.
 
-**A state load failure is fatal.** If the store is configured and cannot be read, `pelican_man` exits rather than starting with an empty state — coming up blank would silently reset the cursors and discard every classification, and it would look exactly like a healthy first start.
+**A state load failure is fatal.** If the store is configured and cannot be read, `pelican-man` exits rather than starting with an empty state — coming up blank would silently reset the cursors and discard every classification, and it would look exactly like a healthy first start.
 
 ---
 
@@ -330,7 +360,7 @@ All settings come from HTCondor configuration macros, resolved the same way `con
 | `PELICAN_MANAGER_LOG` | `$(LOG)/PelicanManagerLog` | Log file. |
 | `PELICAN_MANAGER_DEBUG` | — | Log verbosity, e.g. `D_FULLDEBUG` or `cedar:debug`. |
 
-`pelican_web` has its own subsystem scope — `PELICAN_WEB_LOG`, `PELICAN_WEB_DEBUG`, `PELICAN_WEB_ADDRESS_FILE` — so you can turn up its logging without touching the manager. Its other settings keep the `PELICAN_MANAGER_WEB_*` names they have always had; see [docs/WEBSERVER.md](docs/WEBSERVER.md).
+`pelican-web` has its own subsystem scope — `PELICAN_WEB_LOG`, `PELICAN_WEB_DEBUG`, `PELICAN_WEB_ADDRESS_FILE` — so you can turn up its logging without touching the manager. Its other settings keep the `PELICAN_MANAGER_WEB_*` names they have always had; see [docs/WEBSERVER.md](docs/WEBSERVER.md).
 
 ---
 
@@ -354,7 +384,7 @@ condor_ping     -type   PELICAN_MANAGER DC_NOP
 Running standalone (no `condor_master`) works too, for a quick look:
 
 ```bash
-pelican_man -oneshot     # one poll/summarize cycle, then exit
+pelican-man -oneshot     # one poll/summarize cycle, then exit
 ```
 
 ---
@@ -370,7 +400,7 @@ condor_status -any -constraint 'MyType == "PelicanSummary"'
 condor_status -any -constraint 'MyType == "PelicanLimit"'
 
 # What is actually installed in the schedd right now, from any source.
-pelican_man -limits-all
+pelican-man -limits-all
 ```
 
 Attribute references: [summary ads](docs/pelican-summary-ad-attributes.md), [limit ads](docs/pelican-limit-ad-attributes.md).
@@ -381,13 +411,13 @@ Attribute references: [summary ads](docs/pelican-summary-ad-attributes.md), [lim
 
 ## Troubleshooting
 
-**No limits appear in `pelican_man -limits`.**
+**No limits appear in `pelican-man -limits`.**
 Check `PelicanManagerLog` for `limit manager init error`. The manager locates the schedd through `PELICAN_MANAGER_COLLECTOR_HOST`; if the collector is unreachable or the schedd name matches nothing, rate limiting is disabled and the daemon otherwise runs normally. `PELICAN_MANAGER_SCHEDD_NAME` may be set to a name no schedd advertises.
 
 **A `site=` rule never matches.**
 `PELICAN_MANAGER_SITE_ATTRIBUTE` almost certainly does not name the attribute your pool uses. Check a real machine ad: `condor_status -l | grep -i site`.
 
-**`pelican_man` will not start.**
+**`pelican-man` will not start.**
 A malformed rate rule is fatal by design. The log names the offending macro and what it could not parse.
 
 **A daemon is killed and restarted for no apparent reason.**
@@ -397,13 +427,13 @@ A malformed rate rule is fatal by design. The log names the offending macro and 
 Check `DC_DAEMON_LIST` includes it, and read the daemon's own account of how it got its command socket — it logs one of *"accepting shared-port forwarded connections"* (inherited from the master), *"self-registered shared-port endpoint"* (its own entry in `DAEMON_SOCKET_DIR`, which is still reachable), or a plain bind. The address file (`$(LOG)/.pelican_manager_address`) holds whichever address it settled on.
 
 **Transfer plugins cannot register sandboxes.**
-`pelican_web` must be in `DAEMON_LIST` and `DC_DAEMON_LIST`; `pelican_man` serves no HTTP. Check `PelicanWebLog` and that `PELICAN_REGISTRATION_SOCKET` is on a short path — a Unix socket path is capped at ~104 bytes.
+`pelican-web` must be in `DAEMON_LIST` and `DC_DAEMON_LIST`; `pelican-man` serves no HTTP. Check `PelicanWebLog` and that `PELICAN_REGISTRATION_SOCKET` is on a short path — a Unix socket path is capped at ~104 bytes.
 
 **Limits appear and disappear.**
 The lease is not being renewed. Renewal runs on its own timer at a third of `PELICAN_MANAGER_LIMIT_LEASE`, independent of the poll and advertise intervals, so on a healthy daemon this should not happen — look for what is stopping the renewal from reaching the schedd (`limit lease renewal error` in the log), or for `condor_master` killing and restarting the daemon. A limit that lapses is reinstalled on the next cycle, so the symptom is intermittent enforcement rather than none.
 
 **Limits exist but nothing is throttled.**
-A rule with `rate=0` counts without blocking, by design — `pelican_man -limits` shows those as `monitor only`. Otherwise check the `SKIPPED` column: if it is 0 and `LAST HIT` is `never`, the rule's expression is not matching the jobs you expect. The expression is printed alongside it.
+A rule with `rate=0` counts without blocking, by design — `pelican-man -limits` shows those as `monitor only`. Otherwise check the `SKIPPED` column: if it is 0 and `LAST HIT` is `never`, the rule's expression is not matching the jobs you expect. The expression is printed alongside it.
 
 ---
 
@@ -417,8 +447,8 @@ The dynamic half of the system — how the controller classifies (user, site) pa
 
 ```bash
 make build      # both binaries into bin/
-make manager    # just pelican_man
-make web        # just pelican_web
+make manager    # just pelican-man
+make web        # just pelican-web
 make test       # unit tests
 make vet        # static checks, including build-tagged sources
 ```

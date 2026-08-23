@@ -21,7 +21,7 @@ import (
 	"github.com/bbockelm/pelican-ap-manager/internal/state"
 )
 
-// DefaultStateTable is the htcondordb table holding pelican_man's working state.
+// DefaultStateTable is the htcondordb table holding pelican-man's working state.
 const DefaultStateTable = "pelican_manager_state"
 
 // DBStateStore keeps the daemon's working state in an htcondordb table.
@@ -481,7 +481,7 @@ func applyStateRow(sec *state.Sections, ad *classad.ClassAd) (string, error) {
 		return scratchPrefix + name, nil
 
 	default:
-		return "", fmt.Errorf("unknown state row kind %q (written by a newer pelican_man?)", kind)
+		return "", fmt.Errorf("unknown state row kind %q (written by a newer pelican-man?)", kind)
 	}
 }
 
@@ -504,7 +504,7 @@ func applyScratch(sec *state.Sections, name, payload string) error {
 	case sectionBucketRuntimes:
 		target = &sec.BucketRuntimes
 	default:
-		return fmt.Errorf("unknown state section %q (written by a newer pelican_man?)", name)
+		return fmt.Errorf("unknown state section %q (written by a newer pelican-man?)", name)
 	}
 	if err := json.Unmarshal([]byte(payload), target); err != nil {
 		return fmt.Errorf("decoding state section %q: %w", name, err)
