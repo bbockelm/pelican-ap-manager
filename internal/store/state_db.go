@@ -256,13 +256,6 @@ const (
 	bucketPrefix   = "bucket:"
 	scratchPrefix  = "scratch:"
 
-	// attrKey mirrors the row's storage key into the ad. htcondordb's REPL takes
-	// "a row's primary key lives in the Key attribute" as its convention, so
-	// without it SELECT * shows Key as undefined and UPDATE/DELETE by constraint
-	// falls back to resolving keys server-side. Costs one attribute; makes the
-	// table readable and editable by hand, which is how rules are meant to be
-	// managed.
-	attrKey  = "Key"
 	attrKind = "Kind"
 
 	kindCursor  = "cursor"
@@ -343,13 +336,13 @@ func stateRows(sec state.Sections) (map[string]string, error) {
 	cursor.InsertAttr(attrLastJobCluster, sec.LastJobEpoch.ClusterID)
 	cursor.InsertAttr(attrLastJobProc, sec.LastJobEpoch.ProcID)
 	cursor.InsertAttr(attrLastJobRun, sec.LastJobEpoch.RunInstanceID)
-	rows[stateRowCursor] = withKey(cursor, stateRowCursor)
+	rows[stateRowCursor] = cursor.MarshalOld()
 
 	for key, ps := range sec.PairStates {
-		rows[pairRowPrefix+key] = withKey(pairAd(kindPair, key, ps), pairRowPrefix+key)
+		rows[pairRowPrefix+key] = pairAd(kindPair, key, ps).MarshalOld()
 	}
 	for key, ps := range sec.LimitStates {
-		rows[limitRowPrefix+key] = withKey(pairAd(kindLimit, key, ps), limitRowPrefix+key)
+		rows[limitRowPrefix+key] = pairAd(kindLimit, key, ps).MarshalOld()
 	}
 
 	for key, st := range sec.Buckets {
@@ -357,7 +350,7 @@ func stateRows(sec state.Sections) (map[string]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		rows[bucketPrefix+key] = withKey(ad, bucketPrefix+key)
+		rows[bucketPrefix+key] = ad.MarshalOld()
 	}
 
 	scratch := map[string]any{
@@ -377,16 +370,10 @@ func stateRows(sec state.Sections) (map[string]string, error) {
 		ad.InsertAttrString(attrKind, kindScratch)
 		ad.InsertAttrString(attrSection, name)
 		ad.InsertAttrString(attrPayload, string(payload))
-		rows[scratchPrefix+name] = withKey(ad, scratchPrefix+name)
+		rows[scratchPrefix+name] = ad.MarshalOld()
 	}
 
 	return rows, nil
-}
-
-// withKey stamps the storage key into the ad and renders it for the wire.
-func withKey(ad *classad.ClassAd, key string) string {
-	ad.InsertAttrString(attrKey, key)
-	return ad.MarshalOld()
 }
 
 func pairAd(kind, key string, ps control.PairState) *classad.ClassAd {
