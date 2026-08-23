@@ -53,6 +53,8 @@ func (f *fakeSchedd) CreateStartupLimit(_ context.Context, req *htcondor.Startup
 	return uuid, nil
 }
 
+func (f *fakeSchedd) Name() string { return "fake-schedd" }
+
 func (f *fakeSchedd) QueryStartupLimits(_ context.Context, uuid, _ string) ([]*htcondor.StartupLimit, error) {
 	if uuid != "" {
 		if l, ok := f.installed[uuid]; ok {
