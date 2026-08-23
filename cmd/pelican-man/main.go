@@ -1,11 +1,11 @@
-// Command pelican_man is the Pelican AP manager daemon. It runs under
+// Command pelican-man is the Pelican AP manager daemon. It runs under
 // condor_master as an HTCondor daemon (subsystem PELICAN_MANAGER): it polls the
 // schedd/collector for transfer epochs, summarizes them per user/site, publishes
 // the summaries to the collector, and drives schedd startup limits from the
 // resulting control decisions.
 //
 // It serves no HTTP. The sandbox API and the golang-htcondor REST API live in
-// the pelican_web daemon, which must be in DAEMON_LIST for Pelican transfer
+// the pelican-web daemon, which must be in DAEMON_LIST for Pelican transfer
 // plugins to register sandboxes. Keeping them apart is what lets this binary
 // avoid linking the web stack (OAuth2/OIDC, OpenTelemetry, sqlite) at all.
 //
@@ -53,7 +53,7 @@ var version = "dev"
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "pelican_man:", err)
+		fmt.Fprintln(os.Stderr, "pelican-man:", err)
 		os.Exit(1)
 	}
 }
@@ -78,7 +78,7 @@ func run() error {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Println("pelican_man", version)
+		fmt.Println("pelican-man", version)
 		return nil
 	}
 
@@ -242,7 +242,7 @@ func run() error {
 		}
 	}()
 
-	log.Infof(htcondorlogging.DestinationGeneral, "pelican_man starting: command_socket=%s under_master=%v %s",
+	log.Infof(htcondorlogging.DestinationGeneral, "pelican-man starting: command_socket=%s under_master=%v %s",
 		ln.Addr().String(), d.UnderMaster(), cfg.EffectiveIntervals())
 
 	// Blocks until a termination signal, a command-server error, or DC_OFF. The

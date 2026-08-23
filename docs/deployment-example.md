@@ -1,10 +1,10 @@
-# A worked deployment: `pelican_man` + htcondordb on an access point
+# A worked deployment: `pelican-man` + htcondordb on an access point
 
 One complete setup, start to finish, with the check to run after each step so a
 failure is caught where it happens rather than three steps later.
 
-No web interface. `pelican_web` serves the sandbox API for Pelican transfer
-plugins; if you are not using that yet, leave it out entirely — `pelican_man`
+No web interface. `pelican-web` serves the sandbox API for Pelican transfer
+plugins; if you are not using that yet, leave it out entirely — `pelican-man`
 does not need it.
 
 Assumptions: an existing HTCondor access point (schedd + collector reachable),
@@ -28,8 +28,8 @@ sudo tar -xzf pelican-ap-manager_v0.1.0_linux_amd64.tar.gz \
 That gives you:
 
 ```
-/usr/local/sbin/pelican_man
-/usr/local/sbin/pelican_web                       # unused here
+/usr/local/sbin/pelican-man
+/usr/local/sbin/pelican-web                       # unused here
 /usr/local/share/doc/pelican-ap-manager/...       # this file, README, example config
 ```
 
@@ -43,7 +43,7 @@ htcondordb is a separate project; put its binaries alongside:
 **Check:**
 
 ```bash
-/usr/local/sbin/pelican_man -version
+/usr/local/sbin/pelican-man -version
 /usr/local/sbin/htcondordb -version
 ```
 
@@ -57,7 +57,7 @@ transfer-history file — and that is what both the schedd's own
 already writing it, nothing will land in the `epoch_history` table.
 
 Skip this step if you only want completed-job history from the database;
-`pelican_man` will keep asking the schedd for transfers.
+`pelican-man` will keep asking the schedd for transfers.
 
 It is bounded by default: `MAX_EPOCH_HISTORY_LOG` is 20 MB across
 `MAX_EPOCH_HISTORY_ROTATIONS = 2`, so about 60 MB. It is still new write traffic
@@ -84,7 +84,7 @@ every line is either a path, a decision, or something this pool actually needs:
 # Daemons
 # ---------------------------------------------------------------------------
 
-PELICAN_MANAGER = /usr/local/sbin/pelican_man
+PELICAN_MANAGER = /usr/local/sbin/pelican-man
 HTCONDORDB      = /usr/local/sbin/htcondordb
 
 DAEMON_LIST    = $(DAEMON_LIST), HTCONDORDB, PELICAN_MANAGER
@@ -97,7 +97,7 @@ DC_DAEMON_LIST = $(DC_DAEMON_LIST) +HTCONDORDB +PELICAN_MANAGER
 # VALID_SPOOL_FILES is the list of files condor_preen leaves alone; anything in
 # SPOOL that is not named here is eventually removed. Three things land there:
 # htcondordb's database directory, the persisted session caches, and
-# pelican_man's info file. Omitting this looks fine for days and then quietly
+# pelican-man's info file. Omitting this looks fine for days and then quietly
 # destroys the database.
 VALID_SPOOL_FILES = $(VALID_SPOOL_FILES) htcondordb sessions_* pelican_info.json
 
@@ -119,11 +119,11 @@ HTCONDORDB_SYNC_SCHEDD = true
 
 # Transfer records live in JOB_EPOCH_HISTORY -- there is no separate
 # transfer-history file -- so this is what fills the epoch_history table that
-# pelican_man reads transfers from. See step 2 before enabling it.
+# pelican-man reads transfers from. See step 2 before enabling it.
 JOB_EPOCH_HISTORY = $(SPOOL)/epoch_history
 
 # ---------------------------------------------------------------------------
-# pelican_man
+# pelican-man
 # ---------------------------------------------------------------------------
 
 # The default is enforcing. Start by observing: run the control loop and publish
@@ -187,7 +187,7 @@ condor_config_val DAEMON_LIST DC_DAEMON_LIST VALID_SPOOL_FILES
 
 Do not expect `condor_config_val PELICAN_MANAGER_EPOCH_DB_ADDRESS` to show
 anything — it will say *Not defined*, and that is correct. The epoch and state
-addresses fall back to the rule address inside `pelican_man`, not in the
+addresses fall back to the rule address inside `pelican-man`, not in the
 HTCondor macro table. The daemon's startup log is where you confirm all three
 resolved (step 6).
 
@@ -225,7 +225,7 @@ sudo condor_restart -master
 
 ```bash
 # Both running, and as condor rather than root -- they drop privileges at startup.
-ps -o user,args -C htcondordb -C pelican_man
+ps -o user,args -C htcondordb -C pelican-man
 
 # The master's account of starting them, if either is missing.
 grep -iE "pelican_manager|htcondordb" /var/log/condor/MasterLog | tail
@@ -234,7 +234,7 @@ cat /var/log/condor/.htcondordb_address
 ```
 
 The address file is what `auto` resolves through, so its contents matter but its
-*form* does not — whatever socket name is in there, `pelican_man` will use it,
+*form* does not — whatever socket name is in there, `pelican-man` will use it,
 and will re-read it if htcondordb restarts under a different one.
 
 By default that name carries the *master's* pid — `htcondordb_<masterpid>_<hex>`
@@ -275,7 +275,7 @@ default log name, derived from the subsystem `HTCONDORDB`.
 `epoch_history` stays at 0 until jobs finish transfers *after* you enabled
 `JOB_EPOCH_HISTORY` — it is not backfilled.
 
-**`pelican_man` found the schedd and the database.** In
+**`pelican-man` found the schedd and the database.** In
 `/var/log/condor/PelicanManagerLog`, expect:
 
 ```
@@ -324,8 +324,8 @@ observing mode withholds the dynamic ones, so both lists are empty — that is t
 expected state at this point, not a failure:
 
 ```bash
-/usr/local/sbin/pelican_man -rules      # what the daemon intends
-/usr/local/sbin/pelican_man -limits     # what the schedd is enforcing
+/usr/local/sbin/pelican-man -rules      # what the daemon intends
+/usr/local/sbin/pelican-man -limits     # what the schedd is enforcing
 ```
 
 (Static rules are installed in *both* modes. Observing mode only withholds the
@@ -352,8 +352,8 @@ sudo condor_reconfig -daemon PELICAN_MANAGER
 **Check:**
 
 ```bash
-/usr/local/sbin/pelican_man -rules      # ligo_ucsd, origin=static, status=enforced
-/usr/local/sbin/pelican_man -limits     # pelican_static_ligo_ucsd, 20/1m
+/usr/local/sbin/pelican-man -rules      # ligo_ucsd, origin=static, status=enforced
+/usr/local/sbin/pelican-man -limits     # pelican_static_ligo_ucsd, 20/1m
 ```
 
 `-rules` shows what the daemon decided; `-limits` shows what the schedd is
@@ -372,7 +372,7 @@ PELICAN_MANAGER_ENFORCEMENT_MODE = enforcing
 
 ```bash
 sudo condor_reconfig -daemon PELICAN_MANAGER
-/usr/local/sbin/pelican_man -limits
+/usr/local/sbin/pelican-man -limits
 ```
 
 You should now also see `pelican_dynamic_*` limits for the (user, site) pairs
@@ -407,7 +407,7 @@ To remove it entirely, drop `PELICAN_MANAGER` from `DAEMON_LIST` and
 See the [Troubleshooting](../README.md#troubleshooting) section. The two
 failures specific to this setup:
 
-**`pelican_man` logs a mirror fallback on every cycle.** The address is wrong or
+**`pelican-man` logs a mirror fallback on every cycle.** The address is wrong or
 htcondordb is not reachable. Compare your configured value against
 `cat $(LOG)/.htcondordb_address`. Reads fall back to the schedd, so the daemon
 keeps working — the only symptom is the schedd load you meant to avoid.
@@ -422,7 +422,7 @@ timer — so this presents as everything working for a day or more and then the
 database being gone. Check that `condor_config_val VALID_SPOOL_FILES` includes
 `htcondordb` and `sessions_*`.
 
-**`pelican_man` will not start, with a session-cache error.**
+**`pelican-man` will not start, with a session-cache error.**
 `SEC_PERSIST_SESSIONS` is deliberately fatal rather than quietly skipped when its
 prerequisites are missing: it needs `SPOOL` set and the pool signing keys
 readable, because it encrypts the cache at rest and there is no plaintext

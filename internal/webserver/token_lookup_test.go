@@ -121,7 +121,7 @@ func TestUnknownTokenCostsNothing(t *testing.T) {
 
 // TestLegacyTokensStillValidate: tokens issued before lookup_hash existed have
 // none, and they stay valid for up to their 24-hour lifetime after an upgrade.
-// Rejecting them would break every job holding one at the moment pelican_web
+// Rejecting them would break every job holding one at the moment pelican-web
 // restarts.
 func TestLegacyTokensStillValidate(t *testing.T) {
 	db := newTestDB(t)

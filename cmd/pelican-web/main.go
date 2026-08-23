@@ -1,13 +1,13 @@
-// Command pelican_web serves the Pelican AP manager's HTTP surface: the
+// Command pelican-web serves the Pelican AP manager's HTTP surface: the
 // sandbox registration/upload/download API used by the Pelican transfer plugin,
 // and the golang-htcondor REST API mounted at /api/.
 //
-// This is the only place the HTTP surface runs: pelican_man serves none of it,
+// This is the only place the HTTP surface runs: pelican-man serves none of it,
 // which is what keeps the web stack (OAuth2/OIDC, OpenTelemetry, sqlite) out of
 // that binary entirely. PELICAN_WEB must be in DAEMON_LIST for Pelican transfer
 // plugins to be able to register sandboxes.
 //
-// Like pelican_man, the daemon lifecycle (configuration, HTCondor logging,
+// Like pelican-man, the daemon lifecycle (configuration, HTCondor logging,
 // privilege drop, condor_master readiness/keepalive, SIGHUP reconfigure,
 // shared-port command socket) comes from the golang-htcondor daemon framework.
 package main
@@ -35,7 +35,7 @@ import (
 // subsystem is the HTCondor subsystem name. It selects the per-daemon log knobs
 // (PELICAN_WEB_LOG, MAX_PELICAN_WEB_LOG, PELICAN_WEB_DEBUG) and the
 // PELICAN_WEB.<key> configuration scope, so the web server's logging and
-// security can be tuned separately from pelican_man's.
+// security can be tuned separately from pelican-man's.
 const subsystem = "PELICAN_WEB"
 
 // version is stamped at build time (see the Makefile).
@@ -43,7 +43,7 @@ var version = "dev"
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "pelican_web:", err)
+		fmt.Fprintln(os.Stderr, "pelican-web:", err)
 		os.Exit(1)
 	}
 }
@@ -58,7 +58,7 @@ func run() error {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Println("pelican_web", version)
+		fmt.Println("pelican-web", version)
 		return nil
 	}
 
@@ -138,7 +138,7 @@ func run() error {
 	}()
 
 	log.Infof(htcondorlogging.DestinationGeneral,
-		"pelican_web %s starting: command_socket=%s under_master=%v socket=%s listen=%q db=%s",
+		"pelican-web %s starting: command_socket=%s under_master=%v socket=%s listen=%q db=%s",
 		version, ln.Addr().String(), d.UnderMaster(), webCfg.SocketPath, webCfg.ListenAddress, webCfg.DBPath)
 
 	// Blocks until a termination signal, a command-server error, or DC_OFF. The

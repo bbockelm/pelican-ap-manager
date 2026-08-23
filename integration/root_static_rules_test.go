@@ -26,7 +26,7 @@ import (
 const requireRootEnv = "PELICAN_REQUIRE_ROOT_TEST"
 
 // TestRootStaticRuleEnforcement is the end-to-end proof of the deployment this
-// project is for: condor_master starts pelican_man and pelican_web as root, both
+// project is for: condor_master starts pelican-man and pelican-web as root, both
 // drop to the condor user, the manager installs the operator's static rate rules
 // as schedd startup limits, and the web daemon accepts a sandbox registration --
 // all while the control loop is in observing mode, so nothing but the operator's
@@ -110,7 +110,7 @@ func assertStaticRuleBehavior(t *testing.T, env *rootPool) {
 	// can be fetched back with the issued token.
 	assertSandboxObserved(t, env)
 
-	// Last, because it is destructive: it kills pelican_man to watch the leases
+	// Last, because it is destructive: it kills pelican-man to watch the leases
 	// expire, and condor_master is configured not to restart it.
 	assertLimitLease(t, env)
 }
@@ -182,11 +182,11 @@ func setupPool(t *testing.T, opts poolOptions) *rootPool {
 
 	managerPath, err := buildPelicanBinary(t, rootDir)
 	if err != nil {
-		t.Fatalf("build pelican_man: %v", err)
+		t.Fatalf("build pelican-man: %v", err)
 	}
 	webPath, err := buildWebBinary(t, rootDir)
 	if err != nil {
-		t.Fatalf("build pelican_web: %v", err)
+		t.Fatalf("build pelican-web: %v", err)
 	}
 
 	overrides := map[string]string{
@@ -199,7 +199,7 @@ func setupPool(t *testing.T, opts poolOptions) *rootPool {
 		// configuration had the two exactly equal and limits lapsed every cycle.
 		"PELICAN_MANAGER_ADVERTISE_INTERVAL": "30s",
 		"PELICAN_MANAGER_DEBUG":              "cedar:warn",
-		// A killed pelican_man must stay dead long enough for the lease test to
+		// A killed pelican-man must stay dead long enough for the lease test to
 		// watch its limits expire; without this the master restarts it within
 		// seconds and reinstalls them.
 		"MASTER_BACKOFF_CONSTANT": "3600",
@@ -296,11 +296,11 @@ func setupPool(t *testing.T, opts poolOptions) *rootPool {
 	// Both daemons must actually be up before anything is asserted.
 	if err := waitForLogFile(filepath.Join(rootDir, "log", "PelicanManagerLog"), 60*time.Second); err != nil {
 		printHTCondorLogs(rootDir, t)
-		t.Fatalf("pelican_man did not start: %v", err)
+		t.Fatalf("pelican-man did not start: %v", err)
 	}
 	if err := waitForSocket(env.socketPath, 60*time.Second); err != nil {
 		dumpPelicanLogs(t, env)
-		t.Fatalf("pelican_web did not open its sandbox socket: %v", err)
+		t.Fatalf("pelican-web did not open its sandbox socket: %v", err)
 	}
 
 	return env
@@ -333,7 +333,7 @@ func assertDroppedPrivileges(t *testing.T, env *rootPool, condorUID int) {
 
 	// The daemon also says so, and that line is what an admin will look for.
 	if log := readFileString(t, filepath.Join(env.rootDir, "log", "PelicanManagerLog")); !strings.Contains(log, "dropped privileges") {
-		t.Errorf("pelican_man log has no \"dropped privileges\" line; it may have been started unprivileged")
+		t.Errorf("pelican-man log has no \"dropped privileges\" line; it may have been started unprivileged")
 	}
 }
 
@@ -418,7 +418,7 @@ func assertOnlyStaticRules(t *testing.T, env *rootPool, installed map[string]*ht
 
 	log := readFileString(t, filepath.Join(env.rootDir, "log", "PelicanManagerLog"))
 	if !strings.Contains(log, "rate limit enforcement mode: observing") {
-		t.Errorf("pelican_man did not report observing mode; the configuration may not have taken effect")
+		t.Errorf("pelican-man did not report observing mode; the configuration may not have taken effect")
 	}
 
 	for name := range installed {
@@ -742,13 +742,13 @@ func assertLimitLease(t *testing.T, env *rootPool) {
 		4*testLease, still)
 }
 
-// killPelicanManager stops pelican_man abruptly so the test can watch its leases
+// killPelicanManager stops pelican-man abruptly so the test can watch its leases
 // run out. SIGKILL rather than a graceful shutdown, because a crash is the case
 // the lease exists for; the pool's MASTER_BACKOFF_* settings keep condor_master
 // from restarting it during the assertion.
 //
 // The pid comes from this pool's MasterLog rather than pgrep. A pattern match on
-// the binary name would reach every pelican_man on the host -- a developer's own
+// the binary name would reach every pelican-man on the host -- a developer's own
 // daemon, or one left behind by an earlier run -- and matching the full path does
 // not work, because condor_master does not exec the daemon with its path as
 // argv[0].
@@ -759,7 +759,7 @@ func killPelicanManager(t *testing.T, env *rootPool) {
 	if out, err := exec.Command("kill", "-9", strconv.Itoa(pid)).CombinedOutput(); err != nil {
 		t.Fatalf("kill -9 %d: %v (%s)", pid, err, strings.TrimSpace(string(out)))
 	}
-	t.Logf("killed pelican_man (pid %d); watching its limits expire", pid)
+	t.Logf("killed pelican-man (pid %d); watching its limits expire", pid)
 }
 
 // pelicanManagerPID reads the running daemon's pid out of its own log, which
@@ -787,7 +787,7 @@ func pelicanManagerPID(t *testing.T, env *rootPool) int {
 	return pid
 }
 
-// assertInspectionCLI runs `pelican_man -limits` and `-rules` against the live
+// assertInspectionCLI runs `pelican-man -limits` and `-rules` against the live
 // pool and checks they report the rules that are actually installed.
 func assertInspectionCLI(t *testing.T, env *rootPool) {
 	t.Helper()
@@ -804,7 +804,7 @@ func assertInspectionCLI(t *testing.T, env *rootPool) {
 	}
 
 	limits := run("-limits")
-	t.Logf("pelican_man -limits:\n%s", limits)
+	t.Logf("pelican-man -limits:\n%s", limits)
 	for name := range expectedLimits {
 		if !strings.Contains(limits, name) {
 			t.Errorf("-limits did not report %q; got:\n%s", name, limits)
@@ -812,7 +812,7 @@ func assertInspectionCLI(t *testing.T, env *rootPool) {
 	}
 
 	rules := run("-rules")
-	t.Logf("pelican_man -rules:\n%s", rules)
+	t.Logf("pelican-man -rules:\n%s", rules)
 	for _, name := range []string{"slow_ucsd", "all_psu"} {
 		if !strings.Contains(rules, name) {
 			t.Errorf("-rules did not report %q; got:\n%s", name, rules)

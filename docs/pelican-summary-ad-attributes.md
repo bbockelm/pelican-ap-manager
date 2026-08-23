@@ -2,7 +2,7 @@
 
 ## Overview
 
-PelicanSummary ClassAds track individual file transfer **attempts** for a specific endpoint and direction. Each transfer attempt (including retries) is counted and measured separately. These ads are published by `pelican_man` to provide visibility into transfer performance at the attempt level.
+PelicanSummary ClassAds track individual file transfer **attempts** for a specific endpoint and direction. Each transfer attempt (including retries) is counted and measured separately. These ads are published by `pelican-man` to provide visibility into transfer performance at the attempt level.
 
 **Key Distinction**: PelicanSummary ads track *attempts*, not *epochs*. A job epoch may have multiple transfer attempts (e.g., due to retries), and each attempt is counted independently.
 

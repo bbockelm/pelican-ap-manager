@@ -1,11 +1,11 @@
 # Pelican Manager Web Server
 
-The `pelican_web` daemon manages job sandboxes over HTTP, on a Unix domain socket or TCP/TLS. It uses the golang-htcondor sandbox API for creating and extracting job sandboxes.
+The `pelican-web` daemon manages job sandboxes over HTTP, on a Unix domain socket or TCP/TLS. It uses the golang-htcondor sandbox API for creating and extracting job sandboxes.
 
-`pelican_web` is a separate daemon from `pelican_man`, which serves no HTTP at all. Keeping them apart is what lets `pelican_man` avoid linking the web stack (OAuth2/OIDC, OpenTelemetry, sqlite) — roughly half its binary size. Add it to `DAEMON_LIST` alongside `PELICAN_MANAGER`:
+`pelican-web` is a separate daemon from `pelican-man`, which serves no HTTP at all. Keeping them apart is what lets `pelican-man` avoid linking the web stack (OAuth2/OIDC, OpenTelemetry, sqlite) — roughly half its binary size. Add it to `DAEMON_LIST` alongside `PELICAN_MANAGER`:
 
 ```
-PELICAN_WEB    = /usr/sbin/pelican_web
+PELICAN_WEB    = /usr/sbin/pelican-web
 DAEMON_LIST    = $(DAEMON_LIST) PELICAN_MANAGER PELICAN_WEB
 DC_DAEMON_LIST = +PELICAN_MANAGER PELICAN_WEB
 ```
@@ -37,8 +37,8 @@ PELICAN_MANAGER_WEB_LISTEN_ADDRESS = :8080
 PELICAN_MANAGER_WEB_TLS_CERT = /path/to/cert.pem
 PELICAN_MANAGER_WEB_TLS_KEY = /path/to/key.pem
 
-# Optional: Database path (defaults to SPOOL/pelican_web.db)
-PELICAN_MANAGER_WEB_DB_PATH = /path/to/pelican_web.db
+# Optional: Database path (defaults to SPOOL/pelican-web.db)
+PELICAN_MANAGER_WEB_DB_PATH = /path/to/pelican-web.db
 
 # Optional: Privilege dropping configuration (automatic when running as root)
 DROP_PRIVILEGES = TRUE
@@ -50,7 +50,7 @@ If neither `PELICAN_MANAGER_WEB_LISTEN_ADDRESS` nor `PELICAN_REGISTRATION_SOCKET
 
 ## Privilege Dropping
 
-When pelican_man is started as root:
+When pelican-man is started as root:
 - Automatically enables `droppriv` manager from golang-htcondor
 - Drops effective privileges to the condor user (configurable via `CONDOR_USER`)
 - File operations (reading/writing sandboxes) are performed as the job owner

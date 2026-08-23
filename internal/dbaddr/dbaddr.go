@@ -9,7 +9,7 @@
 // client it ships -- the CLI, the Python driver -- resolves through
 // locate.Daemon rather than taking a host and port.
 //
-// This is the same resolution for pelican_man, so the two agree on where the
+// This is the same resolution for pelican-man, so the two agree on where the
 // database is, and so a configuration written once keeps working.
 package dbaddr
 
