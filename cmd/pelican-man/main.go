@@ -341,6 +341,7 @@ func buildService(cfg *config.Config, log *htcondorlogging.Logger, oneshot bool)
 			Address:       cfg.EpochDBAddress,
 			JobTable:      cfg.EpochDBJobTable,
 			TransferTable: cfg.EpochDBTransferTable,
+			QueueTable:    cfg.EpochDBQueueTable,
 			Config:        cfg.HTCondorConfig(),
 			Ready:         gate,
 		}

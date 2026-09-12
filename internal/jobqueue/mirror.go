@@ -85,8 +85,37 @@ func NewMirror(jobQueueLogPath string, client condor.CondorClient, logger *htcon
 	return m, nil
 }
 
-// Sync refreshes the in-memory job snapshot from the log (preferred) or a schedd query.
+// mirrorServedJobs is implemented by a client that can answer job queries from
+// an htcondordb mirror. Optional: a plain schedd client does not implement it,
+// and the log is then the preferred source as before.
+type mirrorServedJobs interface {
+	CanServeJobs(ctx context.Context) bool
+}
+
+// Sync refreshes the in-memory job snapshot.
+//
+// Source order is: the htcondordb mirror when it is current, then the schedd's
+// job_queue.log read directly, then a schedd query.
+//
+// The mirror goes first on purpose, even though reading the log locally avoids a
+// network hop. scheddsync is already tailing that same file into the database,
+// so preferring the mirror means one process on the access point parses
+// job_queue.log rather than two -- and the one that does it is the one built for
+// it, with a durable cursor and gap detection. When the mirror is behind, or
+// there is no database, the local read is still there.
 func (m *Mirror) Sync(ctx context.Context) error {
+	if served, ok := m.client.(mirrorServedJobs); ok && served.CanServeJobs(ctx) {
+		ads, err := m.client.QueryJobs(ctx, "true", m.projection)
+		if err == nil {
+			m.ingest(ads)
+			return nil
+		}
+		// The client falls back to the schedd internally, so an error here is
+		// both sources having failed. Fall through to the log, which may still
+		// be readable.
+		m.note("job query failed at both the mirror and the schedd: %v", err)
+	}
+
 	if m.reader == nil {
 		if err := m.tryInitLogReader(); err != nil {
 			m.note("job queue log init error: %v", err)
