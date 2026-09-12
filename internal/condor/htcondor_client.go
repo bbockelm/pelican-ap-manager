@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
+	"os"
 	"path"
 	"sort"
 	"strings"
@@ -14,13 +16,44 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 	htcondor "github.com/bbockelm/golang-htcondor"
+	condorconfig "github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/pelican-ap-manager/internal/state"
 )
 
 // NewClient creates a Condor-backed client using the golang-htcondor bindings.
 // The HTCondor configuration should be passed via the context when calling AdvertiseClassAds.
 func NewClient(collectorAddress, scheddName, siteAttr string) (CondorClient, error) {
-	return &htcClient{collector: htcondor.NewCollector(collectorAddress), scheddName: scheddName, siteAttr: siteAttr}, nil
+	return NewClientForHost(collectorAddress, scheddName, siteAttr, LocalHostname())
+}
+
+// NewClientForHost is NewClient with the local host named explicitly. localHost
+// is what identifies "this access point's schedd" when no schedd name is
+// configured; see LocateSchedd.
+func NewClientForHost(collectorAddress, scheddName, siteAttr, localHost string) (CondorClient, error) {
+	// Best effort: a client with no configuration falls back to the collector.
+	cfg, _ := condorconfig.New()
+	return &htcClient{
+		collector:  htcondor.NewCollector(collectorAddress),
+		scheddName: scheddName,
+		siteAttr:   siteAttr,
+		localHost:  strings.ToLower(strings.TrimSpace(localHost)),
+		cfg:        cfg,
+	}, nil
+}
+
+// LocalHostname is the name this host advertises itself under: HTCondor's
+// FULL_HOSTNAME when it is configured, since that is what a schedd's advertised
+// Name is built from, else the OS hostname.
+func LocalHostname() string {
+	if cfg, err := condorconfig.New(); err == nil {
+		if v, ok := cfg.Get("FULL_HOSTNAME"); ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	if h, err := os.Hostname(); err == nil {
+		return h
+	}
+	return ""
 }
 
 // htcClient is a thin wrapper that satisfies the CondorClient interface.
@@ -28,6 +61,14 @@ type htcClient struct {
 	collector  *htcondor.Collector
 	scheddName string
 	siteAttr   string
+
+	// localHost identifies this access point among the schedds a collector
+	// knows about. Only used when no schedd name is configured.
+	localHost string
+
+	// cfg is the HTCondor configuration, for locating the local schedd's
+	// address file. Nil is tolerated: the collector search still works.
+	cfg *condorconfig.Config
 }
 
 // LocateSchedd finds the schedd this manager is responsible for and returns a
@@ -43,11 +84,36 @@ type htcClient struct {
 //
 // An empty name locates any schedd, which is what a single-schedd AP wants.
 func (c *htcClient) LocateSchedd(ctx context.Context) (*htcondor.Schedd, error) {
+	// No name configured: find the schedd on THIS host rather than whichever one
+	// the collector happens to return first.
+	//
+	// Asking the collector for an unnamed schedd gets an arbitrary one, which is
+	// only harmless in a pool with exactly one. On a shared collector -- the
+	// normal case for an OSG-style pool -- it hands back some other site's
+	// schedd, and this daemon then tries to install rate limits on a machine it
+	// has no business touching. It does not get that far, because it cannot
+	// authenticate to it, but the error it reports is about the wrong host.
+	if c.scheddName == "" {
+		// The local schedd publishes its command address to
+		// $(LOG)/.schedd_address. That file IS the answer to "which schedd is
+		// this access point's" -- no collector round trip, and nothing to infer
+		// from hostnames. Prefer it.
+		if schedd, err := c.locateScheddFromAddressFile(); err == nil {
+			return schedd, nil
+		} else if !errors.Is(err, errNoAddressFile) {
+			// The file is named but unreadable: worth saying so before falling
+			// back, because a stale or unreadable address file is a different
+			// problem from not having one.
+			log.Printf("condor: local schedd address file unusable (%v); asking the collector instead", err)
+		}
+		return c.locateLocalSchedd(ctx)
+	}
+
 	location, err := c.collector.LocateDaemon(ctx, "Schedd", c.scheddName)
 	if err == nil {
 		return htcondor.NewSchedd(location.Name, location.Address), nil
 	}
-	if c.scheddName == "" || strings.Contains(c.scheddName, "@") {
+	if strings.Contains(c.scheddName, "@") {
 		return nil, fmt.Errorf("locate schedd %q: %w", c.scheddName, err)
 	}
 
@@ -58,6 +124,171 @@ func (c *htcClient) LocateSchedd(ctx context.Context) (*htcondor.Schedd, error) 
 		return nil, fmt.Errorf("locate schedd %q: %w (also tried %s@...: %v)", c.scheddName, err, c.scheddName, qerr)
 	}
 	return qualified, nil
+}
+
+// errNoAddressFile means nothing names a local schedd address file, which is not
+// a failure -- it is the case where asking the collector is right.
+var errNoAddressFile = errors.New("no schedd address file is configured")
+
+// locateScheddFromAddressFile reads the local schedd's command address from the
+// file it publishes.
+//
+// This is the authoritative answer for an unnamed schedd, and it is the same
+// mechanism htcondordb's clients use to find htcondordb. The collector search
+// below is a backstop for when the file is missing -- pelican-man running
+// somewhere other than the submit host, say.
+func (c *htcClient) locateScheddFromAddressFile() (*htcondor.Schedd, error) {
+	if c.cfg == nil {
+		return nil, errNoAddressFile
+	}
+	resolve, source, err := htcondor.LocalDaemonAddress(c.cfg, "SCHEDD")
+	if err != nil {
+		return nil, errNoAddressFile
+	}
+	addr, err := resolve()
+	if err != nil {
+		return nil, fmt.Errorf("reading the local schedd address from %s: %w", source, err)
+	}
+	if strings.TrimSpace(addr) == "" {
+		return nil, fmt.Errorf("%s named no address", source)
+	}
+	// The file carries an address, not a name. The name is only a label here --
+	// the limit tag is separate (see limitManager.limitTag) -- so this reports
+	// the host it belongs to rather than inventing a schedd name.
+	return htcondor.NewSchedd(c.scheddLabel(), addr), nil
+}
+
+// scheddLabel names the local schedd for log lines when nothing else does.
+func (c *htcClient) scheddLabel() string {
+	if c.localHost != "" {
+		return c.localHost
+	}
+	return "local schedd"
+}
+
+// locateLocalSchedd finds the schedd running on this host.
+//
+// A schedd advertises Name = "<SCHEDD_NAME>@<FULL_HOSTNAME>" and Machine =
+// "<FULL_HOSTNAME>", so either identifies it. A pool with exactly one schedd is
+// accepted whatever it is called, since there is nothing to be ambiguous about
+// and a mismatch there is more likely a hostname the pool disagrees with than a
+// genuinely remote schedd.
+//
+// Anything else is an error naming what was found: guessing among several
+// schedds is how this daemon ends up managing someone else's access point.
+func (c *htcClient) locateLocalSchedd(ctx context.Context) (*htcondor.Schedd, error) {
+	ads, _, err := c.collector.QueryAdsWithOptions(ctx, htcondor.ScheddAdType, "", &htcondor.QueryOptions{
+		Projection: []string{"Name", "Machine", "MyAddress"},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("querying collector for schedd ads: %w", err)
+	}
+	if len(ads) == 0 {
+		return nil, fmt.Errorf("no schedd is advertised to the collector")
+	}
+
+	seen := make([]scheddCandidate, 0, len(ads))
+	for _, ad := range ads {
+		name, _ := ad.EvaluateAttrString("Name")
+		machine, _ := ad.EvaluateAttrString("Machine")
+		addr, _ := ad.EvaluateAttrString("MyAddress")
+		seen = append(seen, scheddCandidate{name, machine, addr})
+	}
+
+	chosen, err := pickLocalSchedd(seen, c.localHost)
+	if err != nil {
+		return nil, err
+	}
+	return htcondor.NewSchedd(chosen.name, chosen.addr), nil
+}
+
+// scheddCandidate is one schedd as the collector describes it.
+type scheddCandidate struct{ name, machine, addr string }
+
+// pickLocalSchedd chooses this host's schedd from what the collector advertises.
+//
+// Separated from the query so the choice can be tested: the query is plumbing,
+// but choosing wrong means this daemon installs rate limits on somebody else's
+// access point, which is what it did.
+func pickLocalSchedd(seen []scheddCandidate, localHost string) (scheddCandidate, error) {
+	if len(seen) == 0 {
+		return scheddCandidate{}, fmt.Errorf("no schedd is advertised to the collector")
+	}
+
+	if localHost != "" {
+		for _, cd := range seen {
+			if !sameHost(cd.machine, localHost) && !sameHost(hostPart(cd.name), localHost) {
+				continue
+			}
+			if cd.addr == "" {
+				return scheddCandidate{}, fmt.Errorf("local schedd %q advertises no MyAddress", cd.name)
+			}
+			return cd, nil
+		}
+	}
+
+	// One schedd in the pool: nothing to be ambiguous about, and a hostname the
+	// pool disagrees with is likelier than a genuinely remote schedd.
+	if len(seen) == 1 {
+		if seen[0].addr == "" {
+			return scheddCandidate{}, fmt.Errorf("schedd %q advertises no MyAddress", seen[0].name)
+		}
+		return seen[0], nil
+	}
+
+	names := make([]string, 0, len(seen))
+	for _, cd := range seen {
+		names = append(names, cd.name)
+	}
+	return scheddCandidate{}, fmt.Errorf("no schedd on this host (%s) among the %d the collector knows (%s); "+
+		"set PELICAN_MANAGER_SCHEDD_NAME to the one this daemon should manage",
+		hostOrUnknown(localHost), len(seen), strings.Join(names, ", "))
+}
+
+// hostPart returns the host half of a "name@host" schedd name.
+func hostPart(name string) string {
+	if i := strings.LastIndexByte(name, '@'); i >= 0 {
+		return name[i+1:]
+	}
+	return ""
+}
+
+// sameHost compares two host names case-insensitively.
+//
+// A schedd may advertise a fully-qualified name while the local FULL_HOSTNAME is
+// short, or the reverse, so an unqualified name is compared against the other's
+// first label. That shortcut applies only when one side is genuinely unqualified:
+// comparing two qualified names by first label alone would make submit.a.example
+// and submit.b.example the same host, which is the very confusion this function
+// exists to prevent.
+func sameHost(a, b string) bool {
+	a, b = strings.ToLower(strings.TrimSpace(a)), strings.ToLower(strings.TrimSpace(b))
+	if a == "" || b == "" {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	aQualified, bQualified := strings.Contains(a, "."), strings.Contains(b, ".")
+	if aQualified == bQualified {
+		// Both qualified, or both short: equality was the only chance.
+		return false
+	}
+	return firstLabel(a) == firstLabel(b)
+}
+
+func firstLabel(h string) string {
+	if i := strings.IndexByte(h, '.'); i >= 0 {
+		return h[:i]
+	}
+	return h
+}
+
+func hostOrUnknown(h string) string {
+	if h == "" {
+		return "hostname unknown"
+	}
+	return h
 }
 
 // locateScheddByLocalPart finds a schedd whose advertised Name is
