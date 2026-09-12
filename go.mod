@@ -7,8 +7,16 @@ require (
 	github.com/PelicanPlatform/classad/db v0.29.6
 	github.com/PelicanPlatform/classad/dbrpc v0.29.6
 	github.com/bbockelm/cedar v0.6.14
-	github.com/bbockelm/golang-htcondor v0.14.0
-	github.com/bbockelm/golang-htcondor/webapi v0.14.0
+	github.com/bbockelm/golang-htcondor v0.14.1
+	github.com/bbockelm/golang-htcondor/webapi v0.14.1
+	// NOTE: do not `go mod tidy` this module without re-checking
+	// .github/workflows/root-integration.yml. That job builds
+	// htcondordb's COMMAND out of this module graph
+	// (go build github.com/bbockelm/htcondordb/cmd/htcondordb), and
+	// tidy prunes the go.sum entries its dependencies need -- raft,
+	// raft-boltdb, classad/changefeed -- because nothing in this module
+	// imports them. The build then fails with "missing go.sum entry".
+	// A tools.go cannot pin it either: cmd/htcondordb is package main.
 	github.com/bbockelm/htcondordb v0.17.2
 	github.com/glebarez/sqlite v1.11.0
 	github.com/google/go-cmp v0.7.0
