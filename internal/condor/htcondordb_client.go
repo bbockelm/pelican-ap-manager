@@ -338,8 +338,14 @@ func (m *mirrorClient) FetchJobEpochs(since state.EpochID, cutoff time.Time) ([]
 // could be evaluated, and a daemon with no collector should not lose the mirror
 // over a question it has no way to ask.
 func (m *mirrorClient) sourceReady(ctx context.Context, src string) bool {
+	// No gate means no way to tell whether this mirror is minutes or hours
+	// behind, so the read goes to the schedd. Serving it instead would be the
+	// worst of the available failures: the query succeeds, the answer is wrong,
+	// and nothing anywhere reports a problem. The daemon builds a gate for every
+	// configuration that can reach a mirror at all, so this is a floor rather
+	// than a path taken in practice.
 	if m.ready == nil {
-		return true
+		return false
 	}
 	ok, why := m.ready.Ready(ctx, src)
 	m.ready.Report(src, ok, why, func(format string, args ...any) {
