@@ -79,6 +79,12 @@ type Config struct {
 	StateDBAddress string
 	StateDBTable   string
 
+	// DBMaxLag and DBMaxLagBytes are how far behind htcondordb's tailers may be
+	// while the daemon still reads from it instead of the schedd. See
+	// internal/dbready.
+	DBMaxLag      time.Duration
+	DBMaxLagBytes int64
+
 	// RuleDBAddress, when set, points the rate-rule store at an htcondordb
 	// daemon instead of the local JSON document. RuleDBTable names the table.
 	RuleDBAddress string
@@ -144,6 +150,8 @@ const (
 	macroEpochDBTransferTable = "PELICAN_MANAGER_EPOCH_DB_TRANSFER_TABLE"
 	macroStateDBAddress       = "PELICAN_MANAGER_STATE_DB_ADDRESS"
 	macroStateDBTable         = "PELICAN_MANAGER_STATE_DB_TABLE"
+	macroDBMaxLag             = "PELICAN_MANAGER_DB_MAX_LAG"
+	macroDBMaxLagBytes        = "PELICAN_MANAGER_DB_MAX_LAG_BYTES"
 	macroLimitLease           = "PELICAN_MANAGER_LIMIT_LEASE"
 )
 
@@ -315,6 +323,18 @@ func LoadFrom(condorCfg *condorconfig.Config) (*Config, error) {
 	}
 	if v := firstStringMacro(condorCfg, macroStateDBTable); v != "" {
 		cfg.StateDBTable = v
+	}
+	if d, err := parseDurationMacro(condorCfg, macroDBMaxLag); err != nil {
+		return nil, fmt.Errorf("invalid %s: %w", macroDBMaxLag, err)
+	} else if d > 0 {
+		cfg.DBMaxLag = d
+	}
+	if v := firstStringMacro(condorCfg, macroDBMaxLagBytes); v != "" {
+		n, perr := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		if perr != nil || n < 0 {
+			return nil, fmt.Errorf("invalid %s: %q is not a byte count", macroDBMaxLagBytes, v)
+		}
+		cfg.DBMaxLagBytes = n
 	}
 
 	if d, err := parseDurationMacro(condorCfg, macroLimitLease); err != nil {

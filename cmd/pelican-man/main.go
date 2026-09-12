@@ -36,6 +36,7 @@ import (
 	"github.com/bbockelm/pelican-ap-manager/internal/condor"
 	"github.com/bbockelm/pelican-ap-manager/internal/config"
 	"github.com/bbockelm/pelican-ap-manager/internal/daemon"
+	"github.com/bbockelm/pelican-ap-manager/internal/dbready"
 	"github.com/bbockelm/pelican-ap-manager/internal/director"
 	"github.com/bbockelm/pelican-ap-manager/internal/jobqueue"
 	"github.com/bbockelm/pelican-ap-manager/internal/state"
@@ -321,11 +322,27 @@ func buildService(cfg *config.Config, log *htcondorlogging.Logger, oneshot bool)
 	// client is not fatal: the daemon falls back to the schedd, which is what it
 	// did before.
 	if cfg.EpochDBAddress != "" {
+		// Reads are gated on htcondordb's own account of how far behind its
+		// tailers are, which it advertises to the collector. Without a collector
+		// there is nothing to read that from, and the mirror is used
+		// unconditionally -- which is what it did before, and still better than
+		// not using it at all.
+		var gate condor.ReadinessChecker
+		if cfg.CollectorHost != "" {
+			gate = dbready.New(dbready.Options{
+				Collector:   htcondor.NewCollector(cfg.CollectorHost),
+				Config:      cfg.HTCondorConfig(),
+				MaxLag:      cfg.DBMaxLag,
+				MaxLagBytes: cfg.DBMaxLagBytes,
+			})
+		}
+
 		mcfg := condor.MirrorConfig{
 			Address:       cfg.EpochDBAddress,
 			JobTable:      cfg.EpochDBJobTable,
 			TransferTable: cfg.EpochDBTransferTable,
 			Config:        cfg.HTCondorConfig(),
+			Ready:         gate,
 		}
 		mirrored, merr := condor.NewMirrorClient(condorClient, mcfg)
 		if merr != nil {
