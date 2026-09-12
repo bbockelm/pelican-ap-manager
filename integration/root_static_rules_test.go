@@ -773,16 +773,37 @@ func pelicanManagerPID(t *testing.T, env *rootPool) int {
 	t.Helper()
 
 	log := readFileString(t, filepath.Join(env.rootDir, "log", "PelicanManagerLog"))
-	re := regexp.MustCompile(`subsystem=PELICAN_MANAGER pid=(\d+)`)
+
+	// Match the two fields on the same line, in either order.
+	//
+	// This used to require them adjacent and in one order
+	// (`subsystem=PELICAN_MANAGER pid=N`), which broke when golang-htcondor
+	// v0.14.0 began emitting pid as a standard field ahead of the
+	// subsystem-specific ones. The daemon was fine; the test was reading its log
+	// as a string rather than as structured fields.
+	//
+	// \b before pid matters: parent_pid= names the master, and killing that
+	// instead would take the whole pool down rather than the daemon under test.
+	pidRe := regexp.MustCompile(`\bpid=(\d+)`)
 
 	// Last match wins: the master may have restarted the daemon.
-	matches := re.FindAllStringSubmatch(log, -1)
-	if len(matches) == 0 {
-		t.Fatalf("no pid in PelicanManagerLog; cannot kill the daemon to observe its leases expiring")
+	var last string
+	for _, line := range strings.Split(log, "\n") {
+		if !strings.Contains(line, "subsystem=PELICAN_MANAGER") {
+			continue
+		}
+		if m := pidRe.FindStringSubmatch(line); m != nil {
+			last = m[1]
+		}
 	}
-	pid, err := strconv.Atoi(matches[len(matches)-1][1])
+	if last == "" {
+		t.Fatalf("no pid on any subsystem=PELICAN_MANAGER line in PelicanManagerLog; "+
+			"cannot kill the daemon to observe its leases expiring (log has %d lines)",
+			len(strings.Split(log, "\n")))
+	}
+	pid, err := strconv.Atoi(last)
 	if err != nil {
-		t.Fatalf("parsing pid %q: %v", matches[len(matches)-1][1], err)
+		t.Fatalf("parsing pid %q: %v", last, err)
 	}
 	return pid
 }
