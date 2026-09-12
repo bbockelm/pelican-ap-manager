@@ -3,12 +3,12 @@ module github.com/bbockelm/pelican-ap-manager
 go 1.25.7
 
 require (
-	github.com/PelicanPlatform/classad v0.29.0
-	github.com/PelicanPlatform/classad/db v0.29.0
-	github.com/PelicanPlatform/classad/dbrpc v0.29.0
-	github.com/bbockelm/cedar v0.6.11
-	github.com/bbockelm/golang-htcondor v0.12.7
-	github.com/bbockelm/golang-htcondor/webapi v0.12.7
+	github.com/PelicanPlatform/classad v0.29.6
+	github.com/PelicanPlatform/classad/db v0.29.6
+	github.com/PelicanPlatform/classad/dbrpc v0.29.6
+	github.com/bbockelm/cedar v0.6.14
+	github.com/bbockelm/golang-htcondor v0.14.0
+	github.com/bbockelm/golang-htcondor/webapi v0.14.0
 	github.com/bbockelm/htcondordb v0.17.2
 	github.com/glebarez/sqlite v1.11.0
 	github.com/google/go-cmp v0.7.0
@@ -19,7 +19,7 @@ require (
 )
 
 require (
-	github.com/PelicanPlatform/classad/collections v0.29.0 // indirect
+	github.com/PelicanPlatform/classad/collections v0.29.6 // indirect
 	github.com/RoaringBitmap/roaring/v2 v2.19.0 // indirect
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
 	github.com/bbockelm/gosssd v0.0.1 // indirect
@@ -35,6 +35,7 @@ require (
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/glebarez/go-sqlite v1.23.0 // indirect
 	github.com/go-jose/go-jose/v3 v3.0.3 // indirect
+	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/gobuffalo/pop/v6 v6.1.1 // indirect
