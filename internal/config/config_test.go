@@ -294,3 +294,42 @@ func TestStateDBCanBeSplitFromTheRuleDB(t *testing.T) {
 		t.Errorf("state DB = %q/%q", cfg.StateDBAddress, cfg.StateDBTable)
 	}
 }
+
+// TestDBLagKnobs: how far behind htcondordb may be and still be read from.
+// Defaults are dbready's, so an unset configuration gets the intended leeway
+// rather than zero, which would mean "only a tailer at exactly EOF".
+func TestDBLagKnobs(t *testing.T) {
+	cfg, err := LoadFrom(newCondorConfig(t, nil))
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	if cfg.DBMaxLag != 0 || cfg.DBMaxLagBytes != 0 {
+		t.Errorf("unset knobs = %v / %d, want zero so dbready applies its defaults",
+			cfg.DBMaxLag, cfg.DBMaxLagBytes)
+	}
+
+	cfg, err = LoadFrom(newCondorConfig(t, map[string]string{
+		"PELICAN_MANAGER_DB_MAX_LAG":       "30s",
+		"PELICAN_MANAGER_DB_MAX_LAG_BYTES": "65536",
+	}))
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	if cfg.DBMaxLag != 30*time.Second || cfg.DBMaxLagBytes != 65536 {
+		t.Errorf("knobs = %v / %d, want 30s / 65536", cfg.DBMaxLag, cfg.DBMaxLagBytes)
+	}
+}
+
+// TestDBLagBytesRejectsNonsense: a byte count that does not parse is a
+// misconfiguration worth failing on, not silently treating as zero -- zero
+// means "no leeway", which is the opposite of what someone setting the knob
+// intended.
+func TestDBLagBytesRejectsNonsense(t *testing.T) {
+	for _, bad := range []string{"10kb", "-1", "lots"} {
+		if _, err := LoadFrom(newCondorConfig(t, map[string]string{
+			"PELICAN_MANAGER_DB_MAX_LAG_BYTES": bad,
+		})); err == nil {
+			t.Errorf("accepted %q as a byte count", bad)
+		}
+	}
+}
