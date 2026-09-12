@@ -99,6 +99,15 @@ type limitState struct {
 	rateWindow  time.Duration
 	hitCount    int64
 	jobsSkipped int64
+
+	// jobsAllowed and matchesIgnored are the schedd's own counters for this
+	// limit. jobsAllowed is the one that says whether the limit's expression
+	// ever matched a job at all -- without it, a limit that matches nothing and
+	// a limit that matches everything but never has to throttle are both
+	// completely silent, which is indistinguishable from the daemon not having
+	// installed anything.
+	jobsAllowed    int64
+	matchesIgnored int64
 }
 
 // newLimitManager creates a limit manager for the schedd
@@ -491,14 +500,28 @@ func (m *limitManager) refreshLimitStats(ctx context.Context) error {
 		if len(limits) > 0 {
 			limitInfo := limits[0]
 			// Update lastHit if the limit was actually hit (jobs were skipped)
+			// The first job a limit admits is the proof that its expression
+			// matches something. An operator checking whether a new rule works
+			// otherwise has to wait for it to actually throttle, which on a rule
+			// that is merely mis-targeted never happens.
+			if limitInfo.JobsAllowed > 0 && limit.jobsAllowed == 0 {
+				m.logger.Infof(htcondorlogging.DestinationGeneral,
+					"limit %s (%s) matched its first job (allowed=%d, expression %q)",
+					limit.uuid, key, limitInfo.JobsAllowed, limitInfo.Expression)
+			}
+			limit.jobsAllowed = limitInfo.JobsAllowed
+			limit.matchesIgnored = limitInfo.MatchesIgnored
+			limit.jobsSkipped = limitInfo.JobsSkipped
+
 			if limitInfo.LastIgnored > 0 {
 				newLastHit := time.Unix(limitInfo.LastIgnored, 0)
 				if newLastHit.After(limit.lastHit) {
 					limit.lastHit = newLastHit
 					limit.hitCount++
-					limit.jobsSkipped = limitInfo.JobsSkipped
-					m.logger.Infof(htcondorlogging.DestinationGeneral, "limit %s (%s) was hit at %v (total skipped=%d)",
-						limit.uuid, key, limit.lastHit, limit.jobsSkipped)
+					m.logger.Infof(htcondorlogging.DestinationGeneral,
+						"limit %s (%s) was hit at %v (allowed=%d skipped=%d ignored=%d users=%q)",
+						limit.uuid, key, limit.lastHit, limit.jobsAllowed, limit.jobsSkipped,
+						limit.matchesIgnored, limitInfo.IgnoredUsers)
 				}
 			}
 			m.activeLimits[key] = limit
@@ -506,6 +529,32 @@ func (m *limitManager) refreshLimitStats(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// InstalledStats summarizes what the schedd is actually holding for this daemon.
+//
+// It reports the limits as the schedd sees them, not as the daemon intends them:
+// "installable=2" says what was asked for, and a limit can be absent, expired or
+// matching nothing while that number stays reassuringly constant.
+type InstalledStats struct {
+	Installed int   // limits the schedd confirmed it holds
+	Allowed   int64 // jobs these limits let through -- zero means nothing matched
+	Skipped   int64 // jobs held back, i.e. the limits doing their job
+	Ignored   int64 // matches discarded because a limit was out of tokens
+}
+
+// installedStats reads the counters gathered by the last refresh.
+func (m *limitManager) installedStats() InstalledStats {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	st := InstalledStats{Installed: len(m.activeLimits)}
+	for _, limit := range m.activeLimits {
+		st.Allowed += limit.jobsAllowed
+		st.Skipped += limit.jobsSkipped
+		st.Ignored += limit.matchesIgnored
+	}
+	return st
 }
 
 // limitTag returns the static tag used for all limits managed by this daemon
@@ -675,18 +724,18 @@ func (m *limitManager) getLimitInfo(pair UserSitePair) (rateCount int, rateWindo
 }
 
 // getLimitStats returns statistics for a user+site pair limit
-func (m *limitManager) getLimitStats(pair UserSitePair) (hitCount int64, jobsSkipped int64, lastHit time.Time, exists bool) {
+func (m *limitManager) getLimitStats(pair UserSitePair) (hitCount int64, jobsSkipped int64, jobsAllowed int64, lastHit time.Time, exists bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if !m.cfg.enabled {
-		return 0, 0, time.Time{}, false
+		return 0, 0, 0, time.Time{}, false
 	}
 
 	if limit, ok := m.dynamicLimit(pair); ok {
-		return limit.hitCount, limit.jobsSkipped, limit.lastHit, true
+		return limit.hitCount, limit.jobsSkipped, limit.jobsAllowed, limit.lastHit, true
 	}
-	return 0, 0, time.Time{}, false
+	return 0, 0, 0, time.Time{}, false
 }
 
 // getLimitUUID returns the UUID of the active limit for a user+site pair
