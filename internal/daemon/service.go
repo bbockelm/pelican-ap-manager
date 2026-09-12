@@ -1007,8 +1007,23 @@ func (s *Service) buildSummaryAds() []map[string]any {
 // buildLimitAds emits limit ads for each observed (user,site) pair.
 func (s *Service) buildLimitAds() []map[string]any {
 	pairs := s.gatherUserSitePairs()
+
+	// Every limit installed in the schedd gets an ad, whether or not any
+	// transfers have been observed for it.
+	//
+	// Pairs come from observed transfer buckets, which is right for the control
+	// loop -- it reasons about traffic it has seen. It is wrong for the
+	// operator's static rules: those are installed in the schedd the moment the
+	// daemon starts, and a rule for a user who has not transferred anything yet
+	// had no bucket, so no pair, so no ad. The limit was in force and invisible.
+	//
+	// A static rule also need not be (user, site)-shaped at all -- user=alice
+	// with no site is the common case -- so its ad is keyed by the rule rather
+	// than by a pair it may not have.
+	staticAds := s.buildStaticLimitAds(pairs)
+
 	if len(pairs) == 0 {
-		return nil
+		return staticAds
 	}
 
 	ads := make([]map[string]any, 0, len(pairs))
@@ -1254,6 +1269,8 @@ func (s *Service) buildLimitAds() []map[string]any {
 
 		ads = append(ads, ad)
 	}
+
+	ads = append(ads, staticAds...)
 
 	return ads
 }
@@ -1941,4 +1958,88 @@ func (s *Service) toHistoryEntries(transfers []stats.ProcessedTransfer) []state.
 		})
 	}
 	return out
+}
+
+// buildStaticLimitAds publishes one PelicanLimit ad per static limit installed
+// in the schedd.
+//
+// These carry Origin = "static" and are named after the rule, so a reader can
+// tell the operator's own policy from the control loop's conclusions. Rules
+// whose (user, site) pair already has an observation ad are skipped: that ad
+// describes the same limit and carries the traffic alongside it, and publishing
+// both would double-count the pair in anything that sums over the ads.
+//
+// covered is the set of pairs that will get an observation ad in this cycle.
+func (s *Service) buildStaticLimitAds(covered map[UserSitePair]struct{}) []map[string]any {
+	if s.limitMgr == nil {
+		return nil
+	}
+	installed := s.limitMgr.installedLimits()
+	if len(installed) == 0 {
+		return nil
+	}
+
+	now := time.Now()
+	ads := make([]map[string]any, 0, len(installed))
+	for _, lim := range installed {
+		if lim.rule.Origin != ratelimit.OriginStatic {
+			continue // the control loop's own limits are reported on the pair ad
+		}
+		pair := UserSitePair{User: lim.rule.User, Site: lim.rule.Site}
+		if pair.User != "" && pair.Site != "" {
+			if _, ok := covered[pair]; ok {
+				continue
+			}
+		}
+
+		name := s.staticLimitAdName(lim.rule.Name)
+		ad := map[string]any{
+			"Name":                 name,
+			"MyType":               "PelicanLimit",
+			"UpdateSequenceNumber": s.getNextSequence(name),
+			"DaemonStartTime":      s.startTime.Unix(),
+			"ScheddName":           s.scheddName,
+			"LastHeardFrom":        now.Unix(),
+
+			// What this limit is, and where it came from.
+			"Origin":   string(lim.rule.Origin),
+			"RuleName": lim.rule.Name,
+			"User":     lim.rule.User,
+			"Site":     lim.rule.Site,
+
+			// What the schedd is enforcing.
+			"StaticRateLimit":   lim.rateCount,
+			"StaticRateWindow":  int(lim.rateWindow.Seconds()),
+			"StaticLimitActive": true,
+			"StaticLimitUUID":   lim.uuid,
+
+			// What it has done.
+			"StaticLimitHitCount":    lim.hitCount,
+			"StaticLimitJobsSkipped": lim.jobsSkipped,
+		}
+		if !lim.lastHit.IsZero() {
+			ad["StaticLimitLastHit"] = lim.lastHit.Unix()
+		}
+		if len(lim.rule.Sources) > 0 {
+			ad["RuleSources"] = strings.Join(lim.rule.Sources, ",")
+		}
+		if lim.rule.Expression != "" {
+			ad["RuleExpression"] = lim.rule.Expression
+		}
+		if lim.rule.Note != "" {
+			ad["RuleNote"] = lim.rule.Note
+		}
+		ads = append(ads, ad)
+	}
+	return ads
+}
+
+// staticLimitAdName names a static rule's ad. Keyed by rule name rather than by
+// (user, site), because a static rule need not have both -- or either.
+func (s *Service) staticLimitAdName(rule string) string {
+	schedd := sanitizeLabel(s.scheddName)
+	if schedd == "" {
+		schedd = "unknown"
+	}
+	return fmt.Sprintf("%s_limit_static_%s", schedd, sanitizeLabel(rule))
 }

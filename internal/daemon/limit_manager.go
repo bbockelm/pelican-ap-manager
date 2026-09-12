@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
 	"sync"
 	"time"
 
@@ -708,4 +709,45 @@ func (m *limitManager) dynamicLimit(pair UserSitePair) (*limitState, bool) {
 	key := ratelimit.Rule{Name: dynamicRuleName(pair), Origin: ratelimit.OriginDynamic}.LimitName()
 	limit, ok := m.activeLimits[key]
 	return limit, ok
+}
+
+// installedLimit is one limit the schedd is holding on this daemon's behalf,
+// flattened for reporting.
+type installedLimit struct {
+	rule        ratelimit.Rule
+	uuid        string
+	rateCount   int
+	rateWindow  time.Duration
+	hitCount    int64
+	jobsSkipped int64
+	lastHit     time.Time
+}
+
+// installedLimits returns every limit this daemon currently has in the schedd.
+//
+// getLimitInfo and friends answer only for the control loop's own (user, site)
+// limits, because that is all the per-pair ads needed. A static rule -- the
+// operator's own policy, and the thing most likely to be asked about -- was
+// therefore installed in the schedd and invisible in what the daemon published.
+func (m *limitManager) installedLimits() []installedLimit {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if !m.cfg.enabled {
+		return nil
+	}
+	out := make([]installedLimit, 0, len(m.activeLimits))
+	for _, limit := range m.activeLimits {
+		out = append(out, installedLimit{
+			rule:        limit.rule,
+			uuid:        limit.uuid,
+			rateCount:   limit.rateCount,
+			rateWindow:  limit.rateWindow,
+			hitCount:    limit.hitCount,
+			jobsSkipped: limit.jobsSkipped,
+			lastHit:     limit.lastHit,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].rule.Name < out[j].rule.Name })
+	return out
 }
