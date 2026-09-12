@@ -3,9 +3,9 @@ module github.com/bbockelm/pelican-ap-manager
 go 1.25.7
 
 require (
-	github.com/PelicanPlatform/classad v0.29.6
-	github.com/PelicanPlatform/classad/db v0.29.6
-	github.com/PelicanPlatform/classad/dbrpc v0.29.6
+	github.com/PelicanPlatform/classad v0.29.9
+	github.com/PelicanPlatform/classad/db v0.29.10
+	github.com/PelicanPlatform/classad/dbrpc v0.29.9
 	github.com/bbockelm/cedar v0.6.14
 	github.com/bbockelm/golang-htcondor v0.14.1
 	github.com/bbockelm/golang-htcondor/webapi v0.14.1
@@ -17,7 +17,7 @@ require (
 	// raft-boltdb, classad/changefeed -- because nothing in this module
 	// imports them. The build then fails with "missing go.sum entry".
 	// A tools.go cannot pin it either: cmd/htcondordb is package main.
-	github.com/bbockelm/htcondordb v0.17.2
+	github.com/bbockelm/htcondordb v0.18.12
 	github.com/glebarez/sqlite v1.11.0
 	github.com/google/go-cmp v0.7.0
 	github.com/jellydator/ttlcache/v3 v3.3.0
@@ -27,7 +27,7 @@ require (
 )
 
 require (
-	github.com/PelicanPlatform/classad/collections v0.29.6 // indirect
+	github.com/PelicanPlatform/classad/collections v0.29.9 // indirect
 	github.com/RoaringBitmap/roaring/v2 v2.19.0 // indirect
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
 	github.com/bbockelm/gosssd v0.0.1 // indirect
