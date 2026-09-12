@@ -690,3 +690,94 @@ func TestNoCheckerReadsUnconditionally(t *testing.T) {
 		t.Errorf("%d mirror queries with no readiness checker, want 1", queried)
 	}
 }
+
+// TestLiveQueueIsServedFromTheMirrorWhenCurrent: the live queue is the third
+// source, and the one that decides whether anything besides scheddsync parses
+// job_queue.log on the access point.
+func TestLiveQueueIsServedFromTheMirrorWhenCurrent(t *testing.T) {
+	stub := &stubClient{}
+	m := newTestMirror(t, stub)
+	m.ready = &fakeReadiness{ready: true}
+
+	var askedTable, askedConstraint string
+	m.query = func(_ context.Context, table, constraint string) ([]string, error) {
+		askedTable, askedConstraint = table, constraint
+		ad := classad.New()
+		ad.InsertAttr("ClusterId", 7)
+		ad.InsertAttr("ProcId", 0)
+		return []string{ad.String()}, nil
+	}
+
+	ads, err := m.QueryJobs(context.Background(), "true", []string{"ClusterId"})
+	if err != nil {
+		t.Fatalf("QueryJobs: %v", err)
+	}
+	if len(ads) != 1 {
+		t.Fatalf("%d ads, want 1", len(ads))
+	}
+	if got, _ := ads[0].EvaluateAttrInt("ClusterId"); got != 7 {
+		t.Errorf("ClusterId = %d, want 7", got)
+	}
+	if askedTable != "jobs" {
+		t.Errorf("read the live queue from %q, want the jobs table", askedTable)
+	}
+	if askedConstraint != "true" {
+		t.Errorf("constraint = %q, want it passed through", askedConstraint)
+	}
+	if stub.queryJobsCalls != 0 {
+		t.Errorf("also asked the schedd (%d calls); the point is not to", stub.queryJobsCalls)
+	}
+}
+
+// TestLiveQueueFallsBackWhenBehindOrBroken: being behind sends it to the schedd
+// without a query, and a query that fails sends it there too.
+func TestLiveQueueFallsBackWhenBehindOrBroken(t *testing.T) {
+	stub := &stubClient{}
+	behind := newTestMirror(t, stub)
+	behind.ready = &fakeReadiness{ready: false, reason: "queue is 900s behind"}
+	var queried int
+	behind.query = func(context.Context, string, string) ([]string, error) { queried++; return nil, nil }
+
+	if _, err := behind.QueryJobs(context.Background(), "true", nil); err != nil {
+		t.Fatalf("QueryJobs: %v", err)
+	}
+	if queried != 0 || stub.queryJobsCalls != 1 {
+		t.Errorf("behind: %d mirror queries, %d schedd calls; want 0 and 1", queried, stub.queryJobsCalls)
+	}
+
+	broken := newTestMirror(t, &stubClient{})
+	broken.ready = &fakeReadiness{ready: true}
+	broken.query = func(context.Context, string, string) ([]string, error) {
+		return nil, fmt.Errorf("archive unavailable")
+	}
+	if _, err := broken.QueryJobs(context.Background(), "true", nil); err != nil {
+		t.Fatalf("QueryJobs: %v", err)
+	}
+	if broken.schedd.(*stubClient).queryJobsCalls != 1 {
+		t.Error("a failed mirror query did not fall back to the schedd")
+	}
+}
+
+// TestCanServeJobsGatesTheLogReader is what the job mirror asks before deciding
+// whether to parse job_queue.log itself. Saying yes when the mirror is behind
+// would leave the daemon with stale queue state and no local read to correct it.
+func TestCanServeJobsGatesTheLogReader(t *testing.T) {
+	m := newTestMirror(t, &stubClient{})
+
+	m.ready = &fakeReadiness{ready: true}
+	if !m.CanServeJobs(context.Background()) {
+		t.Error("CanServeJobs false with a current mirror")
+	}
+
+	m.ready = &fakeReadiness{ready: false, reason: "behind"}
+	if m.CanServeJobs(context.Background()) {
+		t.Error("CanServeJobs true with a mirror that is behind")
+	}
+
+	// And without a converter there is no usable mirror client at all.
+	m.ready = &fakeReadiness{ready: true}
+	m.convertJob = nil
+	if m.CanServeJobs(context.Background()) {
+		t.Error("CanServeJobs true with no ad converter")
+	}
+}

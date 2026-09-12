@@ -36,6 +36,12 @@ import (
 const (
 	DefaultJobEpochTable = "history"
 	DefaultTransferTable = "epoch_history"
+
+	// DefaultQueueTable holds the live queue: scheddsync tails job_queue.log
+	// into it, which is the same file pelican-man's own job mirror reads. Going
+	// through the database means one process on the access point parses that
+	// log instead of two.
+	DefaultQueueTable = "jobs"
 )
 
 // transferAdTypes are the EpochAdType values that mark a transfer record. This
@@ -65,6 +71,7 @@ type mirrorClient struct {
 	addr          string
 	jobTable      string
 	transferTable string
+	queueTable    string
 	cfg           *config.Config
 
 	// ready decides whether the mirror is current enough to read. Nil means
@@ -115,6 +122,9 @@ type MirrorConfig struct {
 	// which is where the transfer records are. Defaults to
 	// DefaultTransferTable.
 	TransferTable string
+	// QueueTable names the table holding the mirrored live queue. Defaults to
+	// DefaultQueueTable.
+	QueueTable string
 	// Config supplies the client security policy, as for any HTCondor client.
 	Config *config.Config
 	// Ready gates reads on how far behind the mirror is. Optional: without it
@@ -141,6 +151,7 @@ func NewMirrorClient(direct CondorClient, cfg MirrorConfig) (CondorClient, error
 		addr:          cfg.Address,
 		jobTable:      orDefault(cfg.JobTable, DefaultJobEpochTable),
 		transferTable: orDefault(cfg.TransferTable, DefaultTransferTable),
+		queueTable:    orDefault(cfg.QueueTable, DefaultQueueTable),
 		cfg:           cfg.Config,
 		ready:         cfg.Ready,
 		lastFallback:  map[string]string{},
@@ -239,8 +250,60 @@ func (m *mirrorClient) decodeTransferRows(rows []string, since state.EpochID) ([
 func (m *mirrorClient) AdvertiseClassAds(payload []map[string]any) error {
 	return m.schedd.AdvertiseClassAds(payload)
 }
+
+// QueryJobs reads the live queue from the mirror when it is current, else from
+// the schedd.
+//
+// The mirrored table is scheddsync's tail of the same job_queue.log the daemon's
+// own job mirror reads, so serving this from the database is what lets only one
+// process on the access point parse that log.
 func (m *mirrorClient) QueryJobs(ctx context.Context, constraint string, projection []string) ([]*classad.ClassAd, error) {
+	if !m.sourceReady(ctx, "jobs") {
+		return m.schedd.QueryJobs(ctx, constraint, projection)
+	}
+
+	ads, err := m.queryJobsFromMirror(ctx, constraint)
+	if err == nil {
+		m.clearFallback("queue")
+		return ads, nil
+	}
+	m.reportFallback("queue", err)
 	return m.schedd.QueryJobs(ctx, constraint, projection)
+}
+
+// CanServeJobs reports whether the live queue would be read from the mirror
+// right now. The job mirror asks before deciding whether to parse
+// job_queue.log itself.
+func (m *mirrorClient) CanServeJobs(ctx context.Context) bool {
+	return m.convertJob != nil && m.sourceReady(ctx, "jobs")
+}
+
+func (m *mirrorClient) queryJobsFromMirror(ctx context.Context, constraint string) ([]*classad.ClassAd, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if strings.TrimSpace(constraint) == "" {
+		constraint = "true"
+	}
+	rows, err := m.query(ctx, m.queueTable, constraint)
+	if err != nil {
+		return nil, err
+	}
+
+	// Projection is deliberately not pushed down. The caller's projection is an
+	// optimization for the schedd's sake -- fewer attributes over the wire from
+	// a process that is also running jobs -- and the mirror is not under that
+	// pressure. Asking for whole ads keeps this read insensitive to a caller
+	// that forgets an attribute it later reads.
+	ads := make([]*classad.ClassAd, 0, len(rows))
+	for _, row := range rows {
+		ad, perr := classad.Parse(row)
+		if perr != nil {
+			return nil, fmt.Errorf("parsing a mirrored job ad: %w", perr)
+		}
+		ads = append(ads, ad)
+	}
+	return ads, nil
 }
 func (m *mirrorClient) LocateSchedd(ctx context.Context) (*htcondor.Schedd, error) {
 	return m.schedd.LocateSchedd(ctx)

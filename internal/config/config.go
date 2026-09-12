@@ -68,6 +68,8 @@ type Config struct {
 	// and so different archive tables.
 	EpochDBJobTable      string
 	EpochDBTransferTable string
+	// EpochDBQueueTable holds the mirrored live queue (job_queue.log).
+	EpochDBQueueTable string
 
 	// StateDBAddress, when set, keeps the daemon's working state -- the epoch
 	// cursors, transfer summaries and per-pair control conclusions -- in an
@@ -148,6 +150,7 @@ const (
 	macroEpochDBAddress       = "PELICAN_MANAGER_EPOCH_DB_ADDRESS"
 	macroEpochDBJobTable      = "PELICAN_MANAGER_EPOCH_DB_JOB_TABLE"
 	macroEpochDBTransferTable = "PELICAN_MANAGER_EPOCH_DB_TRANSFER_TABLE"
+	macroEpochDBQueueTable    = "PELICAN_MANAGER_EPOCH_DB_QUEUE_TABLE"
 	macroStateDBAddress       = "PELICAN_MANAGER_STATE_DB_ADDRESS"
 	macroStateDBTable         = "PELICAN_MANAGER_STATE_DB_TABLE"
 	macroDBMaxLag             = "PELICAN_MANAGER_DB_MAX_LAG"
@@ -315,6 +318,9 @@ func LoadFrom(condorCfg *condorconfig.Config) (*Config, error) {
 	}
 	if v := firstStringMacro(condorCfg, macroEpochDBTransferTable); v != "" {
 		cfg.EpochDBTransferTable = v
+	}
+	if v := firstStringMacro(condorCfg, macroEpochDBQueueTable); v != "" {
+		cfg.EpochDBQueueTable = v
 	}
 	if v := firstStringMacro(condorCfg, macroStateDBAddress); v != "" {
 		cfg.StateDBAddress = v

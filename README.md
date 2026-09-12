@@ -281,6 +281,8 @@ There is no separate transfer-history file. `condor_history -transfer-history` r
 
 **And it checks before it reads.** htcondordb advertises how far behind each of its tailers is; the daemon reads a source from the database only while that source is caught up — within `PELICAN_MANAGER_DB_MAX_LAG` (10s) and `PELICAN_MANAGER_DB_MAX_LAG_BYTES` (10 KB), and with no reported durability gap. The two leeways exist because a tailer following a busy `job_queue.log` is a few kilobytes behind most of the time, and waiting for exactly EOF would mean almost never reading.
 
+The live queue moves too. `scheddsync` is already tailing `job_queue.log` into the database, so while that table is current the manager reads it from there and does **not** parse the log itself — one process on the access point reads that file rather than two, and the one that does it is the one built for it, with a durable cursor and gap detection. When the mirror falls behind, the local read comes back.
+
 Each source is judged on its own, so a gap in the epoch history does not cost you the completed-job reads. A change of source is logged once, with the reason — not once per poll:
 
 ```
@@ -358,6 +360,7 @@ All settings come from HTCondor configuration macros, resolved the same way `con
 | `PELICAN_MANAGER_EPOCH_DB_ADDRESS` | `PELICAN_MANAGER_RULE_DB_ADDRESS` | Read history from an htcondordb mirror instead of the schedd. `auto` for a local htcondordb, an address-file path, or `host:port` for a remote one. Falls back to the schedd on any error. |
 | `PELICAN_MANAGER_EPOCH_DB_JOB_TABLE` | `history` | Archive table `scheddsync` mirrors the schedd's `HISTORY` file to. |
 | `PELICAN_MANAGER_EPOCH_DB_TRANSFER_TABLE` | `epoch_history` | Archive table `scheddsync` mirrors `JOB_EPOCH_HISTORY` to; the transfer records are here. |
+| `PELICAN_MANAGER_EPOCH_DB_QUEUE_TABLE` | `jobs` | Table `scheddsync` mirrors `job_queue.log` to; the live queue is read from here when it is current. |
 | `PELICAN_MANAGER_DB_MAX_LAG` | `10s` | How far behind htcondordb's tailer may be while the daemon still reads from it. |
 | `PELICAN_MANAGER_DB_MAX_LAG_BYTES` | `10240` | Unconsumed tail, in bytes, that still counts as caught up. |
 | `PELICAN_MANAGER_STATE_DB_ADDRESS` | `PELICAN_MANAGER_RULE_DB_ADDRESS` | Keep the daemon's working state in htcondordb rather than the `SPOOL` JSON file. A load failure is fatal. |
