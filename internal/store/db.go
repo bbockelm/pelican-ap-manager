@@ -259,6 +259,11 @@ const (
 // from the REPL.
 func adFromRule(r ratelimit.Rule) *classad.ClassAd {
 	ad := classad.New()
+	// Key as well as RuleName: htcondordb's REPL expects a row's primary key in
+	// the Key attribute, and the rule name IS the storage key. Without it
+	// SELECT * shows Key undefined, and hand-editing a rule -- the supported way
+	// to manage them -- is harder than it needs to be.
+	ad.InsertAttrString("Key", r.Name)
 	ad.InsertAttrString(attrName, r.Name)
 	ad.InsertAttrString(attrOrigin, string(r.Origin))
 	ad.InsertAttrString(attrUser, r.User)
