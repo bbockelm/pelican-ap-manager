@@ -684,11 +684,20 @@ func (s *Service) updateScheddLimits() {
 	s.persistDynamicRules(ctx, dynamic)
 
 	installable := mode.Installable(rules, time.Now())
-	s.Printf("rate rules: mode=%s stored+derived=%d installable=%d", mode, len(rules), len(installable))
 
 	if err := s.limitMgr.reconcile(ctx, installable); err != nil {
 		s.Printf("limit update error: %v", err)
 	}
+
+	// Logged after reconcile, and reporting what the schedd holds rather than
+	// only what was asked for. "installable=2" on its own is an intention: it
+	// reads the same whether the limits are in force, were rejected, or match no
+	// job in the queue. installed/allowed/skipped are the schedd's own counters,
+	// so allowed=0 says the expressions are matching nothing -- the failure that
+	// otherwise looks exactly like everything working.
+	st := s.limitMgr.installedStats()
+	s.Printf("rate rules: mode=%s stored+derived=%d installable=%d installed=%d allowed=%d skipped=%d ignored=%d",
+		mode, len(rules), len(installable), st.Installed, st.Allowed, st.Skipped, st.Ignored)
 }
 
 // storedRules reads the persisted rule set. A store that is unreachable is
@@ -1257,10 +1266,14 @@ func (s *Service) buildLimitAds() []map[string]any {
 			}
 
 			// Add limit statistics if available
-			hitCount, jobsSkipped, lastHit, exists := s.limitMgr.getLimitStats(pair)
+			hitCount, jobsSkipped, jobsAllowed, lastHit, exists := s.limitMgr.getLimitStats(pair)
 			if exists {
 				ad["ControlLimitHitCount"] = hitCount
 				ad["ControlLimitJobsSkipped"] = jobsSkipped
+				// Published alongside the skip count because zero skips alone is
+				// ambiguous: it means either "never needed to throttle" or "never
+				// matched a job", and only this attribute separates them.
+				ad["ControlLimitJobsAllowed"] = jobsAllowed
 				if !lastHit.IsZero() {
 					ad["ControlLimitLastHit"] = lastHit.Unix()
 				}
