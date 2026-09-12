@@ -9,6 +9,14 @@
 // opinion about what "caught up" means, which is how two components end up
 // disagreeing about the same mirror.
 //
+// Health reaches this daemon two ways. htcondordb advertises it to the
+// collector, which is how a pool-wide consumer finds a database and judges it.
+// But an access point commonly points pelican-man at a database by address file
+// with no collector in the picture, and then there is no advertisement to read.
+// For that case htcondordb answers the same ClassAd over its command port, so
+// the gate works from either source and reaches the same decision from the same
+// parser.
+//
 // What this adds is the pelican-man-specific part: which source backs which
 // read, a per-source fallback so a gap in one table does not cost the others,
 // and reporting that says why a read went to the schedd without repeating
@@ -22,9 +30,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/PelicanPlatform/classad/classad"
+
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
+	"github.com/bbockelm/htcondordb/dbstatus"
+
+	"github.com/bbockelm/pelican-ap-manager/internal/dbaddr"
 )
 
 // Source names a thing pelican-man reads, and therefore a sync source it
@@ -53,25 +66,59 @@ const (
 	DefaultMaxLagBytes = 10 << 10
 )
 
+// DefaultStatusTTL bounds how often the command-port path asks the database for
+// its health. The gate is consulted once per source per poll, so without a cache
+// a one-second poll would open three connections a second to ask a question
+// whose answer moves on the order of the tolerance. Well under DefaultMaxLag, so
+// caching cannot by itself let a stale mirror through.
+const DefaultStatusTTL = 2 * time.Second
+
 // Checker answers whether a source is current enough to read.
 //
 // The zero value, and a nil Checker, report every source as not ready with a
-// reason saying so -- a daemon with no collector configured cannot know, and
-// guessing yes would send reads at a mirror that may be hours behind.
+// reason saying so -- a checker with no way to reach the database cannot know,
+// and guessing yes would send reads at a mirror that may be hours behind.
 type Checker struct {
+	// locator reads the health htcondordb advertises to the collector. Nil when
+	// no collector is configured.
 	locator *dbmirror.Locator
 
-	mu   sync.Mutex
-	last map[string]string
+	// dbAddr asks the database directly, for deployments with no collector. It
+	// is the same address the mirror client reads from, so a gate exists
+	// wherever a mirror read is possible.
+	dbAddr string
+	cfg    *config.Config
+	ttl    time.Duration
+
+	// queryStatus is dbstatus.Query and discover is the locator's, both
+	// indirected so a test can drive either source without a pool.
+	queryStatus func(context.Context, *config.Config, string) (*classad.ClassAd, error)
+	discover    func(context.Context) (*dbmirror.Info, error)
+
+	mu     sync.Mutex
+	last   map[string]string
+	info   *dbmirror.Info
+	infoAt time.Time
+	infoRr error
 }
 
 // Options configures a Checker.
 type Options struct {
 	// Collector is the pool collector, where htcondordb advertises its sync
-	// health. Required: without it there is nothing to read the health from.
+	// health. Optional: with no collector the health is read from DBAddress
+	// instead.
 	Collector *htcondor.Collector
-	// Config supplies the security policy for the collector query.
+	// DBAddress is the htcondordb command address (or address file). Used when
+	// no collector is configured, which is the address-file deployment an access
+	// point typically runs. Optional, but with neither this nor Collector the
+	// checker can learn nothing and declines every source.
+	DBAddress string
+	// Config supplies the security policy for the collector query and the
+	// command-port request.
 	Config *config.Config
+
+	// StatusTTL caches the command-port answer. Zero means the package default.
+	StatusTTL time.Duration
 
 	// MaxLag and MaxLagBytes are the leeway on caught-up. Zero means the
 	// package default.
@@ -106,11 +153,78 @@ func New(opts Options) *Checker {
 	dbmirror.EpochToleranceSecs = secs
 	dbmirror.CaughtUpLagBytes = maxBytes
 
-	c := &Checker{last: map[string]string{}}
+	ttl := opts.StatusTTL
+	if ttl <= 0 {
+		ttl = DefaultStatusTTL
+	}
+
+	c := &Checker{last: map[string]string{}, cfg: opts.Config, ttl: ttl, queryStatus: dbstatus.Query}
 	if opts.Collector != nil && opts.Config != nil {
 		c.locator = dbmirror.NewLocator(opts.Collector, opts.Config)
+		c.discover = c.locator.Discover
+	}
+	if opts.Config != nil {
+		c.dbAddr = strings.TrimSpace(opts.DBAddress)
 	}
 	return c
+}
+
+// lookup returns the database's current sync health.
+//
+// The collector is tried first: its advertisement is already cached by the
+// locator, and it is the same ad every other consumer in the pool judges this
+// database by. When that turns up nothing the database is asked directly.
+//
+// The fallback is on the collector FAILING, not on one being unconfigured,
+// because COLLECTOR_HOST has a default -- an access point that runs no collector
+// still names one. Treating "configured" as "available" would leave the command
+// port unreachable in exactly the deployment it was added for.
+//
+// Falling back rather than treating a missing collector as "assume current" is
+// the point: an ungated read is the failure this package exists to prevent, and
+// it fails silently, because a mirror that is hours behind still answers.
+func (c *Checker) lookup(ctx context.Context) (*dbmirror.Info, error) {
+	var advertised error
+	if c.discover != nil {
+		info, err := c.discover(ctx)
+		if err == nil {
+			return info, nil
+		}
+		advertised = err
+	}
+	if c.dbAddr == "" {
+		if advertised != nil {
+			return nil, advertised
+		}
+		return nil, fmt.Errorf("no collector and no database address, so htcondordb's sync health cannot be read")
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.info != nil || c.infoRr != nil {
+		if time.Since(c.infoAt) < c.ttl {
+			return c.info, c.infoRr
+		}
+	}
+
+	// Resolved per request, like every other dial at this database: the
+	// configured value is commonly an address file, and the address inside it
+	// changes when the daemon restarts.
+	addr, rerr := dbaddr.Resolve(c.dbAddr, c.cfg)
+	if rerr != nil {
+		c.info, c.infoRr = nil, rerr
+		c.infoAt = time.Now()
+		return nil, rerr
+	}
+
+	ad, err := c.queryStatus(ctx, c.cfg, addr)
+	c.infoAt = time.Now()
+	if err != nil {
+		c.info, c.infoRr = nil, err
+		return nil, err
+	}
+	c.info, c.infoRr = dbmirror.ParseAd(ad), nil
+	return c.info, nil
 }
 
 // Ready reports whether src may be read from the mirror, and why not when it
@@ -120,13 +234,13 @@ func New(opts Options) *Checker {
 // Discovery is cached by the locator, so calling this per poll costs a collector
 // query only when the cached advertisement has aged out.
 func (c *Checker) Ready(ctx context.Context, src string) (bool, string) {
-	if c == nil || c.locator == nil {
-		return false, "no collector configured, so htcondordb's sync health cannot be read"
+	if c == nil || (c.discover == nil && c.dbAddr == "") {
+		return false, "htcondordb's sync health cannot be read: no collector and no database address"
 	}
 
-	info, err := c.locator.Discover(ctx)
+	info, err := c.lookup(ctx)
 	if err != nil {
-		return false, fmt.Sprintf("cannot find htcondordb in the collector: %v", err)
+		return false, fmt.Sprintf("cannot read htcondordb's sync health: %v", err)
 	}
 
 	var d dbmirror.Decision

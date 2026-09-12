@@ -323,19 +323,22 @@ func buildService(cfg *config.Config, log *htcondorlogging.Logger, oneshot bool)
 	// did before.
 	if cfg.EpochDBAddress != "" {
 		// Reads are gated on htcondordb's own account of how far behind its
-		// tailers are, which it advertises to the collector. Without a collector
-		// there is nothing to read that from, and the mirror is used
-		// unconditionally -- which is what it did before, and still better than
-		// not using it at all.
-		var gate condor.ReadinessChecker
+		// tailers are: from the collector where there is one, and otherwise
+		// straight from the database over its command port. The gate is built
+		// unconditionally, because the address that makes a mirror read possible
+		// is also enough to ask the database how current it is -- so there is no
+		// configuration in which pelican-man reads a mirror it cannot judge.
+		var collector *htcondor.Collector
 		if cfg.CollectorHost != "" {
-			gate = dbready.New(dbready.Options{
-				Collector:   htcondor.NewCollector(cfg.CollectorHost),
-				Config:      cfg.HTCondorConfig(),
-				MaxLag:      cfg.DBMaxLag,
-				MaxLagBytes: cfg.DBMaxLagBytes,
-			})
+			collector = htcondor.NewCollector(cfg.CollectorHost)
 		}
+		gate := dbready.New(dbready.Options{
+			Collector:   collector,
+			DBAddress:   cfg.EpochDBAddress,
+			Config:      cfg.HTCondorConfig(),
+			MaxLag:      cfg.DBMaxLag,
+			MaxLagBytes: cfg.DBMaxLagBytes,
+		})
 
 		mcfg := condor.MirrorConfig{
 			Address:       cfg.EpochDBAddress,
