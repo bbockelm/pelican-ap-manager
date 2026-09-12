@@ -519,3 +519,117 @@ func (noAdsClient) QueryJobs(context.Context, string, []string) ([]*classad.Clas
 func (noAdsClient) LocateSchedd(context.Context) (*htcondor.Schedd, error) {
 	return nil, fmt.Errorf("no schedd in this pool")
 }
+
+// TestStaticLimitsArePublished is the regression test for a limit that was
+// enforced but invisible.
+//
+// PelicanLimit ads were built from observed transfer buckets, so a static rule
+// produced an ad only once someone had already transferred something as that
+// (user, site) -- and never at all for the common shape, a rule with a user and
+// no site. The operator's own policy was the part missing from what the daemon
+// published about limits.
+func TestStaticLimitsArePublished(t *testing.T) {
+	f := newFakeSchedd()
+	m := newTestLimitManager(t, f)
+	svc := &Service{limitMgr: m, scheddName: "ap2101", startTime: time.Now(), adSequence: map[string]int{}}
+
+	// The shape that was invisible: a user with no site, and no traffic seen.
+	userOnly := ratelimit.Rule{
+		Name: "bbockelm", Origin: ratelimit.OriginStatic,
+		User: "bbockelm", RateCount: 1, RateWindow: time.Minute,
+		Note: "ticket 4471",
+	}
+	if err := m.reconcile(context.Background(), []ratelimit.Rule{userOnly}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	ads := svc.buildStaticLimitAds(nil)
+	if len(ads) != 1 {
+		t.Fatalf("%d static limit ads, want 1", len(ads))
+	}
+	ad := ads[0]
+
+	if got := ad["MyType"]; got != "PelicanLimit" {
+		t.Errorf("MyType = %v", got)
+	}
+	if got := ad["Origin"]; got != string(ratelimit.OriginStatic) {
+		t.Errorf("Origin = %v, want static -- a reader cannot otherwise tell operator policy from the control loop's own limits", got)
+	}
+	if got := ad["RuleName"]; got != "bbockelm" {
+		t.Errorf("RuleName = %v", got)
+	}
+	if got := ad["User"]; got != "bbockelm" {
+		t.Errorf("User = %v", got)
+	}
+	if got := ad["StaticRateLimit"]; got != 1 {
+		t.Errorf("StaticRateLimit = %v, want 1", got)
+	}
+	if got := ad["StaticRateWindow"]; got != 60 {
+		t.Errorf("StaticRateWindow = %v, want 60", got)
+	}
+	if got := ad["RuleNote"]; got != "ticket 4471" {
+		t.Errorf("RuleNote = %v", got)
+	}
+}
+
+// TestStaticAndDynamicLimitsAreDistinguishable: both kinds are PelicanLimit ads,
+// so Origin has to separate them or a reader cannot tell what it is looking at.
+func TestStaticAndDynamicLimitsAreDistinguishable(t *testing.T) {
+	f := newFakeSchedd()
+	m := newTestLimitManager(t, f)
+	svc := &Service{limitMgr: m, scheddName: "ap2101", startTime: time.Now(), adSequence: map[string]int{}}
+
+	rules := []ratelimit.Rule{
+		{Name: "operator_cap", Origin: ratelimit.OriginStatic, User: "alice", RateCount: 5, RateWindow: time.Minute},
+		{Name: dynamicRuleName(UserSitePair{User: "bob", Site: "PSU"}), Origin: ratelimit.OriginDynamic,
+			User: "bob", Site: "PSU", RateCount: 9, RateWindow: time.Minute},
+	}
+	if err := m.reconcile(context.Background(), rules); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	ads := svc.buildStaticLimitAds(nil)
+	if len(ads) != 1 {
+		t.Fatalf("%d ads, want only the static one (the dynamic limit is reported on its pair ad)", len(ads))
+	}
+	if got := ads[0]["RuleName"]; got != "operator_cap" {
+		t.Errorf("published %v, want the static rule", got)
+	}
+}
+
+// TestStaticLimitDoesNotDuplicateItsPairAd: when a static rule names both a user
+// and a site that already has an observation ad, that ad describes the same
+// limit alongside the traffic. Publishing a second one would double-count the
+// pair in anything summing over the ads.
+func TestStaticLimitDoesNotDuplicateItsPairAd(t *testing.T) {
+	f := newFakeSchedd()
+	m := newTestLimitManager(t, f)
+	svc := &Service{limitMgr: m, scheddName: "ap2101", startTime: time.Now(), adSequence: map[string]int{}}
+
+	rule := ratelimit.Rule{
+		Name: "ligo_ucsd", Origin: ratelimit.OriginStatic,
+		User: "ligo", Site: "UCSD", RateCount: 20, RateWindow: time.Minute,
+	}
+	if err := m.reconcile(context.Background(), []ratelimit.Rule{rule}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	covered := map[UserSitePair]struct{}{{User: "ligo", Site: "UCSD"}: {}}
+	if ads := svc.buildStaticLimitAds(covered); len(ads) != 0 {
+		t.Errorf("%d ads for a pair that already has an observation ad, want 0", len(ads))
+	}
+
+	// But an uncovered pair still gets one.
+	if ads := svc.buildStaticLimitAds(nil); len(ads) != 1 {
+		t.Errorf("%d ads for an uncovered pair, want 1", len(ads))
+	}
+}
+
+// TestStaticLimitAdsAreEmptyWithoutALimitManager guards the nil path: a schedd
+// too old for startup limits disables the manager, and advertising must carry on.
+func TestStaticLimitAdsAreEmptyWithoutALimitManager(t *testing.T) {
+	svc := &Service{scheddName: "ap2101", startTime: time.Now(), adSequence: map[string]int{}}
+	if ads := svc.buildStaticLimitAds(nil); len(ads) != 0 {
+		t.Errorf("%d ads with no limit manager, want 0", len(ads))
+	}
+}

@@ -4,7 +4,39 @@ This document describes all attributes published in `PelicanLimit` ClassAds gene
 
 ## Overview
 
-`PelicanLimit` ads track transfer statistics and control metrics for each unique (User, Site) pair. These ads support the adaptive control loop that manages job startup limits based on transfer performance.
+`PelicanLimit` ads come in two kinds, told apart by `Origin`:
+
+- **Observation ads** (no `Origin`, or `Origin = "dynamic"`) track transfer
+  statistics and control metrics for each unique (User, Site) pair, and support
+  the adaptive control loop that manages job startup limits based on transfer
+  performance. One per pair the daemon has seen traffic for.
+- **Static limit ads** (`Origin = "static"`) report the operator's own rate
+  rules as installed in the schedd. One per static rule, keyed by rule name
+  rather than by pair — a static rule need not name both a user and a site, and
+  often names only one.
+
+A static rule whose (User, Site) pair already has an observation ad is not
+published twice: that ad describes the same limit alongside the traffic.
+
+## Static limit attributes
+
+Published only on ads with `Origin = "static"`.
+
+| Attribute | Type | Description |
+|---|---|---|
+| `Origin` | String | `"static"` for an operator rule. |
+| `RuleName` | String | The rule's name, as declared in `PELICAN_MANAGER_RATE_RULES`. |
+| `User` / `Site` | String | The rule's selector, empty when the rule does not name one. |
+| `RuleSources` | String | Comma-separated source list, when the rule selects on sources. |
+| `RuleExpression` | String | The raw ClassAd expression, for an `expr=` rule. |
+| `RuleNote` | String | The rule's note, when it has one. |
+| `StaticRateLimit` | Integer | Jobs permitted per window. |
+| `StaticRateWindow` | Integer (seconds) | The rate window. |
+| `StaticLimitActive` | Boolean | Whether the limit is installed in the schedd. |
+| `StaticLimitUUID` | String | The schedd's identifier for the installed limit. |
+| `StaticLimitHitCount` | Integer | Jobs this limit has matched. |
+| `StaticLimitJobsSkipped` | Integer | Jobs this limit has held back. |
+| `StaticLimitLastHit` | Integer (Unix timestamp) | When it last held a job back; absent if never. |
 
 ## Identification and Metadata
 
