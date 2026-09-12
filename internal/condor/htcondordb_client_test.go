@@ -67,6 +67,12 @@ func newTestMirror(t *testing.T, direct CondorClient) *mirrorClient {
 	// exercise the unreachable-database path really does.
 	m.convertJob = func(*classad.ClassAd) (*JobEpochRecord, state.EpochID) { return nil, state.EpochID{} }
 	m.convertTransfer = func(*classad.ClassAd) ([]TransferRecord, state.EpochID) { return nil, state.EpochID{} }
+	// A gate that always says yes, so a test exercises the path it names rather
+	// than the freshness decision. A client with no gate at all declines every
+	// mirror read (see TestNoCheckerDeclinesTheMirror), which would quietly turn
+	// a test about table routing or fallback reporting into a test that nothing
+	// was read.
+	m.ready = &fakeReadiness{ready: true}
 	return m
 }
 
@@ -674,11 +680,19 @@ func TestReadsUseTheMirrorWhenItIsCurrent(t *testing.T) {
 	}
 }
 
-// TestNoCheckerReadsUnconditionally: a daemon with no collector cannot evaluate
-// freshness, and must not thereby lose the mirror entirely. That is the
-// behavior this had before the gate existed.
-func TestNoCheckerReadsUnconditionally(t *testing.T) {
-	m := newTestMirror(t, &stubClient{})
+// TestNoCheckerDeclinesTheMirror: with no way to judge how far behind the mirror
+// is, the read goes to the schedd.
+//
+// This used to read from the mirror regardless, on the reasoning that a daemon
+// with no collector should not lose the mirror entirely. The cost of that
+// reasoning is a query that succeeds against a database hours behind and returns
+// its contents as the answer -- no error, no log line, nothing to notice. The
+// daemon now builds a gate for every configuration that can reach a mirror at
+// all (from the collector, or from the database's own command port), so no
+// deployment has to make the trade; this is the floor under that.
+func TestNoCheckerDeclinesTheMirror(t *testing.T) {
+	stub := &stubClient{}
+	m := newTestMirror(t, stub)
 	var queried int
 	m.query = func(context.Context, string, string) ([]string, error) { queried++; return nil, nil }
 	m.ready = nil
@@ -686,8 +700,16 @@ func TestNoCheckerReadsUnconditionally(t *testing.T) {
 	if _, _, err := m.FetchJobEpochs(state.EpochID{}, time.Now()); err != nil {
 		t.Fatalf("FetchJobEpochs: %v", err)
 	}
-	if queried != 1 {
-		t.Errorf("%d mirror queries with no readiness checker, want 1", queried)
+	if queried != 0 {
+		t.Errorf("%d mirror queries with no readiness checker, want 0", queried)
+	}
+	if stub.jobEpochCalls != 1 {
+		t.Errorf("%d schedd reads, want 1: an ungated read must fall back, not be dropped",
+			stub.jobEpochCalls)
+	}
+
+	if m.CanServeJobs(context.Background()) {
+		t.Error("CanServeJobs true with no readiness checker")
 	}
 }
 
