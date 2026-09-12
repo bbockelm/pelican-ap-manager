@@ -596,3 +596,97 @@ func TestFallbackIsReportedOncePerCause(t *testing.T) {
 		t.Errorf("a new cause was not reported: %q", buf.String())
 	}
 }
+
+// fakeReadiness answers a fixed verdict and records what it was asked about.
+type fakeReadiness struct {
+	ready  bool
+	reason string
+	asked  []string
+}
+
+func (f *fakeReadiness) Ready(_ context.Context, src string) (bool, string) {
+	f.asked = append(f.asked, src)
+	return f.ready, f.reason
+}
+func (f *fakeReadiness) Report(string, bool, string, func(string, ...any)) {}
+
+// TestReadsSkipTheMirrorWhenItIsBehind is the point of the gating: a mirror that
+// has fallen behind must not be read at all, rather than read and trusted. The
+// schedd is authoritative and the fallback already exists -- what was missing
+// was any reason to take it before a query failed.
+func TestReadsSkipTheMirrorWhenItIsBehind(t *testing.T) {
+	stub := &stubClient{jobEpochs: []JobEpochRecord{{User: "alice"}}}
+	m := newTestMirror(t, stub)
+
+	var queried int
+	m.query = func(context.Context, string, string) ([]string, error) {
+		queried++
+		return nil, nil
+	}
+	gate := &fakeReadiness{ready: false, reason: "mirror is 900s behind"}
+	m.ready = gate
+
+	if _, _, err := m.FetchJobEpochs(state.EpochID{}, time.Now()); err != nil {
+		t.Fatalf("FetchJobEpochs: %v", err)
+	}
+	if _, _, err := m.FetchTransferEpochs(state.EpochID{}, time.Now()); err != nil {
+		t.Fatalf("FetchTransferEpochs: %v", err)
+	}
+
+	if queried != 0 {
+		t.Errorf("queried the mirror %d times while it was behind; want 0", queried)
+	}
+	if stub.jobEpochCalls != 1 || stub.transferCalls != 1 {
+		t.Errorf("reads did not go to the schedd: jobs=%d transfers=%d", stub.jobEpochCalls, stub.transferCalls)
+	}
+
+	// Each read asks about its own source, so one being behind cannot silence
+	// the other.
+	want := map[string]bool{"history": true, "epoch_history": true}
+	for _, src := range gate.asked {
+		delete(want, src)
+	}
+	if len(want) != 0 {
+		t.Errorf("sources never asked about: %v (asked: %v)", want, gate.asked)
+	}
+}
+
+// TestReadsUseTheMirrorWhenItIsCurrent: the gate must not be a one-way door.
+func TestReadsUseTheMirrorWhenItIsCurrent(t *testing.T) {
+	stub := &stubClient{}
+	m := newTestMirror(t, stub)
+
+	var queried int
+	m.query = func(context.Context, string, string) ([]string, error) {
+		queried++
+		return nil, nil
+	}
+	m.ready = &fakeReadiness{ready: true}
+
+	if _, _, err := m.FetchJobEpochs(state.EpochID{}, time.Now()); err != nil {
+		t.Fatalf("FetchJobEpochs: %v", err)
+	}
+	if queried != 1 {
+		t.Errorf("%d mirror queries with a current mirror, want 1", queried)
+	}
+	if stub.jobEpochCalls != 0 {
+		t.Errorf("fell back to the schedd with a current mirror (%d calls)", stub.jobEpochCalls)
+	}
+}
+
+// TestNoCheckerReadsUnconditionally: a daemon with no collector cannot evaluate
+// freshness, and must not thereby lose the mirror entirely. That is the
+// behavior this had before the gate existed.
+func TestNoCheckerReadsUnconditionally(t *testing.T) {
+	m := newTestMirror(t, &stubClient{})
+	var queried int
+	m.query = func(context.Context, string, string) ([]string, error) { queried++; return nil, nil }
+	m.ready = nil
+
+	if _, _, err := m.FetchJobEpochs(state.EpochID{}, time.Now()); err != nil {
+		t.Fatalf("FetchJobEpochs: %v", err)
+	}
+	if queried != 1 {
+		t.Errorf("%d mirror queries with no readiness checker, want 1", queried)
+	}
+}

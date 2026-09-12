@@ -67,6 +67,11 @@ type mirrorClient struct {
 	transferTable string
 	cfg           *config.Config
 
+	// ready decides whether the mirror is current enough to read. Nil means
+	// unconditional: read it and fall back only on error, which is what this did
+	// before freshness could be evaluated at all.
+	ready ReadinessChecker
+
 	// Ad conversion borrowed from the wrapped schedd client, so the mirrored and
 	// direct paths cannot drift in how they read an ad. Nil when the wrapped
 	// client is not the schedd client, in which case the mirror declines and the
@@ -91,6 +96,14 @@ type mirrorClient struct {
 	cancel context.CancelFunc
 }
 
+// ReadinessChecker reports whether a mirrored source is current enough to read.
+// internal/dbready implements it; the interface keeps this package from
+// depending on how that judgement is made.
+type ReadinessChecker interface {
+	Ready(ctx context.Context, src string) (bool, string)
+	Report(src string, ready bool, reason string, logf func(string, ...any))
+}
+
 // MirrorConfig configures the htcondordb-backed history source.
 type MirrorConfig struct {
 	// Address is the htcondordb daemon's command address (sinful or host:port).
@@ -104,6 +117,10 @@ type MirrorConfig struct {
 	TransferTable string
 	// Config supplies the client security policy, as for any HTCondor client.
 	Config *config.Config
+	// Ready gates reads on how far behind the mirror is. Optional: without it
+	// the mirror is read whenever it answers, which is correct but blind to a
+	// tailer that has fallen hours behind.
+	Ready ReadinessChecker
 }
 
 // NewMirrorClient wraps a schedd-backed client so job-epoch reads go to an
@@ -125,6 +142,7 @@ func NewMirrorClient(direct CondorClient, cfg MirrorConfig) (CondorClient, error
 		jobTable:      orDefault(cfg.JobTable, DefaultJobEpochTable),
 		transferTable: orDefault(cfg.TransferTable, DefaultTransferTable),
 		cfg:           cfg.Config,
+		ready:         cfg.Ready,
 		lastFallback:  map[string]string{},
 	}
 	// Reuse the schedd client's ad conversion, so the mirrored and direct paths
@@ -155,6 +173,10 @@ func orDefault(v, fallback string) string {
 func (m *mirrorClient) FetchTransferEpochs(since state.EpochID, cutoff time.Time) ([]TransferRecord, state.EpochID, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+
+	if !m.sourceReady(ctx, "epoch_history") {
+		return m.schedd.FetchTransferEpochs(since, cutoff)
+	}
 
 	records, newest, err := m.fetchTransfersFromMirror(ctx, since, cutoff)
 	if err == nil {
@@ -233,6 +255,10 @@ func (m *mirrorClient) FetchJobEpochs(since state.EpochID, cutoff time.Time) ([]
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
+	if !m.sourceReady(ctx, "history") {
+		return m.schedd.FetchJobEpochs(since, cutoff)
+	}
+
 	records, newest, err := m.fetchFromMirror(ctx, since, cutoff)
 	if err == nil {
 		m.clearFallback("job")
@@ -240,6 +266,23 @@ func (m *mirrorClient) FetchJobEpochs(since state.EpochID, cutoff time.Time) ([]
 	}
 	m.reportFallback("job", err)
 	return m.schedd.FetchJobEpochs(since, cutoff)
+}
+
+// sourceReady asks whether src is current enough to read, and reports the
+// answer when it changes.
+//
+// No checker means read unconditionally: that is what this did before freshness
+// could be evaluated, and a daemon with no collector should not lose the mirror
+// over a question it has no way to ask.
+func (m *mirrorClient) sourceReady(ctx context.Context, src string) bool {
+	if m.ready == nil {
+		return true
+	}
+	ok, why := m.ready.Ready(ctx, src)
+	m.ready.Report(src, ok, why, func(format string, args ...any) {
+		log.Printf("condor: "+format, args...)
+	})
+	return ok
 }
 
 // reportFallback logs that a mirror read fell back to the schedd, but only when
