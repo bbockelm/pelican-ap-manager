@@ -61,6 +61,9 @@ type UserSitePair struct {
 type scheddLimits interface {
 	CreateStartupLimit(ctx context.Context, req *htcondor.StartupLimitRequest) (string, error)
 	QueryStartupLimits(ctx context.Context, uuid, tag string) ([]*htcondor.StartupLimit, error)
+	// Name is here for the log lines: a failure to talk to the schedd is only
+	// actionable if it says which schedd.
+	Name() string
 }
 
 type limitManager struct {
@@ -121,7 +124,12 @@ func newLimitManager(schedd scheddLimits, daemonName string, siteAttribute strin
 	// Query for limits with our daemon's tag to re-adopt them
 	limits, err := schedd.QueryStartupLimits(ctx, "", m.daemonName)
 	if err != nil {
-		logger.Infof(htcondorlogging.DestinationGeneral, "schedd does not support startup limits (disabling limit manager): %v", err)
+		// Not necessarily a schedd too old for startup limits: an unreachable
+		// schedd, or one this daemon cannot authenticate to, lands here too. Say
+		// which schedd, and do not assert the cause.
+		logger.Infof(htcondorlogging.DestinationGeneral,
+			"cannot read startup limits from schedd %s; rate limiting disabled (schedd too old, unreachable, or not authorized): %v",
+			schedd.Name(), err)
 		m.cfg.enabled = false
 		return m
 	}

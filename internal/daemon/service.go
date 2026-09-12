@@ -809,7 +809,12 @@ func (s *Service) ensureLimitManager() error {
 	if lease := s.limitLease(); lease > 0 {
 		s.limitMgr.cfg.lease = lease
 	}
-	s.Printf("initialized limit manager for schedd %s (daemon name: %s)", s.schedd.Name(), daemonName)
+	// "tag", not "daemon name": it is the label this daemon stamps on the limits
+	// it installs, so it can find its own again. Calling it a daemon name next to
+	// a schedd name read as a claim that the two were related, which had someone
+	// looking for a bug in the schedd lookup that was not there -- while the
+	// lookup did have a different bug, in which schedd it chose.
+	s.Printf("managing startup limits on schedd %s (our limit tag: %s)", s.schedd.Name(), daemonName)
 
 	return nil
 }
