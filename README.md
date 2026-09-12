@@ -279,6 +279,17 @@ There is no separate transfer-history file. `condor_history -transfer-history` r
 
 **It degrades, it does not fail.** If the database is unreachable or returns an error, that cycle falls back to the schedd for whichever read failed, and logs it. The consequence of an outage is the load you were trying to avoid, not a blind control loop.
 
+**And it checks before it reads.** htcondordb advertises how far behind each of its tailers is; the daemon reads a source from the database only while that source is caught up — within `PELICAN_MANAGER_DB_MAX_LAG` (10s) and `PELICAN_MANAGER_DB_MAX_LAG_BYTES` (10 KB), and with no reported durability gap. The two leeways exist because a tailer following a busy `job_queue.log` is a few kilobytes behind most of the time, and waiting for exactly EOF would mean almost never reading.
+
+Each source is judged on its own, so a gap in the epoch history does not cost you the completed-job reads. A change of source is logged once, with the reason — not once per poll:
+
+```
+reading epoch_history from the schedd: mirror's epoch history is not caught up to the schedd (not_caught_up)
+reading epoch_history from htcondordb
+```
+
+This needs a collector, since that is where the sync health is published. Without one the database is read unconditionally, which is what the daemon did before it could ask.
+
 A mirror is behind the schedd by however long the sync lags. That is fine here — the manager reacts to rolling windows measured in hours — but a mirror that has fallen far behind will make it react to stale data without saying so. If you run one, monitor the sync.
 
 ### Where the daemon's own state lives
@@ -347,6 +358,8 @@ All settings come from HTCondor configuration macros, resolved the same way `con
 | `PELICAN_MANAGER_EPOCH_DB_ADDRESS` | `PELICAN_MANAGER_RULE_DB_ADDRESS` | Read history from an htcondordb mirror instead of the schedd. `auto` for a local htcondordb, an address-file path, or `host:port` for a remote one. Falls back to the schedd on any error. |
 | `PELICAN_MANAGER_EPOCH_DB_JOB_TABLE` | `history` | Archive table `scheddsync` mirrors the schedd's `HISTORY` file to. |
 | `PELICAN_MANAGER_EPOCH_DB_TRANSFER_TABLE` | `epoch_history` | Archive table `scheddsync` mirrors `JOB_EPOCH_HISTORY` to; the transfer records are here. |
+| `PELICAN_MANAGER_DB_MAX_LAG` | `10s` | How far behind htcondordb's tailer may be while the daemon still reads from it. |
+| `PELICAN_MANAGER_DB_MAX_LAG_BYTES` | `10240` | Unconsumed tail, in bytes, that still counts as caught up. |
 | `PELICAN_MANAGER_STATE_DB_ADDRESS` | `PELICAN_MANAGER_RULE_DB_ADDRESS` | Keep the daemon's working state in htcondordb rather than the `SPOOL` JSON file. A load failure is fatal. |
 | `PELICAN_MANAGER_STATE_DB_TABLE` | `pelican_manager_state` | Table holding the state rows. |
 | `PELICAN_MANAGER_ADDRESS_FILE` | `$(LOG)/.pelican_manager_address` | Where the command address is published. |
