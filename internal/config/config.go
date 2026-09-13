@@ -62,6 +62,12 @@ type Config struct {
 	// Transfer epochs are unaffected: they come from TRANSFER_HISTORY, which
 	// nothing mirrors today, so they are always read from the schedd.
 	EpochDBAddress string
+
+	// EpochDBWatch tails the mirrored archives instead of querying them on every
+	// poll. The read still falls back to a query whenever the tail cannot
+	// account for the whole interval, so this changes how records arrive, not
+	// which records arrive. Off by default.
+	EpochDBWatch bool
 	// EpochDBJobTable holds the mirrored completed-job history (the schedd's
 	// HISTORY file); EpochDBTransferTable holds the mirrored epoch history,
 	// which is where the transfer records are. They are different schedd files
@@ -147,6 +153,7 @@ const (
 	// schedd would silently clamp.
 	macroScheddLimitMaxExpiration = "STARTUP_LIMIT_MAX_EXPIRATION"
 
+	macroEpochDBWatch         = "PELICAN_MANAGER_EPOCH_DB_WATCH"
 	macroEpochDBAddress       = "PELICAN_MANAGER_EPOCH_DB_ADDRESS"
 	macroEpochDBJobTable      = "PELICAN_MANAGER_EPOCH_DB_JOB_TABLE"
 	macroEpochDBTransferTable = "PELICAN_MANAGER_EPOCH_DB_TRANSFER_TABLE"
@@ -312,6 +319,13 @@ func LoadFrom(condorCfg *condorconfig.Config) (*Config, error) {
 		// One htcondordb is the common case, so the rule store's address is the
 		// natural default rather than making an operator repeat it.
 		cfg.EpochDBAddress = cfg.RuleDBAddress
+	}
+	if v := firstStringMacro(condorCfg, macroEpochDBWatch); v != "" {
+		b, err := strconv.ParseBool(strings.TrimSpace(v))
+		if err != nil {
+			return nil, fmt.Errorf("%s: %q is not a boolean", macroEpochDBWatch, v)
+		}
+		cfg.EpochDBWatch = b
 	}
 	if v := firstStringMacro(condorCfg, macroEpochDBJobTable); v != "" {
 		cfg.EpochDBJobTable = v

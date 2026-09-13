@@ -277,6 +277,8 @@ This needs `scheddsync` tailing **both** files — `HISTORY` and `JOB_EPOCH_HIST
 
 There is no separate transfer-history file. `condor_history -transfer-history` reads `JOB_EPOCH_HISTORY` and filters on `EpochAdType` — `INPUT`, `OUTPUT`, `CHECKPOINT` — so the mirrored read applies the same filter. The other record types in that file (`SPAWN`, `EPOCH`) are job-lifecycle records, not transfers, and are excluded.
 
+**It can be told, instead of asking.** `PELICAN_MANAGER_EPOCH_DB_WATCH = true` tails the two archive tables so a poll takes what they gained rather than querying for it. The tail is only ever an accelerator: its rows are used when it can account for the whole interval since the last read, and any gap — the first read, a reconnect, a reset, a buffer overflow — sends that read back to the query, which is cursor-based and covers whatever the gap swallowed. A tail that misbehaves therefore costs a query, never a record. Off by default.
+
 **It degrades, it does not fail.** If the database is unreachable or returns an error, that cycle falls back to the schedd for whichever read failed, and logs it. The consequence of an outage is the load you were trying to avoid, not a blind control loop.
 
 **And it checks before it reads.** htcondordb advertises how far behind each of its tailers is; the daemon reads a source from the database only while that source is caught up — within `PELICAN_MANAGER_DB_MAX_LAG` (10s) and `PELICAN_MANAGER_DB_MAX_LAG_BYTES` (10 KB), and with no reported durability gap. The two leeways exist because a tailer following a busy `job_queue.log` is a few kilobytes behind most of the time, and waiting for exactly EOF would mean almost never reading.
