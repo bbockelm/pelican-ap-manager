@@ -3,10 +3,10 @@ module github.com/bbockelm/pelican-ap-manager
 go 1.26.0
 
 require (
-	github.com/PelicanPlatform/classad v0.29.9
+	github.com/PelicanPlatform/classad v0.29.11
 	github.com/PelicanPlatform/classad/db v0.29.10
 	github.com/PelicanPlatform/classad/dbrpc v0.29.9
-	github.com/bbockelm/cedar v0.6.14
+	github.com/bbockelm/cedar v0.6.16
 	github.com/bbockelm/golang-htcondor v0.14.1
 	github.com/bbockelm/golang-htcondor/webapi v0.14.1
 	// NOTE: do not `go mod tidy` this module without re-checking
