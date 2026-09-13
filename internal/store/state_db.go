@@ -304,6 +304,7 @@ const (
 	sectionJobEpochs       = "job_epochs"
 	sectionEpochUsers      = "epoch_users"
 	sectionBucketRuntimes  = "bucket_runtimes"
+	sectionApplied         = "applied"
 )
 
 // diffRows works out the smallest write that makes the table match rows, given
@@ -367,6 +368,7 @@ func stateRows(sec state.Sections) (map[string]string, error) {
 		sectionJobEpochs:       sec.JobEpochs,
 		sectionEpochUsers:      sec.EpochUsers,
 		sectionBucketRuntimes:  sec.BucketRuntimes,
+		sectionApplied:         sec.Applied,
 	}
 	for name, value := range scratch {
 		payload, err := json.Marshal(value)
@@ -516,6 +518,8 @@ func applyScratch(sec *state.Sections, name, payload string) error {
 		target = &sec.EpochUsers
 	case sectionBucketRuntimes:
 		target = &sec.BucketRuntimes
+	case sectionApplied:
+		target = &sec.Applied
 	default:
 		return fmt.Errorf("unknown state section %q (written by a newer pelican-man?)", name)
 	}
