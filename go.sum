@@ -41,6 +41,8 @@ github.com/BurntSushi/xgb v0.0.0-20160522181843-27f122750802/go.mod h1:IVnqGOEym
 github.com/Masterminds/semver/v3 v3.1.1/go.mod h1:VPu/7SZ7ePZ3QOrcuXROw5FAcLl4a0cBrbBpGY/8hQs=
 github.com/PelicanPlatform/classad v0.29.9 h1:cXJoiVROXFN0vufHu3kaCWifia/Fx6Pk7z8jwlV9SJ0=
 github.com/PelicanPlatform/classad v0.29.9/go.mod h1:z1d5dXdX+1pxBi8f8Ab/yCX8zKyiLam9CtQHSykMlWQ=
+github.com/PelicanPlatform/classad v0.29.11 h1:pftieUH7oTicXgLe+6AJK/31yYcSyB10k4t2BpHjDnw=
+github.com/PelicanPlatform/classad v0.29.11/go.mod h1:PEBQZp1N+KqUcAPMWhHqdCq+P5OSEYT2V14SeiXVM04=
 github.com/PelicanPlatform/classad/changefeed v0.29.9 h1:4bxydrqhkHd4WsRvNncFMvF7LvXNXesyG06rHySm4bg=
 github.com/PelicanPlatform/classad/changefeed v0.29.9/go.mod h1:5r5jBUkK9mepG7QQW5oXW15Y/dAACGDlZ2wzfyPqhIw=
 github.com/PelicanPlatform/classad/collections v0.29.9 h1:0EC+h1pF4ewUDcFNmyhQKR9CD2YEE4RQkHcM1y4Y40o=
@@ -58,6 +60,8 @@ github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2/go.mod h1:W
 github.com/aymerick/douceur v0.2.0/go.mod h1:wlT5vV2O3h55X9m7iVYN0TBM0NH/MmbLnd30/FjWUq4=
 github.com/bbockelm/cedar v0.6.14 h1:Qeo2RlNQltsMd2CA4mz/rCZr9eqxHdeJ6LGxk93Ptm0=
 github.com/bbockelm/cedar v0.6.14/go.mod h1:C4u6CKJoweg3LZniOi7Yh8avQv1KZjHs9k1vTGa1+2w=
+github.com/bbockelm/cedar v0.6.16 h1:hYG1cbp+OFkmhxnnn4i2H4M4y3RHZX0m+V29O5sHXIA=
+github.com/bbockelm/cedar v0.6.16/go.mod h1:1SABFonyJbC729ODTx03voZhpMSBQqqy+Q+6TvpE08s=
 github.com/bbockelm/golang-htcondor v0.14.1 h1:no3GLqiyPdIL2GHKghUOkkRNbXK8fNyNugtPZeGvUM4=
 github.com/bbockelm/golang-htcondor v0.14.1/go.mod h1:kTk+164DqWH7ZkUR7sHSIeZ2BkiQw65j0WJY77dpA4Y=
 github.com/bbockelm/golang-htcondor/webapi v0.14.1 h1:aYgCAdfnP79UgoslL6KznFyOsz9d31Sy7YrGht3rKRQ=
