@@ -11,7 +11,17 @@ import (
 
 // TransferRecord represents a single transfer attempt drawn from the HTCondor epoch history.
 type TransferRecord struct {
-	EpochID           state.EpochID
+	EpochID state.EpochID
+	// Kind is the archive row's own type -- INPUT, OUTPUT or CHECKPOINT -- kept
+	// separate from Direction, which is derived and lossy (a checkpoint has no
+	// direction of its own and is reported as an upload). It is what identifies
+	// a row within an epoch, since one epoch can produce several.
+	Kind string
+	// Seq is this record's position within the archive row it came from: one row
+	// expands into one record per file, all sharing EpochID and Kind, so the
+	// position is what tells them apart. Stable for a given row, because the
+	// expansion walks the row's files in order.
+	Seq               int
 	User              string
 	Endpoint          string
 	Site              string
