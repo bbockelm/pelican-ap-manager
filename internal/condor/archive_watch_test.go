@@ -25,7 +25,7 @@ func TestTailIsNeverTrustedAcrossAGap(t *testing.T) {
 		w := quietWatcher("epoch_history")
 		// Subscribed and receiving, but the subscription began at the current
 		// head: everything committed before it is the query's business.
-		w.running = true
+		w.running, w.live = true, true
 		w.append(`[ ClusterId = 1 ]`)
 		rows, complete := w.drain()
 		if complete {
@@ -38,7 +38,7 @@ func TestTailIsNeverTrustedAcrossAGap(t *testing.T) {
 
 	t.Run("an unbroken tail is trusted", func(t *testing.T) {
 		w := quietWatcher("epoch_history")
-		w.running = true
+		w.running, w.live = true, true
 		if _, complete := w.drain(); complete {
 			t.Fatal("first drain complete")
 		}
@@ -54,7 +54,7 @@ func TestTailIsNeverTrustedAcrossAGap(t *testing.T) {
 
 	t.Run("a break un-trusts the next drain only", func(t *testing.T) {
 		w := quietWatcher("epoch_history")
-		w.running = true
+		w.running, w.live = true, true
 		w.drain() // clear the initial gap
 
 		w.markBroken()
@@ -71,7 +71,7 @@ func TestTailIsNeverTrustedAcrossAGap(t *testing.T) {
 
 	t.Run("overflow drops the buffer and un-trusts it", func(t *testing.T) {
 		w := quietWatcher("epoch_history")
-		w.running = true
+		w.running, w.live = true, true
 		w.drain()
 
 		for i := 0; i < maxBufferedRows+10; i++ {
@@ -94,7 +94,7 @@ func TestTailIsNeverTrustedAcrossAGap(t *testing.T) {
 
 	t.Run("a stopped tail is never trusted", func(t *testing.T) {
 		w := quietWatcher("epoch_history")
-		w.running = true
+		w.running, w.live = true, true
 		w.drain()
 		w.append(`[ ClusterId = 5 ]`)
 		w.close()
@@ -124,7 +124,7 @@ func TestResetAndResyncDropWhatWasBuffered(t *testing.T) {
 	}{{"reset", watchReset}, {"resync", watchResync}, {"delete", watchDelete}} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := quietWatcher("epoch_history")
-			w.running = true
+			w.running, w.live = true, true
 			w.drain() // past the initial gap
 
 			ch := make(chan dbrpc.WatchEvent, 3)
@@ -150,7 +150,7 @@ func TestResetAndResyncDropWhatWasBuffered(t *testing.T) {
 // loop, so a change that made every kind distrust the stream would not pass.
 func TestUpsertsAreBufferedAndSyncedIsHarmless(t *testing.T) {
 	w := quietWatcher("epoch_history")
-	w.running = true
+	w.running, w.live = true, true
 	w.drain()
 
 	ch := make(chan dbrpc.WatchEvent, 3)
@@ -198,7 +198,7 @@ func TestArchiveRowsQueriesUnlessTheTailIsComplete(t *testing.T) {
 
 	t.Run("broken tail: queries", func(t *testing.T) {
 		m, queries := newClient(t)
-		m.transferWatch.running = true
+		m.transferWatch.running, m.transferWatch.live = true, true
 		m.transferWatch.append(`[ ClusterId = 1 ]`) // buffered, but not trusted yet
 
 		m.mu.Lock()
@@ -218,7 +218,7 @@ func TestArchiveRowsQueriesUnlessTheTailIsComplete(t *testing.T) {
 	t.Run("complete tail: no query", func(t *testing.T) {
 		m, queries := newClient(t)
 		w := m.transferWatch
-		w.running = true
+		w.running, w.live = true, true
 		w.drain() // clear the initial gap, as a first read would
 
 		w.append(`[ ClusterId = 2 ]`)
@@ -263,4 +263,40 @@ func TestArchiveRowsQueriesUnlessTheTailIsComplete(t *testing.T) {
 			t.Errorf("%d queries with watching off, want 1", queries)
 		}
 	})
+}
+
+// TestAPumpThatCannotSubscribeIsNeverTrusted is the regression test for a tail
+// that reported complete intervals while delivering nothing.
+//
+// ensure() marks the watcher running before the pump has subscribed to anything.
+// When the subscription then fails -- the database is down, or the table cannot
+// be resolved, which is what happened against a real htcondordb whose archives
+// could be watched but whose change-log head could not be read -- the pump loops
+// and retries. Keying the trust decision on "a pump exists" meant a drain
+// between two failed attempts returned an empty buffer marked complete, so the
+// read skipped the query and silently saw no records at all.
+func TestAPumpThatCannotSubscribeIsNeverTrusted(t *testing.T) {
+	w := quietWatcher("epoch_history")
+
+	// What ensure() does before any subscription exists.
+	w.running = true
+
+	// A retry loop: each failure marks the tail broken, and drains happen in
+	// between, as polls do.
+	for range 3 {
+		w.markBroken()
+		if rows, complete := w.drain(); complete {
+			t.Fatalf("a pump with no live subscription reported a complete interval (%d rows): "+
+				"the read would skip the query and see nothing", len(rows))
+		}
+	}
+
+	// Two drains in a row with no failure between them: still not trusted,
+	// because nothing is streaming.
+	if _, complete := w.drain(); complete {
+		t.Error("a watcher that never subscribed became trusted after a quiet interval")
+	}
+	if _, complete := w.drain(); complete {
+		t.Error("a watcher that never subscribed became trusted on a later drain")
+	}
 }

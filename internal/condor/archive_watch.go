@@ -46,9 +46,22 @@ type archiveWatcher struct {
 	// broken records that something between the last drain and now could have
 	// lost events. It starts true: a fresh subscription tails from the current
 	// head, so everything committed before it is the query's business.
-	broken  bool
+	broken bool
+	// running says a pump goroutine exists; live says a subscription is actually
+	// streaming. They are not the same, and only the second may be used to trust
+	// the buffer: a pump that is failing to subscribe -- because the database is
+	// down, or the table cannot be resolved -- is still "running" while
+	// delivering nothing, and treating that as a complete interval hands the
+	// read an empty buffer and skips the query that would have found the records.
+	live    bool
 	running bool
 	stop    func()
+
+	// served is what the last read did, so a change of source can be logged
+	// once rather than every poll. A tail that never serves a read is otherwise
+	// indistinguishable from one that serves every read: both are silent.
+	served      bool
+	servedKnown bool
 }
 
 func newArchiveWatcher(table string, logf func(string, ...any)) *archiveWatcher {
@@ -69,9 +82,17 @@ func (w *archiveWatcher) drain() ([]string, bool) {
 
 	rows := w.rows
 	w.rows = nil
-	complete := w.running && !w.broken
-	if w.running {
+	complete := w.live && !w.broken
+	if w.live {
 		w.broken = false
+	}
+	if !w.servedKnown || w.served != complete {
+		w.servedKnown, w.served = true, complete
+		if complete {
+			w.logf("watch %s: reads are being served from the tail", w.table)
+		} else {
+			w.logf("watch %s: read fell back to a query (the tail cannot account for the interval)", w.table)
+		}
 	}
 	return rows, complete
 }
@@ -101,7 +122,7 @@ func (w *archiveWatcher) close() {
 	}
 	w.mu.Lock()
 	stop, running := w.stop, w.running
-	w.running, w.stop, w.rows, w.broken = false, nil, nil, true
+	w.running, w.live, w.stop, w.rows, w.broken = false, false, nil, nil, true
 	w.mu.Unlock()
 	if running && stop != nil {
 		stop()
@@ -176,8 +197,13 @@ func (w *archiveWatcher) session(client *dbrpc.Client) bool {
 		stop()
 		return false
 	}
-	w.stop = stop
+	w.stop, w.live = stop, true
 	w.mu.Unlock()
+	defer func() {
+		w.mu.Lock()
+		w.live = false
+		w.mu.Unlock()
+	}()
 
 	w.logf("watch %s: tailing", w.table)
 	return w.consume(ch)
