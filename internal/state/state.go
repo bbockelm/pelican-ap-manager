@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -144,7 +145,11 @@ type State struct {
 	BucketRuntimes  map[string][]BucketRuntimeSample  `json:"bucket_runtimes,omitempty"`
 	PairStates      map[string]control.PairState      `json:"pair_states,omitempty"`
 	LimitStates     map[string]control.PairState      `json:"limit_states,omitempty"`
-	mu              sync.Mutex                        `json:"-"`
+
+	// Applied records which source rows have already been folded into the
+	// counters above, so applying one twice is a no-op. See ApplyOnce.
+	Applied map[string]time.Time `json:"applied,omitempty"`
+	mu      sync.Mutex           `json:"-"`
 }
 
 // TransferHistoryEntry stores a recent transfer for persistence across restarts.
@@ -994,6 +999,7 @@ type Sections struct {
 	BucketRuntimes  map[string][]BucketRuntimeSample
 	PairStates      map[string]control.PairState
 	LimitStates     map[string]control.PairState
+	Applied         map[string]time.Time
 }
 
 // Sections returns a deep copy of the state, split into its parts.
@@ -1013,6 +1019,7 @@ func (s *State) Sections() Sections {
 		BucketRuntimes:  copySliceMap(s.BucketRuntimes),
 		PairStates:      copyMap(s.PairStates),
 		LimitStates:     copyMap(s.LimitStates),
+		Applied:         copyMap(s.Applied),
 	}
 }
 
@@ -1033,6 +1040,7 @@ func (s *State) RestoreSections(sec Sections) {
 	s.EpochUsers = orEmpty(copyMap(sec.EpochUsers))
 	s.BucketRuntimes = orEmpty(copySliceMap(sec.BucketRuntimes))
 	s.PairStates = orEmpty(copyMap(sec.PairStates))
+	s.Applied = orEmpty(copyMap(sec.Applied))
 	s.LimitStates = orEmpty(copyMap(sec.LimitStates))
 }
 
@@ -1065,4 +1073,70 @@ func orEmpty[K comparable, V any](in map[K]V) map[K]V {
 		return make(map[K]V)
 	}
 	return in
+}
+
+// ApplyOnce reports whether a source row should be applied, and records that it
+// was. It returns true the first time it sees an id and false every time after,
+// so a caller guards ingest with it:
+//
+//	if !st.ApplyOnce(retention, id, endedAt) { continue }
+//
+// This exists because the counters this state holds are accumulators --
+// SuccessBytes += bytes, appends to per-bucket slices -- which were written
+// against a cursor-based poll that delivers each row exactly once. Nothing in
+// them can tell a second copy of a row from a second row that happens to look
+// identical, so a duplicate silently inflates the transfer rates the control
+// loop throttles on: no error, no log line, just a number that reads high and a
+// limit nobody earned.
+//
+// Ids are remembered for window and then pruned, matching the retention of the
+// data they guard. A duplicate arriving after its row has aged out of the window
+// would be re-applied -- but the row is also past the cutoff by then and is
+// dropped before reaching here.
+//
+// when is the row's own timestamp, not now: pruning has to age ids on the same
+// clock as the records they stand for, or a backlog replayed after a restart
+// would evict ids for rows still inside the window.
+func (s *State) ApplyOnce(window time.Duration, id string, when time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.Applied == nil {
+		s.Applied = make(map[string]time.Time)
+	}
+	cutoff := time.Now().Add(-window)
+	for k, t := range s.Applied {
+		if !t.After(cutoff) {
+			delete(s.Applied, k)
+		}
+	}
+	if _, seen := s.Applied[id]; seen {
+		return false
+	}
+	if when.IsZero() {
+		when = time.Now()
+	}
+	s.Applied[id] = when
+	return true
+}
+
+// TransferRecordID identifies one record drawn from the transfer archive. An
+// epoch can produce several rows -- an input transfer, an output transfer, a
+// checkpoint -- and each row expands into one record per file, so neither the
+// epoch nor the kind identifies a record on its own.
+//
+// Direction is deliberately not used for this: it is derived, and CHECKPOINT has
+// no direction of its own so it is reported as an upload, which would make a
+// checkpoint row collide with that epoch's output row and drop one of them.
+func TransferRecordID(e EpochID, kind string, seq int) string {
+	if kind == "" {
+		kind = "UNKNOWN"
+	}
+	return "t:" + epochKey(e) + ":" + strings.ToUpper(kind) + ":" + strconv.Itoa(seq)
+}
+
+// JobEpochRecordID identifies one row of the completed-job archive, which holds
+// one row per epoch.
+func JobEpochRecordID(e EpochID) string {
+	return "j:" + epochKey(e)
 }

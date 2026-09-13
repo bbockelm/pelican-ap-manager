@@ -55,6 +55,14 @@ func populatedSections() state.Sections {
 		LimitStates: map[string]control.PairState{
 			"alice|UCSD": {CapacityGBPerMin: 2.25, LastUpdated: now},
 		},
+		// The applied-record ledger: what keeps a redelivered archive row from
+		// being folded into the counters above a second time. It has to survive a
+		// restart, or the first poll after one re-applies whatever the source
+		// still returns.
+		Applied: map[string]time.Time{
+			"t:12/1/3:OUTPUT:0": now,
+			"j:14/2/1":          now,
+		},
 	}
 }
 
@@ -121,8 +129,8 @@ func TestStateRowsAreSeparatePerPairAndBucket(t *testing.T) {
 			t.Errorf("no row %q", key)
 		}
 	}
-	if len(rows) != 12 {
-		t.Errorf("%d rows, want 12: %v", len(rows), rowKeys(rows))
+	if len(rows) != 13 {
+		t.Errorf("%d rows, want 13: %v", len(rows), rowKeys(rows))
 	}
 }
 

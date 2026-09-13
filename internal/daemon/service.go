@@ -284,7 +284,19 @@ func (s *Service) pollOnce(ctx context.Context) int {
 		s.Printf("job epoch poll error: %v", err)
 	}
 
+	var dupTransfers, dupJobs int
 	for _, rec := range records {
+		// Fold each archive record in exactly once. The poll path guaranteed that
+		// by advancing a cursor past every record it read; a record redelivered
+		// for any other reason -- a resumed read, a source re-scanned after a
+		// gap, and in time a watch stream, which is at-least-once by contract --
+		// would otherwise be added to the counters a second time. Nothing
+		// downstream can detect that: the totals simply read high, and the
+		// control loop throttles on them.
+		if !s.state.ApplyOnce(transferEpochRetention, state.TransferRecordID(rec.EpochID, rec.Kind, rec.Seq), rec.EndedAt) {
+			dupTransfers++
+			continue
+		}
 		if rec.User == "" {
 			if u, ok := s.state.LookupUserForEpoch(rec.EpochID); ok {
 				rec.User = u
@@ -326,6 +338,14 @@ func (s *Service) pollOnce(ctx context.Context) int {
 	if len(jobRecords) > 0 {
 		byUser := make(map[string][]stats.ProcessedTransfer)
 		for _, jr := range jobRecords {
+			// AppendJobEpoch itself is idempotent (it assigns into a map keyed by
+			// epoch), but the runtime samples, the tracker and the recent-history
+			// list below all accumulate, so the guard has to be here rather than
+			// relying on that.
+			if !s.state.ApplyOnce(jobEpochRetention, state.JobEpochRecordID(jr.EpochID), jr.EndedAt) {
+				dupJobs++
+				continue
+			}
 			s.state.AppendJobEpoch(jobEpochRetention, state.JobEpochSample{
 				Epoch:                jr.EpochID,
 				User:                 jr.User,
@@ -365,6 +385,14 @@ func (s *Service) pollOnce(ctx context.Context) int {
 			s.tracker.Add(user, trs)
 			s.state.AppendRecent(s.statsWindow, user, s.toHistoryEntries(trs))
 		}
+	}
+
+	if dupTransfers > 0 || dupJobs > 0 {
+		// Worth a line: duplicates are expected on a resumed or re-scanned read,
+		// but a steady stream of them means something is redelivering records
+		// that were already folded in, and silence would make the counters look
+		// like they simply stopped moving.
+		s.Printf("ingest: skipped %d transfer and %d job records already applied", dupTransfers, dupJobs)
 	}
 
 	if newestEpoch.After(lastEpoch) {
