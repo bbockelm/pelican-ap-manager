@@ -645,6 +645,8 @@ func (c *htcClient) convertTransferAd(ad *classad.ClassAd) ([]TransferRecord, st
 
 		records = append(records, TransferRecord{
 			EpochID:           runID,
+			Kind:              typeStr,
+			Seq:               len(records),
 			User:              recUser,
 			Endpoint:          f.LastEndpoint,
 			Site:              site,
@@ -662,6 +664,8 @@ func (c *htcClient) convertTransferAd(ad *classad.ClassAd) ([]TransferRecord, st
 	if len(records) == 0 {
 		records = append(records, TransferRecord{
 			EpochID:           runID,
+			Kind:              typeStr,
+			Seq:               0,
 			User:              user,
 			Endpoint:          endpoint,
 			Site:              site,
