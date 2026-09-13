@@ -86,6 +86,12 @@ type mirrorClient struct {
 	convertJob      func(*classad.ClassAd) (*JobEpochRecord, state.EpochID)
 	convertTransfer func(*classad.ClassAd) ([]TransferRecord, state.EpochID)
 
+	// Tails of the two archives. They buffer what the tables gain so a read can
+	// take it without querying; they never decide what a read returns, only
+	// whether it has to ask. Nil disables watching entirely.
+	transferWatch *archiveWatcher
+	jobWatch      *archiveWatcher
+
 	// query runs one archive query. Indirected so a test can see which table
 	// each read goes to: the two reads pull different kinds of record out of
 	// different tables, and crossing them returns the wrong records rather than
@@ -131,6 +137,11 @@ type MirrorConfig struct {
 	// the mirror is read whenever it answers, which is correct but blind to a
 	// tailer that has fallen hours behind.
 	Ready ReadinessChecker
+
+	// Watch tails the archive tables so a read can take what they gained instead
+	// of querying for it. Off by default: it is an optimisation, and a daemon
+	// that never enables it behaves exactly as it did before.
+	Watch bool
 }
 
 // NewMirrorClient wraps a schedd-backed client so job-epoch reads go to an
@@ -161,6 +172,11 @@ func NewMirrorClient(direct CondorClient, cfg MirrorConfig) (CondorClient, error
 	// else, there is nothing to reuse; the mirror read then errors and falls
 	// back, rather than silently returning no records.
 	m.query = m.queryLocked
+	if cfg.Watch {
+		logf := func(format string, args ...any) { log.Printf("condor: "+format, args...) }
+		m.transferWatch = newArchiveWatcher(m.transferTable, logf)
+		m.jobWatch = newArchiveWatcher(m.jobTable, logf)
+	}
 	if h, ok := direct.(*htcClient); ok {
 		m.convertJob = h.convertJobEpochAd
 		m.convertTransfer = h.convertTransferAd
@@ -206,7 +222,7 @@ func (m *mirrorClient) fetchTransfersFromMirror(ctx context.Context, since state
 		return nil, since, fmt.Errorf("condor: no ad converter for the mirrored transfer history")
 	}
 
-	rows, err := m.query(ctx, m.transferTable, transferConstraint(cutoff, since))
+	rows, err := m.archiveRows(ctx, m.transferWatch, m.transferTable, transferConstraint(cutoff, since))
 	if err != nil {
 		return nil, since, err
 	}
@@ -392,7 +408,7 @@ func (m *mirrorClient) fetchFromMirror(ctx context.Context, since state.EpochID,
 		return nil, since, fmt.Errorf("condor: no ad converter for the mirrored history")
 	}
 
-	rows, err := m.query(ctx, m.jobTable, mirrorConstraint(cutoff, since))
+	rows, err := m.archiveRows(ctx, m.jobWatch, m.jobTable, mirrorConstraint(cutoff, since))
 	if err != nil {
 		return nil, since, err
 	}
@@ -401,6 +417,38 @@ func (m *mirrorClient) fetchFromMirror(ctx context.Context, since state.EpochID,
 
 // queryLocked runs one archive query, dropping the session on failure so the
 // next call redials. The caller holds m.mu.
+// archiveRows returns the rows this read should decode, from the table's tail
+// when that tail has been unbroken since the previous read, and from a query
+// otherwise.
+//
+// The tail is only ever an optimisation. Its rows are used when it can account
+// for the whole interval since the last read; after any gap -- the first read,
+// a reconnect, a reset, an overflow -- this falls back to the query, which is
+// cursor-based and so covers whatever the gap swallowed. A watch that
+// misbehaves therefore costs a query, not a missing record.
+//
+// Called with m.mu held, as the query path is.
+func (m *mirrorClient) archiveRows(ctx context.Context, w *archiveWatcher, table, constraint string) ([]string, error) {
+	rows, complete := w.drain()
+	if complete {
+		return rows, nil
+	}
+	// Start (or restart) the tail for next time. Doing it here rather than at
+	// construction means a daemon that never reads the mirror never opens a
+	// subscription to it.
+	if w != nil {
+		client, err := m.connectLocked(ctx)
+		if err == nil {
+			w.ensure(client, func(c context.Context) (*dbrpc.Client, error) {
+				m.mu.Lock()
+				defer m.mu.Unlock()
+				return m.connectLocked(c)
+			})
+		}
+	}
+	return m.query(ctx, table, constraint)
+}
+
 func (m *mirrorClient) queryLocked(ctx context.Context, table, constraint string) ([]string, error) {
 	client, err := m.connectLocked(ctx)
 	if err != nil {
