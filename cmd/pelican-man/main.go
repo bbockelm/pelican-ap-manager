@@ -342,6 +342,7 @@ func buildService(cfg *config.Config, log *htcondorlogging.Logger, oneshot bool)
 
 		mcfg := condor.MirrorConfig{
 			Address:       cfg.EpochDBAddress,
+			Watch:         cfg.EpochDBWatch,
 			JobTable:      cfg.EpochDBJobTable,
 			TransferTable: cfg.EpochDBTransferTable,
 			QueueTable:    cfg.EpochDBQueueTable,

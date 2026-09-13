@@ -132,6 +132,10 @@ func TestJobsServedFromHtcondordbWhenCaughtUp(t *testing.T) {
 		"PELICAN_MANAGER_ENFORCEMENT_MODE": "observing",
 		"PELICAN_MANAGER_RULE_DB_ADDRESS":  dbAddr,
 		"PELICAN_MANAGER_EPOCH_DB_ADDRESS": dbAddr,
+		// Tail the archives rather than querying them each poll. Enabled here
+		// because it is off by default, so nothing else in this suite would run
+		// the daemon with it on at all.
+		"PELICAN_MANAGER_EPOCH_DB_WATCH":   "true",
 		"PELICAN_MANAGER_STATE_DB_ADDRESS": dbAddr,
 		"DAEMON_LIST":                      "MASTER, COLLECTOR, SHARED_PORT, NEGOTIATOR, SCHEDD, STARTD, HTCONDORDB, PELICAN_MANAGER",
 		"DC_DAEMON_LIST":                   "+HTCONDORDB PELICAN_MANAGER",
@@ -170,6 +174,23 @@ func TestJobsServedFromHtcondordbWhenCaughtUp(t *testing.T) {
 		dumpLog(t, managerLog)
 		t.Fatalf("job never reached the mirror: %v", err)
 	}
+
+	// --- the tail is enabled, and the reads still arrive --------------------
+	//
+	// PELICAN_MANAGER_EPOCH_DB_WATCH is on above, so everything asserted here is
+	// asserted with the tail running.
+	//
+	// There is deliberately no assertion that a read was served FROM the tail,
+	// because it cannot be yet: htcondordb's archives can be watched, but their
+	// change-log head cannot be read -- WatchHead resolves only mutable tables --
+	// so every subscription fails and every read falls back to the query. The fix
+	// is in classad ("dbrpc: let WatchHead resolve archives and view backings");
+	// once it is released and bumped here, add:
+	//
+	//	waitForLogLine(managerLog, "reads are being served from the tail", ...)
+	//
+	// Asserting the fallback line instead would be worse than nothing: it would
+	// pass today and start failing the moment the feature began working.
 }
 
 // waitForLogLine blocks until the log contains substr.
