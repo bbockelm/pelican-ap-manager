@@ -2,6 +2,7 @@ package condor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -454,9 +455,27 @@ func (m *mirrorClient) queryLocked(ctx context.Context, table, constraint string
 	if err != nil {
 		return nil, err
 	}
-	rows, err := client.ArchiveQuery(ctx, table, constraint, 0)
+
+	// The two histories are append-only archives; the live queue is an ordinary
+	// mutable table. They are read with different ops, and asking for the wrong
+	// one fails with "no such archive: jobs" -- an error that names the table and
+	// so reads as a missing table rather than the wrong question.
+	var rows []string
+	if table == m.queueTable {
+		rows, err = client.QueryTable(ctx, table, constraint, 0)
+	} else {
+		rows, err = client.ArchiveQuery(ctx, table, constraint, 0)
+	}
 	if err != nil {
-		m.dropLocked()
+		// Only a transport failure justifies dropping the connection. A server
+		// that answered -- with "no such archive", say -- is a perfectly healthy
+		// connection that was asked something it could not do, and tearing it
+		// down takes every other user of it with it, including a long-lived
+		// watch that then has to resubscribe.
+		var srvErr *dbrpc.ServerError
+		if !errors.As(err, &srvErr) && !errors.Is(err, dbrpc.ErrBadRequest) {
+			m.dropLocked()
+		}
 		return nil, fmt.Errorf("querying %s in htcondordb at %s: %w", table, m.addr, err)
 	}
 	return rows, nil
