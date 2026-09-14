@@ -131,7 +131,7 @@ func TestResetAndResyncDropWhatWasBuffered(t *testing.T) {
 			ch <- dbrpc.WatchEvent{Kind: watchUpsert, AdText: `[ ClusterId = 6 ]`}
 			ch <- dbrpc.WatchEvent{Kind: tc.kind}
 			close(ch)
-			if !w.consume(ch) {
+			if n, _ := w.consume(ch); n == 0 {
 				t.Fatal("consume reported no delivery for a stream that had events")
 			}
 
@@ -158,7 +158,7 @@ func TestUpsertsAreBufferedAndSyncedIsHarmless(t *testing.T) {
 	ch <- dbrpc.WatchEvent{Kind: watchSynced}
 	ch <- dbrpc.WatchEvent{Kind: watchUpsert, AdText: `[ ClusterId = 8 ]`}
 	close(ch)
-	w.consume(ch)
+	w.consume(ch) //nolint:errcheck // counts unused here
 
 	rows, complete := w.drain()
 	if !complete {

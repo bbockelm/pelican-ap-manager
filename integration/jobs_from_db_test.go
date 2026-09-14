@@ -175,22 +175,41 @@ func TestJobsServedFromHtcondordbWhenCaughtUp(t *testing.T) {
 		t.Fatalf("job never reached the mirror: %v", err)
 	}
 
-	// --- the tail is enabled, and the reads still arrive --------------------
+	// --- and it was not quietly served by the schedd after all -------------
 	//
-	// PELICAN_MANAGER_EPOCH_DB_WATCH is on above, so everything asserted here is
-	// asserted with the tail running.
+	// The two assertions above both passed for months while the live-queue read
+	// was failing on every poll: the daemon logged its decision to use the
+	// database, the query then failed with "no such archive: jobs", and the
+	// schedd fallback supplied the job. Both assertions are satisfied by the
+	// fallback, so neither noticed.
 	//
-	// There is deliberately no assertion that a read was served FROM the tail,
-	// because it cannot be yet: htcondordb's archives can be watched, but their
-	// change-log head cannot be read -- WatchHead resolves only mutable tables --
-	// so every subscription fails and every read falls back to the query. The fix
-	// is in classad ("dbrpc: let WatchHead resolve archives and view backings");
-	// once it is released and bumped here, add:
+	// This is the one that does: the mirror reporting a fallback for the queue
+	// means the read did not come from the database, whatever the decision said.
+	if log, err := os.ReadFile(managerLog); err == nil {
+		if strings.Contains(string(log), "queue-history mirror unavailable") {
+			dumpLog(t, managerLog)
+			t.Error("the live queue fell back to the schedd: the decision to use the " +
+				"database was logged, but the read itself did not come from there")
+		}
+	}
+
+	// --- the tail subscribed, and a read was served from it -----------------
 	//
-	//	waitForLogLine(managerLog, "reads are being served from the tail", ...)
-	//
-	// Asserting the fallback line instead would be worse than nothing: it would
-	// pass today and start failing the moment the feature began working.
+	// Two assertions, not one. "tailing" says only that a subscription opened; a
+	// tail that opens and is never trusted leaves every read going to the query,
+	// and the daemon then behaves exactly as it did before with nothing to show
+	// that the feature did nothing. That was the real state of this code until
+	// classad v0.29.12: htcondordb's archives could be watched, but their
+	// change-log head could not be read, so every subscription failed and every
+	// read fell back.
+	if err := waitForLogLine(managerLog, "watch epoch_history: tailing", 90*time.Second); err != nil {
+		dumpLog(t, managerLog)
+		t.Fatalf("the epoch-history tail never subscribed: %v", err)
+	}
+	if err := waitForLogLine(managerLog, "reads are being served from the tail", 120*time.Second); err != nil {
+		dumpLog(t, managerLog)
+		t.Fatalf("the tail subscribed but no read was ever served from it: %v", err)
+	}
 }
 
 // waitForLogLine blocks until the log contains substr.
