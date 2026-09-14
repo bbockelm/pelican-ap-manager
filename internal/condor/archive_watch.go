@@ -2,6 +2,7 @@ package condor
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -206,18 +207,39 @@ func (w *archiveWatcher) session(client *dbrpc.Client) bool {
 	}()
 
 	w.logf("watch %s: tailing", w.table)
-	return w.consume(ch)
+	started := time.Now()
+	events, kinds := w.consume(ch)
+	// A session that ends is the interesting event: it is what sends the next
+	// read back to the query. Reporting how long it lasted and what it carried
+	// turns "the tail is not helping" into something an operator can act on --
+	// a stream ending after a second with only a synced marker says something
+	// very different from one ending after an hour with thousands of upserts.
+	w.logf("watch %s: stream ended after %s (%d events: %s)",
+		w.table, time.Since(started).Truncate(time.Millisecond), events, kinds)
+	return events > 0
 }
 
-// consume folds a subscription's events into the buffer, returning whether the
-// stream delivered anything. Separated from session so it can be driven from a
-// channel in a test: the decision this makes -- which kinds leave the tail
+// consume folds a subscription's events into the buffer, returning how many
+// arrived and a per-kind tally. Separated from session so it can be driven from
+// a channel in a test: the decision it makes -- which kinds leave the tail
 // trustworthy -- is the whole safety property, and it would otherwise only be
 // reachable through a live database.
-func (w *archiveWatcher) consume(ch <-chan dbrpc.WatchEvent) bool {
-	delivered := false
+func (w *archiveWatcher) consume(ch <-chan dbrpc.WatchEvent) (int, string) {
+	counts := map[uint8]int{}
+	n := 0
 	for ev := range ch {
-		delivered = true
+		n++
+		counts[ev.Kind]++
+		w.handle(ev)
+	}
+	return n, fmt.Sprintf("upsert=%d delete=%d reset=%d synced=%d resync=%d",
+		counts[watchUpsert], counts[watchDelete], counts[watchReset],
+		counts[watchSynced], counts[watchResync])
+}
+
+// handle folds one event into the buffer.
+func (w *archiveWatcher) handle(ev dbrpc.WatchEvent) {
+	{
 		switch ev.Kind {
 		case watchUpsert:
 			w.append(ev.AdText)
@@ -233,7 +255,6 @@ func (w *archiveWatcher) consume(ch <-chan dbrpc.WatchEvent) bool {
 			w.dropBuffer()
 		}
 	}
-	return delivered
 }
 
 func (w *archiveWatcher) append(row string) {
