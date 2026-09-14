@@ -39,6 +39,12 @@ type archiveWatcher struct {
 	table string
 	logf  func(string, ...any)
 
+	// notify carries a single coalesced "something arrived" signal. Capacity one
+	// and a non-blocking send: the reader only needs to know that there is
+	// something to drain, not how much, and a watcher must never block on a
+	// consumer that is busy.
+	notify chan<- struct{}
+
 	mu sync.Mutex
 	// rows holds the ad text of upserts seen since the last drain. Ad text
 	// rather than decoded records, so the decode stays the one that the query
@@ -65,8 +71,8 @@ type archiveWatcher struct {
 	servedKnown bool
 }
 
-func newArchiveWatcher(table string, logf func(string, ...any)) *archiveWatcher {
-	return &archiveWatcher{table: table, logf: logf, broken: true}
+func newArchiveWatcher(table string, logf func(string, ...any), notify chan<- struct{}) *archiveWatcher {
+	return &archiveWatcher{table: table, logf: logf, notify: notify, broken: true}
 }
 
 // drain returns the rows buffered since the last call, and whether they can be
@@ -271,6 +277,20 @@ func (w *archiveWatcher) append(row string) {
 		return
 	}
 	w.rows = append(w.rows, row)
+	w.signal()
+}
+
+// signal tells a waiting reader there is something to drain, without blocking
+// and without queueing: one pending signal means the same as a thousand, since
+// the reader drains everything buffered when it wakes.
+func (w *archiveWatcher) signal() {
+	if w.notify == nil {
+		return
+	}
+	select {
+	case w.notify <- struct{}{}:
+	default:
+	}
 }
 
 func (w *archiveWatcher) markBroken() {

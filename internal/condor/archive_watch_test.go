@@ -3,12 +3,13 @@ package condor
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/PelicanPlatform/classad/dbrpc"
 )
 
 func quietWatcher(table string) *archiveWatcher {
-	return newArchiveWatcher(table, func(string, ...any) {})
+	return newArchiveWatcher(table, func(string, ...any) {}, nil)
 }
 
 // TestTailIsNeverTrustedAcrossAGap is the whole safety argument for reading from
@@ -298,5 +299,61 @@ func TestAPumpThatCannotSubscribeIsNeverTrusted(t *testing.T) {
 	}
 	if _, complete := w.drain(); complete {
 		t.Error("a watcher that never subscribed became trusted on a later drain")
+	}
+}
+
+// TestArrivalsCoalesceAndNeverBlock covers the two properties the signal has to
+// have, both of which matter more than the signal itself.
+//
+// It must coalesce: the reader drains everything buffered when it wakes, so a
+// thousand records arriving want one read, not a thousand. And it must never
+// block: the sender is the watch pump, and a pump stalled on a busy consumer
+// stops reading the stream, which eventually demotes the subscription
+// server-side -- the feature would then degrade the very thing it exists to
+// speed up.
+func TestArrivalsCoalesceAndNeverBlock(t *testing.T) {
+	notify := make(chan struct{}, 1)
+	w := newArchiveWatcher("epoch_history", func(string, ...any) {}, notify)
+	w.running, w.live = true, true
+
+	// Nobody is reading the channel. A thousand arrivals must still not block.
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 1000; i++ {
+			w.append(`[ ClusterId = 1 ]`)
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("append blocked on the arrival signal: a stalled pump stops reading the " +
+			"stream, which gets the subscription demoted")
+	}
+
+	// And they coalesced into exactly one pending signal.
+	got := 0
+	for {
+		select {
+		case <-notify:
+			got++
+			continue
+		default:
+		}
+		break
+	}
+	if got != 1 {
+		t.Errorf("%d pending signals after 1000 arrivals, want 1", got)
+	}
+}
+
+// TestNoSignalWithoutWatching: a watcher with no channel is the watching-off
+// case, and must not panic on a send.
+func TestNoSignalWithoutWatching(t *testing.T) {
+	w := quietWatcher("epoch_history")
+	w.running, w.live = true, true
+	w.append(`[ ClusterId = 1 ]`) // nil notify channel
+	if rows, _ := w.drain(); len(rows) != 1 {
+		t.Errorf("%d rows, want 1: the row must still be buffered without a signal channel", len(rows))
 	}
 }
