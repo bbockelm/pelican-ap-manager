@@ -30,6 +30,12 @@ import (
 )
 
 const (
+	// earlyPollFloor is the shortest gap between reads triggered by a record
+	// arriving rather than by the poll interval. It bounds the cost of a busy
+	// pool -- one extra read per floor, whatever the arrival rate -- and bounds
+	// the latency it buys, since a record waits at most this long.
+	earlyPollFloor = time.Second
+
 	jobEpochRetention      = 24 * time.Hour
 	transferEpochRetention = 24 * time.Hour
 )
@@ -195,6 +201,24 @@ func (s *Service) Run(ctx context.Context) error {
 	renewTicker := s.startLimitRenewal(ctx)
 	defer renewTicker.Stop()
 
+	// When the mirror tails the archives it can say that a record has landed, so
+	// the loop need not sit out the rest of its poll interval to notice. At the
+	// default 30s poll that is the difference between throttling a burst while it
+	// is happening and throttling it once it is over -- half a rate window either
+	// way.
+	//
+	// The signal is coalesced and the early read is floored, so a busy pool costs
+	// at most one extra read per floor rather than one per record. A nil channel
+	// (watching off) blocks forever in the select, which disables this cleanly.
+	arrivals := s.arrivalSignal()
+	var earlyC <-chan time.Time
+	if arrivals != nil {
+		earlyTicker := time.NewTicker(earlyPollFloor)
+		defer earlyTicker.Stop()
+		earlyC = earlyTicker.C
+	}
+	pending := false
+
 	// Advertise immediately on startup
 	s.advertiseOnce()
 
@@ -204,7 +228,17 @@ func (s *Service) Run(ctx context.Context) error {
 			s.Println("pelican-man shutting down")
 			return nil
 		case <-pollTicker.C:
+			pending = false
 			s.pollOnce(ctx)
+		case <-arrivals:
+			// Noted, not acted on: the floor below decides when to read, so a
+			// thousand records arriving in a second still cost one read.
+			pending = true
+		case <-earlyC:
+			if pending {
+				pending = false
+				s.pollOnce(ctx)
+			}
 		case <-advTicker.C:
 			s.advertiseOnce()
 		case <-renewTicker.C:
@@ -726,6 +760,19 @@ func (s *Service) updateScheddLimits() {
 	st := s.limitMgr.installedStats()
 	s.Printf("rate rules: mode=%s stored+derived=%d installable=%d installed=%d allowed=%d skipped=%d ignored=%d",
 		mode, len(rules), len(installable), st.Installed, st.Allowed, st.Skipped, st.Ignored)
+}
+
+// arrivalSignal is the mirror's record-arrival channel when it has one.
+//
+// Nil unless the client is a mirror with watching enabled, and a nil channel
+// blocks forever in a select -- so the loop falls back to its poll interval with
+// no special case, which is also what happens when the tail is not working.
+func (s *Service) arrivalSignal() <-chan struct{} {
+	type arriver interface{ Arrivals() <-chan struct{} }
+	if a, ok := s.condor.(arriver); ok {
+		return a.Arrivals()
+	}
+	return nil
 }
 
 // storedRules reads the persisted rule set. A store that is unreachable is
