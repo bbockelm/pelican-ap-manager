@@ -92,6 +92,9 @@ type mirrorClient struct {
 	// whether it has to ask. Nil disables watching entirely.
 	transferWatch *archiveWatcher
 	jobWatch      *archiveWatcher
+	// arrivals is signalled when either tail buffers a record, so a caller can
+	// read as soon as something lands instead of waiting out its poll interval.
+	arrivals chan struct{}
 
 	// query runs one archive query. Indirected so a test can see which table
 	// each read goes to: the two reads pull different kinds of record out of
@@ -175,8 +178,9 @@ func NewMirrorClient(direct CondorClient, cfg MirrorConfig) (CondorClient, error
 	m.query = m.queryLocked
 	if cfg.Watch {
 		logf := func(format string, args ...any) { log.Printf("condor: "+format, args...) }
-		m.transferWatch = newArchiveWatcher(m.transferTable, logf)
-		m.jobWatch = newArchiveWatcher(m.jobTable, logf)
+		m.arrivals = make(chan struct{}, 1)
+		m.transferWatch = newArchiveWatcher(m.transferTable, logf, m.arrivals)
+		m.jobWatch = newArchiveWatcher(m.jobTable, logf, m.arrivals)
 	}
 	if h, ok := direct.(*htcClient); ok {
 		m.convertJob = h.convertJobEpochAd
@@ -604,6 +608,16 @@ func (m *mirrorClient) dropLocked() {
 	}
 	m.client, m.conn, m.cancel = nil, nil, nil
 }
+
+// Arrivals reports when a tail has buffered a record, so a caller can read
+// promptly rather than waiting for its next scheduled poll. Nil when watching is
+// off, which a caller must handle: a nil channel blocks forever in a select,
+// which is exactly the right behaviour there.
+//
+// The signal says only "there is something to drain". It carries no count and
+// coalesces, because a reader drains everything buffered when it wakes, and a
+// burst of a thousand records wants one read, not a thousand.
+func (m *mirrorClient) Arrivals() <-chan struct{} { return m.arrivals }
 
 // MirrorTables reports the tables a MirrorConfig resolves to, so a caller can
 // log which ones are in use without duplicating the defaults.
