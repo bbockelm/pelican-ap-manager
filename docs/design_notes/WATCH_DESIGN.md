@@ -135,18 +135,36 @@ state store do not learn that watch exists, which means the fallback path needs 
 parallel implementation — the thing that would otherwise produce two ingest paths that
 drift apart.
 
-### Stage 3 — cursors and restart
+### Stage 3 — cursors and restart (not done, and not needed)
 
-Persist each source's cursor in the state store beside the epoch ids, advanced only at
-`Synced` and on live events after the record is durably applied. On restart, resume from
-it; on `Reset`, drop the derived window and rebuild from the snapshot that follows.
+The plan was to persist each source's cursor and resume from it. Having built stages 2
+and 4, the gap it was meant to close turns out to be covered already.
 
-### Stage 4 — drive the loop from the stream
+A tail subscribes at the current head with `broken` set, so the first drain after any
+subscription falls back to the cursor-based query -- and that query, keyed on the epoch
+id the daemon already persists, covers the window between the query and the subscription
+going live. A restart is the same case: resubscribe at head, one query, no gap.
 
-Only once the above is proven: let an arriving record wake the control loop early instead
-of waiting for the next tick. This is where the latency win is actually realised, and it
-is deliberately last, because it is the change that makes the daemon's timing depend on
-the stream's behaviour.
+So a cursor would save one query per break, not close a hole. Breaks are rare, and the
+query is the thing that makes every other gap safe. Left undone deliberately.
+
+### Stage 4 — drive the loop from the stream (done)
+
+An arriving record wakes the read instead of the clock. The signal carries no count and
+coalesces, and the send is non-blocking: the sender is the watch pump, and a pump stalled
+on a busy consumer stops reading the stream and gets its subscription demoted, which would
+make this degrade the thing it speeds up. Early reads are floored at a second, bounding
+both the cost on a busy pool and the latency it buys.
+
+One consequence to know: the tail starts on the first read, since that is where the
+subscription is established. At a 30s poll nothing is faster for the first 30 seconds
+after startup.
+
+**Not yet verified end to end.** The unit tests cover coalescing and non-blocking; the
+claim that a record is seen in about a second rather than up to thirty is argued, not
+measured. Demonstrating it needs a completed transfer arriving after the tail is live,
+because the tailed sources are the two histories -- the live queue is deliberately not
+watched.
 
 ## Deliberately not doing
 
