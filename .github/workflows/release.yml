@@ -32,6 +32,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
+          check-latest: true
           # Released binaries build with the newest Go, not the floor in
           # go.mod. The floor says what consumers must have; it is the
           # toolchain that carries the security fixes, so shipped

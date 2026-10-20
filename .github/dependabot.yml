@@ -22,6 +22,25 @@ updates:
       - dependencies
       - github-actions
 
-# Go modules are deliberately absent: this repo tracks several modules developed
-# alongside it (classad, htcondordb, golang-htcondor, cedar) which are bumped as
-# a set, by hand, when a matching change lands on both sides.
+  # Go modules, except the modules developed alongside this repo (classad,
+  # htcondordb, golang-htcondor, cedar): those are bumped as a set, by hand,
+  # when a matching change lands on both sides, so they are ignored here.
+  # Security updates ignore this list by GitHub's own rules, so an advisory
+  # against one of them still arrives as a PR.
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      go-minor-and-patch:
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "github.com/PelicanPlatform/classad*"
+      - dependency-name: "github.com/bbockelm/cedar"
+      - dependency-name: "github.com/bbockelm/golang-htcondor*"
+      - dependency-name: "github.com/bbockelm/htcondordb*"
+    commit-message:
+      prefix: "deps"
+    labels:
+      - dependencies
+      - go
