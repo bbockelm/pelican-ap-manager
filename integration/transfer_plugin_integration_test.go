@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	htcondor "github.com/htcondor/golang-htcondor"
-	condorconfig "github.com/htcondor/golang-htcondor/config"
 	"github.com/bbockelm/pelican-ap-manager/internal/condor"
 	"github.com/bbockelm/pelican-ap-manager/internal/state"
+	htcondor "github.com/htcondor/golang-htcondor"
+	condorconfig "github.com/htcondor/golang-htcondor/config"
 )
 
 func TestFakeTransferPluginIntegration(t *testing.T) {

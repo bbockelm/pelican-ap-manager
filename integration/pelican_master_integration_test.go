@@ -23,9 +23,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bbockelm/pelican-ap-manager/internal/webserver"
 	htcondor "github.com/htcondor/golang-htcondor"
 	condorconfig "github.com/htcondor/golang-htcondor/config"
-	"github.com/bbockelm/pelican-ap-manager/internal/webserver"
 )
 
 // TestPelicanManagedDaemon ensures pelican-man runs under condor_master, advertises,

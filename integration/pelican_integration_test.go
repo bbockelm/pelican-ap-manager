@@ -615,15 +615,25 @@ func waitForJobCompletion(ctx context.Context, scheddAddr, collectorAddr string,
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == 0", clusterID)
 	deadline := time.Now().Add(90 * time.Second)
 
+	// Remember why we are still waiting. A query that fails every time and a job
+	// that never advances both end up at the deadline below, and without this the
+	// message cannot tell them apart.
+	lastErr := error(nil)
+	lastStatus := int64(-1)
+
 	for time.Now().Before(deadline) {
 		queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		ads, err := schedd.Query(queryCtx, constraint, []string{"JobStatus", "ClusterId", "ProcId"})
 		cancel()
-		if err == nil {
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = nil
 			if len(ads) == 0 {
 				return fmt.Errorf("job %d disappeared from schedd queue", clusterID)
 			}
 			if st, ok := ads[0].EvaluateAttrInt("JobStatus"); ok {
+				lastStatus = st
 				if st == 4 {
 					return nil
 				}
@@ -632,7 +642,11 @@ func waitForJobCompletion(ctx context.Context, scheddAddr, collectorAddr string,
 		time.Sleep(1 * time.Second)
 	}
 
-	return fmt.Errorf("job %d did not reach completed state in time", clusterID)
+	if lastErr != nil {
+		return fmt.Errorf("job %d: every schedd query failed, last error: %w", clusterID, lastErr)
+	}
+	return fmt.Errorf("job %d did not reach completed state in time (last JobStatus seen: %d)",
+		clusterID, lastStatus)
 }
 
 type jobMirrorSnapshot struct {
