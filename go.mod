@@ -16,9 +16,15 @@ require (
 	// htcondordb's COMMAND out of this module graph
 	// (go build github.com/htcondor/htcondordb/cmd/htcondordb), and
 	// tidy prunes the go.sum entries its dependencies need -- raft,
-	// raft-boltdb, classad/changefeed -- because nothing in this module
-	// imports them. The build then fails with "missing go.sum entry".
+	// raft-boltdb, classad/changefeed, arrow-go, wasmudf -- because
+	// nothing in this module imports them. The build then fails with
+	// "missing go.sum entry".
 	// A tools.go cannot pin it either: cmd/htcondordb is package main.
+	// To put them back after a tidy, run that same build once with
+	// -mod=mod:
+	//   GOFLAGS=-mod=mod go build -o /dev/null \
+	//     github.com/htcondor/htcondordb/cmd/htcondordb
+	// then re-run it without -mod=mod to confirm it builds clean.
 	github.com/htcondor/htcondordb v0.28.0
 	github.com/jellydator/ttlcache/v3 v3.3.0
 	github.com/klauspost/compress v1.20.3
