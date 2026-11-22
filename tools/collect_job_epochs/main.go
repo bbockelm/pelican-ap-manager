@@ -14,9 +14,9 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
+	"github.com/bbockelm/pelican-ap-manager/tools/internal/redact"
 	htcondor "github.com/htcondor/golang-htcondor"
 	condorconfig "github.com/htcondor/golang-htcondor/config"
-	"github.com/bbockelm/pelican-ap-manager/tools/internal/redact"
 )
 
 // collect job epochs from a schedd and write a sample set for debugging/tests.

@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	htcondorlogging "github.com/htcondor/golang-htcondor/logging"
 	"github.com/bbockelm/pelican-ap-manager/internal/daemon"
 	"github.com/bbockelm/pelican-ap-manager/internal/state"
 	"github.com/bbockelm/pelican-ap-manager/internal/stats"
+	htcondorlogging "github.com/htcondor/golang-htcondor/logging"
 )
 
 // TestSummarization verifies the summarization logic with historical epoch_history data:

@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	condorconfig "github.com/htcondor/golang-htcondor/config"
 	"github.com/bbockelm/pelican-ap-manager/internal/ratelimit"
 	"github.com/bbockelm/pelican-ap-manager/internal/store"
+	condorconfig "github.com/htcondor/golang-htcondor/config"
 )
 
 // TestRulesAndStatePersistToHtcondordb runs pelican-man and a real htcondordb
