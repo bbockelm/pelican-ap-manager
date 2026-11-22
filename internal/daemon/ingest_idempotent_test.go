@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
-	htcondor "github.com/bbockelm/golang-htcondor"
-	htcondorlogging "github.com/bbockelm/golang-htcondor/logging"
+	htcondor "github.com/htcondor/golang-htcondor"
+	htcondorlogging "github.com/htcondor/golang-htcondor/logging"
 
 	"github.com/bbockelm/pelican-ap-manager/internal/condor"
 	"github.com/bbockelm/pelican-ap-manager/internal/state"

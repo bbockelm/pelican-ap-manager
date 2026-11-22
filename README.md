@@ -231,7 +231,7 @@ Rules are persisted so they survive a restart and can be inspected while running
 PELICAN_MANAGER_RULE_STORE_PATH = $(SPOOL)/pelican_rate_rules.json
 ```
 
-Point it at an [htcondordb](https://github.com/bbockelm/htcondordb) instead to keep rules in the pool database, where `htcondordb-cli` and friends can read and edit them:
+Point it at an [htcondordb](https://github.com/htcondor/htcondordb) instead to keep rules in the pool database, where `htcondordb-cli` and friends can read and edit them:
 
 ```
 PELICAN_MANAGER_RULE_DB_ADDRESS = htcondordb.example.org:9618
@@ -246,7 +246,7 @@ Configuration-declared rules are reconciled on every startup and `condor_reconfi
 
 Every poll cycle, `pelican-man` reads recent history twice: the completed-job history, and the transfer records. By default it asks the schedd, and neither read is free — the schedd walks its history files backwards, in its own process, while it is also trying to run jobs. On a busy access point this is the most expensive thing the manager does.
 
-If the pool already runs [htcondordb](https://github.com/bbockelm/htcondordb) with `scheddsync` mirroring this schedd, point the manager at the mirror and both reads move off the access point entirely:
+If the pool already runs [htcondordb](https://github.com/htcondor/htcondordb) with `scheddsync` mirroring this schedd, point the manager at the mirror and both reads move off the access point entirely:
 
 ```
 PELICAN_MANAGER_EPOCH_DB_ADDRESS = auto

@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
-	"github.com/bbockelm/golang-htcondor/config"
-	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
+	"github.com/htcondor/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/webapi/dbmirror"
 )
 
 // healthAd is the ClassAd htcondordb answers a status request with: the same one

@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"syscall"
 
-	htcondorlogging "github.com/bbockelm/golang-htcondor/logging"
+	htcondorlogging "github.com/htcondor/golang-htcondor/logging"
 )
 
 func getSocketCredentials(r *http.Request, logger *htcondorlogging.Logger) (int, int) {

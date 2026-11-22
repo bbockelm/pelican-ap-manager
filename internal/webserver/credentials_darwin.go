@@ -7,7 +7,7 @@ import (
 	"net"
 	"net/http"
 
-	htcondorlogging "github.com/bbockelm/golang-htcondor/logging"
+	htcondorlogging "github.com/htcondor/golang-htcondor/logging"
 	"golang.org/x/sys/unix"
 )
 

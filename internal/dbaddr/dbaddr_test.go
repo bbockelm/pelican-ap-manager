@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	condorconfig "github.com/bbockelm/golang-htcondor/config"
+	condorconfig "github.com/htcondor/golang-htcondor/config"
 )
 
 func testCfg(t *testing.T) *condorconfig.Config {

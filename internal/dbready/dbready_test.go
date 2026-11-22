@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
+	"github.com/htcondor/golang-htcondor/webapi/dbmirror"
 )
 
 // TestNilCheckerIsNotReady: a daemon with no collector cannot evaluate the

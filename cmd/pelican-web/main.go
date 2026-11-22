@@ -24,12 +24,12 @@ import (
 
 	"github.com/bbockelm/cedar/commands"
 	cedarserver "github.com/bbockelm/cedar/server"
-	htcondor "github.com/bbockelm/golang-htcondor"
-	condorconfig "github.com/bbockelm/golang-htcondor/config"
-	condordaemon "github.com/bbockelm/golang-htcondor/daemon"
-	"github.com/bbockelm/golang-htcondor/droppriv"
-	htcondorlogging "github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/pelican-ap-manager/internal/webserver"
+	htcondor "github.com/htcondor/golang-htcondor"
+	condorconfig "github.com/htcondor/golang-htcondor/config"
+	condordaemon "github.com/htcondor/golang-htcondor/daemon"
+	"github.com/htcondor/golang-htcondor/droppriv"
+	htcondorlogging "github.com/htcondor/golang-htcondor/logging"
 )
 
 // subsystem is the HTCondor subsystem name. It selects the per-daemon log knobs
