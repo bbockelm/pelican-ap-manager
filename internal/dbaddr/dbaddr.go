@@ -17,9 +17,9 @@ import (
 	"fmt"
 	"strings"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/config"
-	"github.com/bbockelm/htcondordb/locate"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/config"
+	"github.com/htcondor/htcondordb/locate"
 )
 
 // Auto is the configured value that means "find the local htcondordb the way

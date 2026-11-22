@@ -10,8 +10,8 @@ import (
 
 	"github.com/PelicanPlatform/classad/ast"
 	"github.com/PelicanPlatform/classad/parser"
-	htcondor "github.com/bbockelm/golang-htcondor"
-	htcondorlogging "github.com/bbockelm/golang-htcondor/logging"
+	htcondor "github.com/htcondor/golang-htcondor"
+	htcondorlogging "github.com/htcondor/golang-htcondor/logging"
 	"github.com/bbockelm/pelican-ap-manager/internal/control"
 	"github.com/bbockelm/pelican-ap-manager/internal/ratelimit"
 )

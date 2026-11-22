@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	condorconfig "github.com/bbockelm/golang-htcondor/config"
+	htcondor "github.com/htcondor/golang-htcondor"
+	condorconfig "github.com/htcondor/golang-htcondor/config"
 )
 
 // requireRootEnv, when set to "1", turns "cannot run as root" from a skip into a

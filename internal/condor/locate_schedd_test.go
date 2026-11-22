@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	condorconfig "github.com/bbockelm/golang-htcondor/config"
+	htcondor "github.com/htcondor/golang-htcondor"
+	condorconfig "github.com/htcondor/golang-htcondor/config"
 )
 
 // TestSameHostMatching covers the comparison that decides whether a schedd is

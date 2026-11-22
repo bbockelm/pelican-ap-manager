@@ -16,7 +16,7 @@ Without `PELICAN_WEB` running, Pelican transfer plugins cannot register sandboxe
 
 ## Features
 
-- **Sandbox Creation**: Automatically creates input tarballs from job ClassAds using `github.com/bbockelm/golang-htcondor/sandbox`
+- **Sandbox Creation**: Automatically creates input tarballs from job ClassAds using `github.com/htcondor/golang-htcondor/sandbox`
 - **Sandbox Extraction**: Extracts output tarballs to appropriate filesystem locations
 - **Privilege Dropping**: When running as root, automatically drops privileges using droppriv manager for secure file operations
 - **Dual Authentication**: Supports both Unix socket UID/GID authentication and bearer token authentication
@@ -179,7 +179,7 @@ The full job ClassAd JSON is stored to enable sandbox operations without additio
 ## Implementation Details
 
 ### Sandbox Creation (Input)
-Uses `github.com/bbockelm/golang-htcondor/sandbox.CreateInputSandboxTar()`:
+Uses `github.com/htcondor/golang-htcondor/sandbox.CreateInputSandboxTar()`:
 - Reads `TransferInput`, `Cmd`, `In` from job ClassAd
 - Respects `TransferExecutable` flag
 - Skips URLs in file lists
@@ -187,7 +187,7 @@ Uses `github.com/bbockelm/golang-htcondor/sandbox.CreateInputSandboxTar()`:
 - Streams tarball directly to HTTP response
 
 ### Sandbox Extraction (Output)
-Uses `github.com/bbockelm/golang-htcondor/sandbox.ExtractOutputSandbox()`:
+Uses `github.com/htcondor/golang-htcondor/sandbox.ExtractOutputSandbox()`:
 - Extracts to `Iwd` directory
 - Filters by `TransferOutput` if specified
 - Remaps `_condor_stdout`/`_condor_stderr` to `Out`/`Err`

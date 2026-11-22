@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	condorconfig "github.com/bbockelm/golang-htcondor/config"
+	condorconfig "github.com/htcondor/golang-htcondor/config"
 	"github.com/bbockelm/pelican-ap-manager/internal/ratelimit"
 	"github.com/bbockelm/pelican-ap-manager/internal/store"
 )
@@ -239,7 +239,7 @@ func buildHtcondordb(t *testing.T) string {
 	}
 
 	out := filepath.Join(t.TempDir(), "htcondordb")
-	cmd := exec.Command("go", "build", "-o", out, "github.com/bbockelm/htcondordb/cmd/htcondordb")
+	cmd := exec.Command("go", "build", "-o", out, "github.com/htcondor/htcondordb/cmd/htcondordb")
 	cmd.Dir = moduleRoot(t)
 	cmd.Env = append(os.Environ(), "GOFLAGS=-mod=mod")
 	if b, err := cmd.CombinedOutput(); err != nil {

@@ -3,7 +3,7 @@ package condor
 import (
 	"testing"
 
-	condorconfig "github.com/bbockelm/golang-htcondor/config"
+	condorconfig "github.com/htcondor/golang-htcondor/config"
 )
 
 // testCondorConfig builds an in-memory HTCondor configuration, so tests do not

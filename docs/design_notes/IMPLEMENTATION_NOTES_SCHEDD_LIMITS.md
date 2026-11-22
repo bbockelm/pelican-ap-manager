@@ -9,7 +9,7 @@ This implementation adds support for golang-htcondor v0.0.6's schedd startup lim
 ### 1. Dependency Update
 
 **File**: `go.mod`
-- Updated `github.com/bbockelm/golang-htcondor` from v0.0.5 to v0.0.6
+- Updated `github.com/htcondor/golang-htcondor` from v0.0.5 to v0.0.6
 - This new version adds the `CreateStartupLimit`, `QueryStartupLimits` APIs
 
 ### 2. Control Algorithm Enhancements

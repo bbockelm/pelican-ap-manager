@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	htcondorlogging "github.com/bbockelm/golang-htcondor/logging"
+	htcondorlogging "github.com/htcondor/golang-htcondor/logging"
 	"github.com/bbockelm/pelican-ap-manager/internal/condor"
 	"github.com/bbockelm/pelican-ap-manager/internal/director"
 	"github.com/bbockelm/pelican-ap-manager/internal/state"
