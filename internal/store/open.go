@@ -3,7 +3,7 @@ package store
 import (
 	"fmt"
 
-	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/config"
 )
 
 // Options selects and configures a rule store backend.

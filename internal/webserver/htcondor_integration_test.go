@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	htcondorconfig "github.com/bbockelm/golang-htcondor/config"
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver"
+	htcondorconfig "github.com/htcondor/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver"
 )
 
 // TestHTCondorHandlerIntegration verifies that golang-htcondor's HTTP handler
@@ -159,10 +159,15 @@ serverReady:
 
 		body, _ := io.ReadAll(resp.Body)
 
-		if resp.StatusCode != http.StatusOK {
+		// Ping answers as the CALLER, so unauthenticated it is a 401. It used to
+		// answer for the service account -- a queue superuser on an access point --
+		// which told anyone who could reach the port who the daemon is and what it
+		// may do. Accept 200 or 401, as the /api/v1/jobs subtest below does: what is
+		// under test here is that the handler is mounted and serving this path.
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusUnauthorized {
 			t.Logf("Response status: %d", resp.StatusCode)
 			t.Logf("Response body: %s", string(body))
-			t.Fatalf("Expected status 200, got %d", resp.StatusCode)
+			t.Fatalf("Expected status 200 or 401, got %d", resp.StatusCode)
 		}
 
 		// Verify it's a valid JSON response
@@ -171,7 +176,7 @@ serverReady:
 			t.Fatalf("Failed to parse ping response: %v", err)
 		}
 
-		t.Logf("✓ HTCondor API /api/v1/ping responded: %s", string(body))
+		t.Logf("✓ HTCondor API /api/v1/ping responded %d: %s", resp.StatusCode, string(body))
 	})
 
 	// Test /api/v1/jobs endpoint (from golang-htcondor)

@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	condorconfig "github.com/bbockelm/golang-htcondor/config"
+	condorconfig "github.com/htcondor/golang-htcondor/config"
 )
 
 // Configuration macros for the web server. They keep the PELICAN_MANAGER_

@@ -12,7 +12,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	condorconfig "github.com/bbockelm/golang-htcondor/config"
+	condorconfig "github.com/htcondor/golang-htcondor/config"
 	"github.com/bbockelm/pelican-ap-manager/internal/condor"
 	"github.com/bbockelm/pelican-ap-manager/internal/config"
 	"github.com/bbockelm/pelican-ap-manager/internal/ratelimit"
