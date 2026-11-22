@@ -5,10 +5,10 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
-	condorconfig "github.com/htcondor/golang-htcondor/config"
 	"github.com/bbockelm/pelican-ap-manager/internal/control"
 	"github.com/bbockelm/pelican-ap-manager/internal/state"
 	"github.com/google/go-cmp/cmp"
+	condorconfig "github.com/htcondor/golang-htcondor/config"
 )
 
 // populatedSections mirrors what a running daemon holds: every section

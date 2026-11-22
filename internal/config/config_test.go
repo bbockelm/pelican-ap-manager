@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	condorconfig "github.com/htcondor/golang-htcondor/config"
 	"github.com/bbockelm/pelican-ap-manager/internal/ratelimit"
+	condorconfig "github.com/htcondor/golang-htcondor/config"
 )
 
 // newCondorConfig builds an in-memory HTCondor configuration with the given
