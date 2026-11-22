@@ -12,11 +12,11 @@ import (
 	"text/tabwriter"
 	"time"
 
-	condorconfig "github.com/htcondor/golang-htcondor/config"
 	"github.com/bbockelm/pelican-ap-manager/internal/condor"
 	"github.com/bbockelm/pelican-ap-manager/internal/config"
 	"github.com/bbockelm/pelican-ap-manager/internal/ratelimit"
 	"github.com/bbockelm/pelican-ap-manager/internal/store"
+	condorconfig "github.com/htcondor/golang-htcondor/config"
 )
 
 // The inspection commands exist because HTCondor ships no way to see this.

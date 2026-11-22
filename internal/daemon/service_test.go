@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	htcondorlogging "github.com/htcondor/golang-htcondor/logging"
 	"github.com/bbockelm/pelican-ap-manager/internal/condor"
 	"github.com/bbockelm/pelican-ap-manager/internal/director"
 	"github.com/bbockelm/pelican-ap-manager/internal/state"
+	htcondorlogging "github.com/htcondor/golang-htcondor/logging"
 )
 
 // testLogger creates a logging.Logger that discards output for testing

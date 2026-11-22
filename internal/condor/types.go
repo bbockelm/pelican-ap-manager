@@ -5,8 +5,8 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
-	htcondor "github.com/htcondor/golang-htcondor"
 	"github.com/bbockelm/pelican-ap-manager/internal/state"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // TransferRecord represents a single transfer attempt drawn from the HTCondor epoch history.

@@ -9,9 +9,9 @@ import (
 	"sync"
 
 	"github.com/PelicanPlatform/classad/classad"
+	"github.com/bbockelm/pelican-ap-manager/internal/condor"
 	"github.com/htcondor/golang-htcondor/classadlog"
 	htcondorlogging "github.com/htcondor/golang-htcondor/logging"
-	"github.com/bbockelm/pelican-ap-manager/internal/condor"
 )
 
 // Key uniquely identifies a job in the queue.

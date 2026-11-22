@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/htcondor/golang-htcondor/config"
 	"github.com/bbockelm/pelican-ap-manager/internal/state"
+	"github.com/htcondor/golang-htcondor/config"
 )
 
 // StateStore persists the daemon's own working state: the epoch cursors, the

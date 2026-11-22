@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	condorconfig "github.com/htcondor/golang-htcondor/config"
 	"github.com/bbockelm/pelican-ap-manager/internal/ratelimit"
+	condorconfig "github.com/htcondor/golang-htcondor/config"
 )
 
 // Config holds runtime options for the pelican-man daemon.

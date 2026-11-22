@@ -13,11 +13,11 @@ import (
 	"github.com/PelicanPlatform/classad/dbrpc"
 	cedarclient "github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/security"
+	"github.com/bbockelm/pelican-ap-manager/internal/dbaddr"
+	"github.com/bbockelm/pelican-ap-manager/internal/state"
 	htcondor "github.com/htcondor/golang-htcondor"
 	"github.com/htcondor/golang-htcondor/config"
 	"github.com/htcondor/htcondordb/command"
-	"github.com/bbockelm/pelican-ap-manager/internal/dbaddr"
-	"github.com/bbockelm/pelican-ap-manager/internal/state"
 )
 
 // The archive tables htcondordb's schedd-sync writes into (see its scheddsync
