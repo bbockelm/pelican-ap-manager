@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	condorconfig "github.com/bbockelm/golang-htcondor/config"
+	htcondor "github.com/htcondor/golang-htcondor"
+	condorconfig "github.com/htcondor/golang-htcondor/config"
 )
 
 // TestPelicanIntegration boots a minimal local HTCondor, runs pelican-man, submits
@@ -544,7 +544,12 @@ func submitSleepJob(ctx context.Context, workDir, collectorAddr, scheddAddr stri
 		return 0, fmt.Errorf("write job script: %w", err)
 	}
 
-	submit := fmt.Sprintf("executable = job.sh\n"+
+	// executable is an ABSOLUTE path on purpose. condor_submit resolves a
+	// relative executable against the submitting process's working directory,
+	// not against initialdir -- and under `go test` that directory is the
+	// package source dir, not workDir. Naming it "job.sh" made the shadow look
+	// for integration/job.sh and hold the job on a transfer error.
+	submit := fmt.Sprintf("executable = %s\n"+
 		"output = job.out\n"+
 		"error = job.err\n"+
 		"log = job.log\n"+
@@ -552,7 +557,7 @@ func submitSleepJob(ctx context.Context, workDir, collectorAddr, scheddAddr stri
 		"should_transfer_files = YES\n"+
 		"when_to_transfer_output = ON_EXIT\n"+
 		"leave_in_queue = True\n"+
-		"queue\n", workDir)
+		"queue\n", scriptPath, workDir)
 
 	if scheddAddr == "" {
 		col := htcondor.NewCollector(collectorAddr)
@@ -615,15 +620,25 @@ func waitForJobCompletion(ctx context.Context, scheddAddr, collectorAddr string,
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == 0", clusterID)
 	deadline := time.Now().Add(90 * time.Second)
 
+	// Remember why we are still waiting. A query that fails every time and a job
+	// that never advances both end up at the deadline below, and without this the
+	// message cannot tell them apart.
+	lastErr := error(nil)
+	lastStatus := int64(-1)
+
 	for time.Now().Before(deadline) {
 		queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		ads, err := schedd.Query(queryCtx, constraint, []string{"JobStatus", "ClusterId", "ProcId"})
 		cancel()
-		if err == nil {
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = nil
 			if len(ads) == 0 {
 				return fmt.Errorf("job %d disappeared from schedd queue", clusterID)
 			}
 			if st, ok := ads[0].EvaluateAttrInt("JobStatus"); ok {
+				lastStatus = st
 				if st == 4 {
 					return nil
 				}
@@ -632,7 +647,11 @@ func waitForJobCompletion(ctx context.Context, scheddAddr, collectorAddr string,
 		time.Sleep(1 * time.Second)
 	}
 
-	return fmt.Errorf("job %d did not reach completed state in time", clusterID)
+	if lastErr != nil {
+		return fmt.Errorf("job %d: every schedd query failed, last error: %w", clusterID, lastErr)
+	}
+	return fmt.Errorf("job %d did not reach completed state in time (last JobStatus seen: %d)",
+		clusterID, lastStatus)
 }
 
 type jobMirrorSnapshot struct {

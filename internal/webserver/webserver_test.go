@@ -17,7 +17,7 @@ import (
 	"testing"
 
 	"github.com/PelicanPlatform/classad/classad"
-	htcondorlogging "github.com/bbockelm/golang-htcondor/logging"
+	htcondorlogging "github.com/htcondor/golang-htcondor/logging"
 )
 
 // createTestLogger creates a logger for testing that doesn't fail

@@ -65,7 +65,7 @@ jobs:
           # module graph -- no second checkout. Built here rather than in the
           # test because the test runs as root and `go build` as root would want
           # a root-owned module cache.
-          go build -o bin/htcondordb github.com/bbockelm/htcondordb/cmd/htcondordb
+          go build -o bin/htcondordb github.com/htcondor/htcondordb/cmd/htcondordb
 
       # The tests that can run as root, named explicitly.
       #

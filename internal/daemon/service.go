@@ -15,9 +15,6 @@ import (
 	"sync"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	condorconfig "github.com/bbockelm/golang-htcondor/config"
-	htcondorlogging "github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/pelican-ap-manager/internal/condor"
 	"github.com/bbockelm/pelican-ap-manager/internal/config"
 	"github.com/bbockelm/pelican-ap-manager/internal/control"
@@ -27,6 +24,9 @@ import (
 	"github.com/bbockelm/pelican-ap-manager/internal/state"
 	"github.com/bbockelm/pelican-ap-manager/internal/stats"
 	"github.com/bbockelm/pelican-ap-manager/internal/store"
+	htcondor "github.com/htcondor/golang-htcondor"
+	condorconfig "github.com/htcondor/golang-htcondor/config"
+	htcondorlogging "github.com/htcondor/golang-htcondor/logging"
 )
 
 const (

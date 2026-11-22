@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
-	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/pelican-ap-manager/internal/condor"
 	"github.com/bbockelm/pelican-ap-manager/internal/state"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // mockCondorClient implements CondorClient by reading from pre-seeded test data files.

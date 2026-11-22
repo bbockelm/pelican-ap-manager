@@ -11,11 +11,11 @@ import (
 	"github.com/PelicanPlatform/classad/dbrpc"
 	cedarclient "github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/security"
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/config"
-	"github.com/bbockelm/htcondordb/command"
 	"github.com/bbockelm/pelican-ap-manager/internal/dbaddr"
 	"github.com/bbockelm/pelican-ap-manager/internal/ratelimit"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/config"
+	"github.com/htcondor/htcondordb/command"
 )
 
 // DefaultRuleTable is the htcondordb table holding pelican-man's rate rules.
