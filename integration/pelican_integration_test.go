@@ -544,7 +544,12 @@ func submitSleepJob(ctx context.Context, workDir, collectorAddr, scheddAddr stri
 		return 0, fmt.Errorf("write job script: %w", err)
 	}
 
-	submit := fmt.Sprintf("executable = job.sh\n"+
+	// executable is an ABSOLUTE path on purpose. condor_submit resolves a
+	// relative executable against the submitting process's working directory,
+	// not against initialdir -- and under `go test` that directory is the
+	// package source dir, not workDir. Naming it "job.sh" made the shadow look
+	// for integration/job.sh and hold the job on a transfer error.
+	submit := fmt.Sprintf("executable = %s\n"+
 		"output = job.out\n"+
 		"error = job.err\n"+
 		"log = job.log\n"+
@@ -552,7 +557,7 @@ func submitSleepJob(ctx context.Context, workDir, collectorAddr, scheddAddr stri
 		"should_transfer_files = YES\n"+
 		"when_to_transfer_output = ON_EXIT\n"+
 		"leave_in_queue = True\n"+
-		"queue\n", workDir)
+		"queue\n", scriptPath, workDir)
 
 	if scheddAddr == "" {
 		col := htcondor.NewCollector(collectorAddr)
