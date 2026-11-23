@@ -37,8 +37,9 @@ updates:
     ignore:
       - dependency-name: "github.com/PelicanPlatform/classad*"
       - dependency-name: "github.com/bbockelm/cedar"
-      - dependency-name: "github.com/bbockelm/golang-htcondor*"
-      - dependency-name: "github.com/bbockelm/htcondordb*"
+      - dependency-name: "github.com/htcondor/cedar"
+      - dependency-name: "github.com/htcondor/golang-htcondor*"
+      - dependency-name: "github.com/htcondor/htcondordb*"
     commit-message:
       prefix: "deps"
     labels:
