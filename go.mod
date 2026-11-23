@@ -26,8 +26,8 @@ require (
 	//     github.com/htcondor/htcondordb/cmd/htcondordb
 	// then re-run it without -mod=mod to confirm it builds clean.
 	github.com/htcondor/htcondordb v0.28.0
-	github.com/jellydator/ttlcache/v3 v3.3.0
-	github.com/klauspost/compress v1.20.3
+	github.com/jellydator/ttlcache/v3 v3.4.1
+	github.com/klauspost/compress v1.20.5
 	golang.org/x/crypto v0.59.0
 	golang.org/x/sys v0.50.0
 )
